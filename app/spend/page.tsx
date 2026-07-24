@@ -32,10 +32,20 @@ interface DailyRow {
   acos: string | null
 }
 
+interface CampaignRow {
+  campaign_name: string
+  country_code: string
+  currency_code: string
+  total_cost: string
+  total_clicks: string
+  total_sales: string
+  acos: string | null
+}
+
 export default async function SpendPage() {
   const sql = neon(process.env.DATABASE_URL!)
 
-  const [rows, daily] = (await Promise.all([
+  const [rows, daily, campaigns] = (await Promise.all([
     sql`
       SELECT
         ap.country_code,
@@ -64,7 +74,24 @@ export default async function SpendPage() {
       GROUP BY ap.country_code, ap.currency_code, acd.date
       ORDER BY acd.date DESC, ap.country_code
     `,
-  ])) as unknown as [ReportRow[], DailyRow[]]
+    sql`
+      SELECT
+        coalesce(c.name, d.campaign_id)     AS campaign_name,
+        p.country_code,
+        p.currency_code,
+        sum(d.cost)::text                   AS total_cost,
+        sum(d.clicks)::text                 AS total_clicks,
+        sum(d.sales_14d)::text              AS total_sales,
+        (sum(d.cost) / nullif(sum(d.sales_14d), 0))::text AS acos
+      FROM amazon_campaign_daily d
+      JOIN amazon_profiles p USING (profile_id)
+      LEFT JOIN amazon_campaigns c
+        ON c.campaign_id = d.campaign_id AND c.profile_id = d.profile_id
+      GROUP BY coalesce(c.name, d.campaign_id), p.country_code, p.currency_code
+      ORDER BY sum(d.cost) DESC
+      LIMIT 20
+    `,
+  ])) as unknown as [ReportRow[], DailyRow[], CampaignRow[]]
 
   return (
     <div style={{ fontFamily: 'monospace', padding: '1.5rem 2rem' }}>
@@ -113,9 +140,9 @@ export default async function SpendPage() {
       <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>Daily Totals</h2>
 
       {daily.length === 0 ? (
-        <p style={{ color: '#888' }}>No data landed yet.</p>
+        <p style={{ color: '#888', marginBottom: '2.5rem' }}>No data landed yet.</p>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
+        <div style={{ overflowX: 'auto', marginBottom: '2.5rem' }}>
           <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
             <thead>
               <tr>
@@ -142,6 +169,46 @@ export default async function SpendPage() {
                     <td style={tdR}>{cost} {r.currency_code}</td>
                     <td style={tdR}>{r.total_clicks}</td>
                     <td style={tdR}>{r.total_impressions}</td>
+                    <td style={tdR}>{sales} {r.currency_code}</td>
+                    <td style={tdR}>{acos}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>Top Campaigns by Spend</h2>
+
+      {campaigns.length === 0 ? (
+        <p style={{ color: '#888' }}>No data landed yet.</p>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+            <thead>
+              <tr>
+                <th style={th}>Campaign</th>
+                <th style={th}>Country</th>
+                <th style={th}>Cost (currency)</th>
+                <th style={th}>Clicks</th>
+                <th style={th}>Sales (currency)</th>
+                <th style={th}>ACOS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {campaigns.map((r, i) => {
+                const acos = r.acos != null
+                  ? `${(parseFloat(r.acos) * 100).toFixed(1)}%`
+                  : '—'
+                const cost = parseFloat(r.total_cost).toFixed(2)
+                const sales = parseFloat(r.total_sales).toFixed(2)
+                return (
+                  <tr key={i}>
+                    <td style={td}>{r.campaign_name}</td>
+                    <td style={td}>{r.country_code}</td>
+                    <td style={tdR}>{cost} {r.currency_code}</td>
+                    <td style={tdR}>{r.total_clicks}</td>
                     <td style={tdR}>{sales} {r.currency_code}</td>
                     <td style={tdR}>{acos}</td>
                   </tr>
