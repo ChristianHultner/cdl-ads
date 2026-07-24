@@ -5,7 +5,8 @@ export default function Home() {
   return (
     <div className={styles.page}>
       <nav style={{ padding: '1rem 2rem', borderBottom: '1px solid #eee' }}>
-        <a href="/accounts" style={{ fontFamily: 'monospace' }}>Accounts</a>
+        <a href="/accounts" style={{ fontFamily: 'monospace' }}>Accounts</a>{' · '}
+        <a href="/campaigns" style={{ fontFamily: 'monospace' }}>Campaigns</a>
       </nav>
       <main className={styles.main}>
         <Image
