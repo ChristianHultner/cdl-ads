@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic'
+
 import { neon } from '@neondatabase/serverless'
 
 const cell: React.CSSProperties = { border: '1px solid #ccc', padding: '4px 8px' }
