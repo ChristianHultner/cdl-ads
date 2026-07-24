@@ -52,21 +52,46 @@ if (!refreshToken) throw new Error(`Env var ${env_var_name} not set`);
 const { LWA_CLIENT_ID, LWA_CLIENT_SECRET } = process.env;
 if (!LWA_CLIENT_ID || !LWA_CLIENT_SECRET) throw new Error('LWA_CLIENT_ID / LWA_CLIENT_SECRET not set');
 
-const tokenRes = await fetch('https://api.amazon.com/auth/o2/token', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  body: new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: LWA_CLIENT_ID,
-    client_secret: LWA_CLIENT_SECRET,
-  }),
-});
+// ---------------------------------------------------------------------------
+// Helper: fetch with 30 s AbortController timeout
+// ---------------------------------------------------------------------------
+async function fetchWithTimeout(url, opts, label) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 30_000);
+  try {
+    return await fetch(url, { ...opts, signal: ac.signal });
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      console.error(`ABORTED: ${label}`);
+      process.exit(1);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+console.log('minting token…');
+const tokenRes = await fetchWithTimeout(
+  'https://api.amazon.com/auth/o2/token',
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: LWA_CLIENT_ID,
+      client_secret: LWA_CLIENT_SECRET,
+    }),
+  },
+  'LWA token mint',
+);
 if (!tokenRes.ok) {
   const body = await tokenRes.text();
   throw new Error(`LWA token error ${tokenRes.status}: ${body}`);
 }
 const { access_token: accessToken } = await tokenRes.json();
+console.log(`token ok (len ${accessToken.length})`);
 
 // ---------------------------------------------------------------------------
 // Paginate POST /sp/campaigns/list (read-only)
@@ -76,21 +101,35 @@ let nextToken = undefined;
 let pagesFetched = 0;
 const allCampaigns = [];
 
+const PAGE_CAP = 50;
+
 do {
+  if (pagesFetched >= PAGE_CAP) {
+    console.error('PAGE CAP HIT');
+    process.exit(1);
+  }
+
+  const pageNum = pagesFetched + 1;
+  console.log(`page ${pageNum}: requesting…`);
+
   const body = { maxResults: 100 };
   if (nextToken) body.nextToken = nextToken;
 
-  const res = await fetch(`${host}/sp/campaigns/list`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Amazon-Advertising-API-ClientId': LWA_CLIENT_ID,
-      'Amazon-Advertising-API-Scope': String(profileId),
-      'Content-Type': MEDIA_TYPE,
-      'Accept': MEDIA_TYPE,
+  const res = await fetchWithTimeout(
+    `${host}/sp/campaigns/list`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Amazon-Advertising-API-ClientId': LWA_CLIENT_ID,
+        'Amazon-Advertising-API-Scope': String(profileId),
+        'Content-Type': MEDIA_TYPE,
+        'Accept': MEDIA_TYPE,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    `campaigns/list page ${pageNum}`,
+  );
 
   if (!res.ok) {
     const errBody = await res.text();
@@ -102,6 +141,7 @@ do {
   const campaigns = data.campaigns ?? [];
   allCampaigns.push(...campaigns);
   nextToken = data.nextToken ?? undefined;
+  console.log(`page ${pageNum}: got ${campaigns.length} campaigns, nextToken: ${nextToken ? 'yes' : 'no'}`);
 } while (nextToken);
 
 // ---------------------------------------------------------------------------
