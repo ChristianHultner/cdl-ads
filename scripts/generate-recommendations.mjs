@@ -83,23 +83,54 @@ const currSym = CURRENCY_SYMBOL[currencyCode] ?? `${currencyCode}\u202f`;
 const { rows: aggRows } = await pool.query(
   `SELECT
        search_term,
+       campaign_id,
+       ad_group_id,
        SUM(cost)                                     AS spend,
        SUM(clicks)                                   AS clicks,
        SUM(purchases_14d)                            AS orders,
        SUM(sales_14d)                                AS sales,
-       BOOL_OR(match_type = 'TARGETING_EXPRESSION')  AS is_targeting,
-       ARRAY_AGG(DISTINCT campaign_id)               AS campaign_ids
+       BOOL_OR(match_type = 'TARGETING_EXPRESSION')  AS is_targeting
      FROM amazon_search_term_daily
     WHERE profile_id = $1
       AND date >= $2
       AND date <= $3
-    GROUP BY search_term`,
+    GROUP BY search_term, campaign_id, ad_group_id`,
   [profileId, windowStart, windowEnd],
 );
 
 console.log(
-  `Aggregated ${aggRows.length} search term(s) in window ${windowStart} → ${windowEnd}.`,
+  `Aggregated ${aggRows.length} row(s) (term×campaign×adgroup) in window ${windowStart} → ${windowEnd}.`,
 );
+
+// ── Roll up to term-level totals + build placements list ─────────────────────
+const termMap = new Map(); // search_term → { spend, clicks, orders, sales, isTargeting, placements }
+for (const row of aggRows) {
+  const spend  = Number(row.spend);
+  const clicks = Number(row.clicks);
+  const orders = Number(row.orders);
+  const sales  = Number(row.sales);
+
+  if (!termMap.has(row.search_term)) {
+    termMap.set(row.search_term, {
+      search_term: row.search_term,
+      spend:       0,
+      clicks:      0,
+      orders:      0,
+      sales:       0,
+      isTargeting: false,
+      placements:  [],
+    });
+  }
+  const entry = termMap.get(row.search_term);
+  entry.spend       += spend;
+  entry.clicks      += clicks;
+  entry.orders      += orders;
+  entry.sales       += sales;
+  entry.isTargeting  = entry.isTargeting || Boolean(row.is_targeting);
+  entry.placements.push({ campaign_id: row.campaign_id, ad_group_id: row.ad_group_id, spend, clicks, orders, sales });
+}
+const termRows = [...termMap.values()];
+console.log(`Rolled up to ${termRows.length} unique search term(s).`);
 
 // ── 4. CANDIDATES ─────────────────────────────────────────────────────────────
 // Priority order: NEGATE_TERM → PROMOTE_TERM → PROMOTE_ASIN.
@@ -119,12 +150,12 @@ const {
 
 const candidates = [];
 
-for (const row of aggRows) {
-  const spend       = Number(row.spend);
-  const clicks      = Number(row.clicks);
-  const orders      = Number(row.orders);
-  const sales       = Number(row.sales);
-  const isTargeting = Boolean(row.is_targeting);
+for (const row of termRows) {
+  const spend       = row.spend;
+  const clicks      = row.clicks;
+  const orders      = row.orders;
+  const sales       = row.sales;
+  const isTargeting = row.isTargeting;
   // acos = null when sales = 0 (avoid ÷0; don't promote what we can't measure)
   const acos        = sales > 0 ? spend / sales : null;
 
@@ -151,13 +182,13 @@ for (const row of aggRows) {
   if (recType !== null) {
     candidates.push({
       recType,
-      searchTerm:  row.search_term,
+      searchTerm: row.search_term,
       spend,
       clicks,
       orders,
       sales,
       acos,
-      campaignIds: row.campaign_ids,
+      placements: row.placements,
     });
   }
 }
@@ -222,16 +253,21 @@ if (candidates.length > 0) {
         `${acosPct}% ACoS (${spendFmt} spend) in ${win}.`;
     }
 
+    const primaryPlacement = c.placements.reduce(
+      (max, p) => (p.spend > max.spend ? p : max),
+      c.placements[0],
+    );
     const evidence = {
-      window_start: windowStart,
-      window_end:   windowEnd,
-      spend:        c.spend,
-      clicks:       c.clicks,
-      orders:       c.orders,
-      sales:        c.sales,
-      acos:         c.acos,
-      campaign_ids: c.campaignIds,
-      params_used:  params,
+      window_start:      windowStart,
+      window_end:        windowEnd,
+      spend:             c.spend,
+      clicks:            c.clicks,
+      orders:            c.orders,
+      sales:             c.sales,
+      acos:              c.acos,
+      placements:        c.placements,
+      primary_placement: primaryPlacement,
+      params_used:       params,
     };
 
     await pool.query(
