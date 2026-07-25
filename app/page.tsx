@@ -1,72 +1,255 @@
-import Image from "next/image";
-import styles from "./page.module.css";
+export const dynamic = 'force-dynamic'
 
-export default function Home() {
+import { neon } from '@neondatabase/serverless'
+
+const th: React.CSSProperties = {
+  border: '1px solid #ccc',
+  padding: '6px 10px',
+  background: '#f0f0f0',
+  textAlign: 'left',
+  whiteSpace: 'nowrap',
+}
+const td: React.CSSProperties = {
+  border: '1px solid #ccc',
+  padding: '6px 10px',
+  whiteSpace: 'nowrap',
+}
+const tdR: React.CSSProperties = { ...td, textAlign: 'right' }
+
+interface MarketRow {
+  profile_id: string
+  country_code: string
+  currency_code: string
+  spend_7d: string
+  spend_30d: string
+  sales_30d: string
+  last_date: string
+}
+
+interface ProfileSummary {
+  profile_id: string
+  country_code: string
+  currency_code: string
+}
+
+interface CampaignCount {
+  profile_id: string
+  total_campaigns: string
+  enabled_campaigns: string
+}
+
+interface RecCount {
+  profile_id: string
+  draft_count: string
+  approved_count: string
+  pushed_count: string
+}
+
+interface AcosParam {
+  scope: string
+  value: string
+}
+
+interface EstateTotals {
+  currency_code: string
+  spend_7d: string
+  spend_30d: string
+}
+
+export default async function HomePage() {
+  const sql = neon(process.env.DATABASE_URL!)
+
+  const [activeMarkets, allProfiles, campaignCounts, recCounts, acosParams, estateTotals] =
+    (await Promise.all([
+      // Active profiles: any cost > 0 in last 30 days
+      sql`
+        SELECT
+          ap.profile_id::text,
+          ap.country_code,
+          ap.currency_code,
+          sum(CASE WHEN acd.date >= CURRENT_DATE - INTERVAL '7 days'
+                   THEN acd.cost ELSE 0 END)::text  AS spend_7d,
+          sum(acd.cost)::text                        AS spend_30d,
+          sum(acd.sales_14d)::text                   AS sales_30d,
+          max(acd.date)::text                        AS last_date
+        FROM amazon_campaign_daily acd
+        JOIN amazon_profiles ap USING (profile_id)
+        WHERE acd.date >= CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY ap.profile_id, ap.country_code, ap.currency_code
+        HAVING sum(acd.cost) > 0
+        ORDER BY sum(acd.cost) DESC
+      `,
+      // All profiles — used to identify dormant ones
+      sql`
+        SELECT profile_id::text, country_code, currency_code
+        FROM amazon_profiles
+        ORDER BY profile_id
+      `,
+      // Campaign counts per profile (all states)
+      sql`
+        SELECT
+          profile_id::text,
+          count(*)::text                                        AS total_campaigns,
+          (count(*) FILTER (WHERE state = 'enabled'))::text    AS enabled_campaigns
+        FROM amazon_campaigns
+        GROUP BY profile_id
+      `,
+      // Recommendation counts per profile
+      sql`
+        SELECT
+          profile_id::text,
+          (count(*) FILTER (WHERE status = 'DRAFT'))::text    AS draft_count,
+          (count(*) FILTER (WHERE status = 'APPROVED'))::text AS approved_count,
+          (count(*) FILTER (WHERE status = 'PUSHED'))::text   AS pushed_count
+        FROM recommendations
+        GROUP BY profile_id
+      `,
+      // target_acos: GLOBAL + any profile-scope overrides
+      sql`
+        SELECT scope, value::text
+        FROM engine_parameters
+        WHERE key = 'target_acos'
+      `,
+      // Estate totals by currency — NEVER cross-currency
+      sql`
+        SELECT
+          ap.currency_code,
+          sum(CASE WHEN acd.date >= CURRENT_DATE - INTERVAL '7 days'
+                   THEN acd.cost ELSE 0 END)::text AS spend_7d,
+          sum(acd.cost)::text                       AS spend_30d
+        FROM amazon_campaign_daily acd
+        JOIN amazon_profiles ap USING (profile_id)
+        WHERE acd.date >= CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY ap.currency_code
+        ORDER BY ap.currency_code
+      `,
+    ])) as unknown as [
+      MarketRow[],
+      ProfileSummary[],
+      CampaignCount[],
+      RecCount[],
+      AcosParam[],
+      EstateTotals[],
+    ]
+
+  const activeIds = new Set(activeMarkets.map(m => m.profile_id))
+  const dormant   = allProfiles.filter(p => !activeIds.has(p.profile_id))
+
+  const campMap = new Map(campaignCounts.map(c => [c.profile_id, c]))
+  const recMap  = new Map(recCounts.map(r => [r.profile_id, r]))
+  const acosMap = new Map(acosParams.map(p => [p.scope, parseFloat(p.value)]))
+  const globalTarget = acosMap.get('GLOBAL') ?? 0.30
+
+  function resolveTarget(pid: string): number {
+    return acosMap.get(pid) ?? globalTarget
+  }
+
+  function fmt(v: string): string {
+    return parseFloat(v).toFixed(2)
+  }
+
+  function computeAcos(spend: string, sales: string): string | null {
+    const sa = parseFloat(sales)
+    if (!sa) return null
+    return ((parseFloat(spend) / sa) * 100).toFixed(1)
+  }
+
+  function isStale(dateStr: string): boolean {
+    const d   = new Date(dateStr)
+    const cut = new Date()
+    cut.setDate(cut.getDate() - 3)
+    return d < cut
+  }
+
   return (
-    <div className={styles.page}>
-      <nav style={{ padding: '1rem 2rem', borderBottom: '1px solid #eee' }}>
-        <a href="/accounts"        style={{ fontFamily: 'monospace' }}>Accounts</a>{' · '}
-        <a href="/campaigns"       style={{ fontFamily: 'monospace' }}>Campaigns</a>{' · '}
-        <a href="/spend"           style={{ fontFamily: 'monospace' }}>Spend</a>{' · '}
-        <a href="/recommendations" style={{ fontFamily: 'monospace' }}>Recommendations</a>
+    <div style={{ fontFamily: 'monospace', padding: '1.5rem 2rem' }}>
+      <nav style={{ marginBottom: '1.5rem', borderBottom: '1px solid #eee', paddingBottom: '0.75rem' }}>
+        <a href="/accounts">Accounts</a>{' · '}
+        <a href="/campaigns">Campaigns</a>{' · '}
+        <a href="/spend">Spend</a>{' · '}
+        <a href="/recommendations">Recommendations</a>
       </nav>
-      <main className={styles.main}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className={styles.intro}>
-          <h1>To get started, edit the page.tsx file.</h1>
-          <p>
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className={styles.ctas}>
-          <a
-            className={styles.primary}
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className={styles.logo}
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className={styles.secondary}
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+
+      <h1 style={{ fontSize: '1.25rem', marginBottom: '1rem' }}>Estate Overview</h1>
+
+      <div style={{ overflowX: 'auto', marginBottom: '1.5rem' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+          <thead>
+            <tr>
+              <th style={th}>Market</th>
+              <th style={th}>Spend 7d / 30d</th>
+              <th style={th}>Sales 30d</th>
+              <th style={th}>ACOS 30d</th>
+              <th style={th}>Campaigns</th>
+              <th style={th}>Recs D/A/P</th>
+              <th style={th}>Last Data</th>
+            </tr>
+          </thead>
+          <tbody>
+            {activeMarkets.map(m => {
+              const target  = resolveTarget(m.profile_id)
+              const acosStr = computeAcos(m.spend_30d, m.sales_30d)
+              const acosNum = acosStr != null ? parseFloat(acosStr) : null
+              const acosClr = acosNum != null
+                ? (acosNum <= target * 100 ? 'green' : 'red')
+                : undefined
+              const camps = campMap.get(m.profile_id)
+              const recs  = recMap.get(m.profile_id)
+              const stale = isStale(m.last_date)
+              return (
+                <tr key={m.profile_id}>
+                  <td style={td}>{m.country_code} ({m.currency_code})</td>
+                  <td style={tdR}>
+                    {fmt(m.spend_7d)} / {fmt(m.spend_30d)} {m.currency_code}
+                  </td>
+                  <td style={tdR}>{fmt(m.sales_30d)} {m.currency_code}</td>
+                  <td style={{ ...tdR, color: acosClr }}>
+                    {acosStr != null ? `${acosStr}%` : '—'}
+                    {acosStr != null && (
+                      <span style={{ color: '#999', fontSize: '0.78em', marginLeft: '0.4em' }}>
+                        tgt {(target * 100).toFixed(0)}%
+                      </span>
+                    )}
+                  </td>
+                  <td style={tdR}>
+                    {camps
+                      ? `${camps.total_campaigns} (${camps.enabled_campaigns} en)`
+                      : '—'}
+                  </td>
+                  <td style={tdR}>
+                    {recs
+                      ? `${recs.draft_count}/${recs.approved_count}/${recs.pushed_count}`
+                      : '0/0/0'}
+                  </td>
+                  <td style={{ ...td, color: stale ? 'red' : undefined }}>
+                    {m.last_date}
+                  </td>
+                </tr>
+              )
+            })}
+            {dormant.length > 0 && (
+              <tr>
+                <td colSpan={7} style={{ ...td, color: '#aaa', fontStyle: 'italic' }}>
+                  Dormant (no spend last 30d):{' '}
+                  {dormant.map(d => `${d.country_code} (${d.currency_code})`).join(', ')}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ fontSize: '0.85rem', color: '#555' }}>
+        <strong>Estate totals (30d window):</strong>{' '}
+        {estateTotals.length === 0
+          ? 'No data.'
+          : estateTotals.map((e, i) => (
+              <span key={e.currency_code}>
+                {i > 0 && ' · '}
+                {e.currency_code}&nbsp;{fmt(e.spend_7d)}&nbsp;/&nbsp;{fmt(e.spend_30d)}&nbsp;(7d/30d spend)
+              </span>
+            ))}
+      </div>
     </div>
-  );
+  )
 }
