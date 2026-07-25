@@ -3,28 +3,6 @@ export const dynamic = 'force-dynamic'
 import { neon } from '@neondatabase/serverless'
 import { approveRecommendation, rejectRecommendation } from './actions'
 
-const th: React.CSSProperties = {
-  border: '1px solid #ccc', padding: '6px 10px',
-  background: '#f0f0f0', textAlign: 'left', whiteSpace: 'nowrap',
-}
-const td: React.CSSProperties = {
-  border: '1px solid #ccc', padding: '6px 10px', whiteSpace: 'nowrap',
-}
-const tdWrap: React.CSSProperties = {
-  border: '1px solid #ccc', padding: '6px 10px',
-  maxWidth: '360px', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-}
-const btnApprove: React.CSSProperties = {
-  cursor: 'pointer', padding: '2px 10px', fontFamily: 'monospace',
-  fontSize: '0.8rem', background: '#d4edda',
-  border: '1px solid #28a745', borderRadius: '3px',
-}
-const btnReject: React.CSSProperties = {
-  cursor: 'pointer', padding: '2px 10px', fontFamily: 'monospace',
-  fontSize: '0.8rem', background: '#f8d7da',
-  border: '1px solid #dc3545', borderRadius: '3px',
-}
-
 interface RecRow {
   id: number
   rec_type: string
@@ -33,6 +11,12 @@ interface RecRow {
   status: string
   created_at: string
   country_code: string
+}
+
+function statusBadge(status: string): string {
+  if (status === 'APPROVED' || status === 'PUSHED') return 'badge badge-ok'
+  if (status === 'REJECTED') return 'badge badge-warn'
+  return 'badge badge-muted'
 }
 
 export default async function RecommendationsPage() {
@@ -72,74 +56,64 @@ export default async function RecommendationsPage() {
   }
 
   return (
-    <div style={{ fontFamily: 'monospace', padding: '1.5rem 2rem' }}>
-      <nav style={{
-        marginBottom: '1.5rem',
-        borderBottom: '1px solid #eee',
-        paddingBottom: '0.75rem',
-      }}>
-        <a href="/" style={{ marginRight: '1rem' }}>← Home</a>
-        <a href="/accounts"  style={{ marginRight: '1rem' }}>Accounts</a>
-        <a href="/campaigns" style={{ marginRight: '1rem' }}>Campaigns</a>
-        <a href="/spend"     style={{ marginRight: '1rem' }}>Spend</a>
-        <strong>Recommendations</strong>
-      </nav>
-
-      <h1 style={{ fontSize: '1.25rem', marginBottom: '1.5rem' }}>Recommendations</h1>
+    <div>
+      <h1>Recommendations</h1>
 
       {rows.length === 0 ? (
-        <p style={{ color: '#888' }}>No recommendations yet.</p>
+        <p style={{ color: 'var(--cdl-muted)' }}>No recommendations yet.</p>
       ) : (
         <>
           {/* ── DRAFT groups ── */}
           {draftRows.length === 0 ? (
-            <p style={{ color: '#888', marginBottom: '1.5rem' }}>
+            <p style={{ color: 'var(--cdl-muted)', marginBottom: '1.5rem' }}>
               No DRAFT recommendations.
             </p>
           ) : (
             Array.from(draftByType.entries()).map(([recType, typeRows]) => (
               <div key={recType} style={{ marginBottom: '2.5rem' }}>
-                <h2 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>
+                <h2>
                   {recType}{' '}
-                  <span style={{ color: '#555', fontWeight: 'normal' }}>
+                  <span style={{ color: 'var(--cdl-muted)', fontWeight: 400, fontFamily: 'inherit' }}>
                     — {typeRows.length} draft{typeRows.length !== 1 ? 's' : ''}
                   </span>
                 </h2>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-                    <thead>
-                      <tr>
-                        <th style={th}>Country</th>
-                        <th style={th}>Target</th>
-                        <th style={th}>Proposal</th>
-                        <th style={th}>Created At</th>
-                        <th style={th}>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {typeRows.map((r) => (
-                        <tr key={r.id}>
-                          <td style={td}>{r.country_code}</td>
-                          <td style={td}>{r.target_text}</td>
-                          <td style={tdWrap}>{r.proposal}</td>
-                          <td style={td}>{r.created_at}</td>
-                          <td style={td}>
-                            <form
-                              action={approveRecommendation}
-                              style={{ display: 'inline', marginRight: '0.4rem' }}
-                            >
-                              <input type="hidden" name="id" value={r.id} />
-                              <button type="submit" style={btnApprove}>Approve</button>
-                            </form>
-                            <form action={rejectRecommendation} style={{ display: 'inline' }}>
-                              <input type="hidden" name="id" value={r.id} />
-                              <button type="submit" style={btnReject}>Reject</button>
-                            </form>
-                          </td>
+                <div className="table-card">
+                  <div className="table-scroll">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Country</th>
+                          <th>Target</th>
+                          <th>Proposal</th>
+                          <th>Created At</th>
+                          <th>Actions</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {typeRows.map((r) => (
+                          <tr key={r.id}>
+                            <td>{r.country_code}</td>
+                            <td>{r.target_text}</td>
+                            <td className="wrap">{r.proposal}</td>
+                            <td>{r.created_at}</td>
+                            <td>
+                              <form
+                                action={approveRecommendation}
+                                style={{ display: 'inline', marginRight: '0.4rem' }}
+                              >
+                                <input type="hidden" name="id" value={r.id} />
+                                <button type="submit" className="btn-approve">Approve</button>
+                              </form>
+                              <form action={rejectRecommendation} style={{ display: 'inline' }}>
+                                <input type="hidden" name="id" value={r.id} />
+                                <button type="submit" className="btn-reject">Reject</button>
+                              </form>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             ))
@@ -148,41 +122,43 @@ export default async function RecommendationsPage() {
           {/* ── Non-DRAFT rows ── */}
           {nonDraftRows.length > 0 && (
             <div style={{ marginBottom: '2rem' }}>
-              <h2 style={{ fontSize: '1rem', marginBottom: '0.75rem', color: '#555' }}>
-                Ruled
-              </h2>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-                  <thead>
-                    <tr>
-                      <th style={th}>Country</th>
-                      <th style={th}>Rec Type</th>
-                      <th style={th}>Target</th>
-                      <th style={th}>Proposal</th>
-                      <th style={th}>Created At</th>
-                      <th style={th}>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {nonDraftRows.map((r) => (
-                      <tr key={r.id}>
-                        <td style={td}>{r.country_code}</td>
-                        <td style={td}>{r.rec_type}</td>
-                        <td style={td}>{r.target_text}</td>
-                        <td style={tdWrap}>{r.proposal}</td>
-                        <td style={td}>{r.created_at}</td>
-                        <td style={td}>{r.status}</td>
+              <h2 style={{ color: 'var(--cdl-muted)' }}>Ruled</h2>
+              <div className="table-card">
+                <div className="table-scroll">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Country</th>
+                        <th>Rec Type</th>
+                        <th>Target</th>
+                        <th>Proposal</th>
+                        <th>Created At</th>
+                        <th>Status</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {nonDraftRows.map((r) => (
+                        <tr key={r.id}>
+                          <td>{r.country_code}</td>
+                          <td>{r.rec_type}</td>
+                          <td>{r.target_text}</td>
+                          <td className="wrap">{r.proposal}</td>
+                          <td>{r.created_at}</td>
+                          <td>
+                            <span className={statusBadge(r.status)}>{r.status}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
 
           {/* ── Summary ── */}
-          <hr style={{ margin: '1rem 0 0.75rem', borderColor: '#eee' }} />
-          <p style={{ fontSize: '0.8rem', color: '#666' }}>
+          <hr style={{ margin: '0.5rem 0 0.75rem', borderColor: '#c8dfe9' }} />
+          <p style={{ fontSize: '0.82rem', color: 'var(--cdl-muted)' }}>
             Non-draft totals:{' '}
             {(['APPROVED', 'REJECTED', 'PUSHED'] as const).map((s) => (
               <span key={s} style={{ marginRight: '1.25rem' }}>

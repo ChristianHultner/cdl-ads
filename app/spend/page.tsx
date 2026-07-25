@@ -2,15 +2,6 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 
-const th: React.CSSProperties = {
-  border: '1px solid #ccc', padding: '6px 10px',
-  background: '#f0f0f0', textAlign: 'left', whiteSpace: 'nowrap',
-}
-const td: React.CSSProperties = {
-  border: '1px solid #ccc', padding: '6px 10px', whiteSpace: 'nowrap',
-}
-const tdR: React.CSSProperties = { ...td, textAlign: 'right' }
-
 interface ReportRow {
   country_code: string
   report_type: string
@@ -94,128 +85,134 @@ export default async function SpendPage() {
   ])) as unknown as [ReportRow[], DailyRow[], CampaignRow[]]
 
   return (
-    <div style={{ fontFamily: 'monospace', padding: '1.5rem 2rem' }}>
-      <nav style={{ marginBottom: '1.5rem', borderBottom: '1px solid #eee', paddingBottom: '0.75rem' }}>
-        <a href="/" style={{ marginRight: '1rem' }}>← Home</a>
-        <a href="/accounts" style={{ marginRight: '1rem' }}>Accounts</a>
-        <a href="/campaigns" style={{ marginRight: '1rem' }}>Campaigns</a>
-        <strong>Spend / Reports</strong>
-      </nav>
+    <div>
+      <h1>Spend / Reports</h1>
 
-      <h1 style={{ fontSize: '1.25rem', marginBottom: '1rem' }}>Report Ledger</h1>
-
+      <h2>Report Ledger</h2>
       {rows.length === 0 ? (
-        <p style={{ color: '#888' }}>No reports yet.</p>
+        <p style={{ color: 'var(--cdl-muted)', marginBottom: '2rem' }}>No reports yet.</p>
       ) : (
-        <div style={{ overflowX: 'auto', marginBottom: '2.5rem' }}>
-          <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-            <thead>
-              <tr>
-                <th style={th}>Country</th>
-                <th style={th}>Report Type</th>
-                <th style={th}>Start Date</th>
-                <th style={th}>End Date</th>
-                <th style={th}>Status</th>
-                <th style={th}>Requested At</th>
-                <th style={th}>Completed At</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i}>
-                  <td style={td}>{r.country_code}</td>
-                  <td style={td}>{r.report_type}</td>
-                  <td style={td}>{r.start_date ?? '—'}</td>
-                  <td style={td}>{r.end_date ?? '—'}</td>
-                  <td style={td}>{r.status}</td>
-                  <td style={td}>{r.requested_at ?? '—'}</td>
-                  <td style={td}>{r.completed_at ?? '—'}</td>
+        <div className="table-card">
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Country</th>
+                  <th>Report Type</th>
+                  <th>Start Date</th>
+                  <th>End Date</th>
+                  <th>Status</th>
+                  <th>Requested At</th>
+                  <th>Completed At</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i}>
+                    <td>{r.country_code}</td>
+                    <td>{r.report_type}</td>
+                    <td>{r.start_date ?? '—'}</td>
+                    <td>{r.end_date ?? '—'}</td>
+                    <td>{r.status}</td>
+                    <td>{r.requested_at ?? '—'}</td>
+                    <td>{r.completed_at ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>Daily Totals</h2>
-
+      <h2>Daily Totals</h2>
       {daily.length === 0 ? (
-        <p style={{ color: '#888', marginBottom: '2.5rem' }}>No data landed yet.</p>
+        <p style={{ color: 'var(--cdl-muted)', marginBottom: '2rem' }}>No data landed yet.</p>
       ) : (
-        <div style={{ overflowX: 'auto', marginBottom: '2.5rem' }}>
-          <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-            <thead>
-              <tr>
-                <th style={th}>Country</th>
-                <th style={th}>Date</th>
-                <th style={th}>Cost (currency)</th>
-                <th style={th}>Clicks</th>
-                <th style={th}>Impressions</th>
-                <th style={th}>Sales (currency)</th>
-                <th style={th}>ACOS</th>
-              </tr>
-            </thead>
-            <tbody>
-              {daily.map((r, i) => {
-                const acos = r.acos != null
-                  ? `${(parseFloat(r.acos) * 100).toFixed(1)}%`
-                  : '—'
-                const cost = parseFloat(r.total_cost).toFixed(2)
-                const sales = parseFloat(r.total_sales).toFixed(2)
-                return (
-                  <tr key={i}>
-                    <td style={td}>{r.country_code}</td>
-                    <td style={td}>{r.date}</td>
-                    <td style={tdR}>{cost} {r.currency_code}</td>
-                    <td style={tdR}>{r.total_clicks}</td>
-                    <td style={tdR}>{r.total_impressions}</td>
-                    <td style={tdR}>{sales} {r.currency_code}</td>
-                    <td style={tdR}>{acos}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+        <div className="table-card">
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Country</th>
+                  <th>Date</th>
+                  <th>Cost</th>
+                  <th>Clicks</th>
+                  <th>Impressions</th>
+                  <th>Sales</th>
+                  <th>ACOS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {daily.map((r, i) => {
+                  const acos  = r.acos != null
+                    ? `${(parseFloat(r.acos) * 100).toFixed(1)}%`
+                    : '—'
+                  const cost  = parseFloat(r.total_cost).toFixed(2)
+                  const sales = parseFloat(r.total_sales).toFixed(2)
+                  return (
+                    <tr key={i}>
+                      <td>{r.country_code}</td>
+                      <td>{r.date}</td>
+                      <td className="num">{cost} {r.currency_code}</td>
+                      <td className="num">{r.total_clicks}</td>
+                      <td className="num">{r.total_impressions}</td>
+                      <td className="num">{sales} {r.currency_code}</td>
+                      <td className="num">
+                        {r.acos != null
+                          ? <span className="badge badge-muted">{acos}</span>
+                          : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>Top Campaigns by Spend</h2>
-
+      <h2>Top Campaigns by Spend</h2>
       {campaigns.length === 0 ? (
-        <p style={{ color: '#888' }}>No data landed yet.</p>
+        <p style={{ color: 'var(--cdl-muted)' }}>No data landed yet.</p>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-            <thead>
-              <tr>
-                <th style={th}>Campaign</th>
-                <th style={th}>Country</th>
-                <th style={th}>Cost (currency)</th>
-                <th style={th}>Clicks</th>
-                <th style={th}>Sales (currency)</th>
-                <th style={th}>ACOS</th>
-              </tr>
-            </thead>
-            <tbody>
-              {campaigns.map((r, i) => {
-                const acos = r.acos != null
-                  ? `${(parseFloat(r.acos) * 100).toFixed(1)}%`
-                  : '—'
-                const cost = parseFloat(r.total_cost).toFixed(2)
-                const sales = parseFloat(r.total_sales).toFixed(2)
-                return (
-                  <tr key={i}>
-                    <td style={td}>{r.campaign_name}</td>
-                    <td style={td}>{r.country_code}</td>
-                    <td style={tdR}>{cost} {r.currency_code}</td>
-                    <td style={tdR}>{r.total_clicks}</td>
-                    <td style={tdR}>{sales} {r.currency_code}</td>
-                    <td style={tdR}>{acos}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+        <div className="table-card">
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Campaign</th>
+                  <th>Country</th>
+                  <th>Cost</th>
+                  <th>Clicks</th>
+                  <th>Sales</th>
+                  <th>ACOS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {campaigns.map((r, i) => {
+                  const acos  = r.acos != null
+                    ? `${(parseFloat(r.acos) * 100).toFixed(1)}%`
+                    : '—'
+                  const cost  = parseFloat(r.total_cost).toFixed(2)
+                  const sales = parseFloat(r.total_sales).toFixed(2)
+                  return (
+                    <tr key={i}>
+                      <td>{r.campaign_name}</td>
+                      <td>{r.country_code}</td>
+                      <td className="num">{cost} {r.currency_code}</td>
+                      <td className="num">{r.total_clicks}</td>
+                      <td className="num">{sales} {r.currency_code}</td>
+                      <td className="num">
+                        {r.acos != null
+                          ? <span className="badge badge-muted">{acos}</span>
+                          : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

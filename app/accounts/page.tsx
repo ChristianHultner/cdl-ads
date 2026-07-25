@@ -2,9 +2,6 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 
-const cell: React.CSSProperties = { border: '1px solid #ccc', padding: '4px 8px' }
-const headCell: React.CSSProperties = { ...cell, background: '#f0f0f0', textAlign: 'left' }
-
 interface Credential { id: string; amazon_login: string }
 interface AdsAccount {
   ads_account_id: string; credential_id: string; account_name: string
@@ -29,62 +26,81 @@ export default async function AccountsPage() {
   ])) as unknown as [Credential[], AdsAccount[], Profile[]]
 
   return (
-    <main style={{ fontFamily: 'monospace', padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
-      <nav style={{ marginBottom: '1.5rem' }}>
-        <a href="/">← Home</a>
-      </nav>
-      <h1 style={{ marginTop: 0 }}>Amazon Ads Accounts</h1>
+    <main>
+      <h1>Amazon Ads Accounts</h1>
 
       {credentials.map((cred) => {
         const credAccounts = adsAccounts.filter(a => a.credential_id === cred.id)
         return (
-          <section key={cred.id} style={{ marginBottom: '2rem', border: '1px solid #999', padding: '1rem' }}>
-            <h2 style={{ marginTop: 0 }}>Credential: {cred.amazon_login}</h2>
+          <section
+            key={cred.id}
+            style={{
+              marginBottom: '2rem',
+              border: '1px solid #c8dfe9',
+              borderRadius: '8px',
+              padding: '1.25rem',
+              background: 'var(--cdl-sky)',
+            }}
+          >
+            <h2>Credential: {cred.amazon_login}</h2>
 
             {credAccounts.length === 0 && <p>No ads accounts for this credential.</p>}
 
             {credAccounts.map((acct) => {
               const acctProfiles = profiles.filter(p => p.ads_account_id === acct.ads_account_id)
               return (
-                <div key={acct.ads_account_id} style={{ marginBottom: '1.5rem', paddingLeft: '1rem', borderLeft: '3px solid #bbb' }}>
-                  <h3 style={{ marginTop: 0 }}>{acct.account_name}</h3>
+                <div
+                  key={acct.ads_account_id}
+                  style={{
+                    marginBottom: '1.5rem',
+                    paddingLeft: '1rem',
+                    borderLeft: '3px solid var(--cdl-blue)',
+                  }}
+                >
+                  <h3>{acct.account_name}</h3>
 
-                  <table style={{ borderCollapse: 'collapse', marginBottom: '1rem' }}>
-                    <tbody>
-                      <tr><th style={headCell}>Ads Account ID</th><td style={cell}>{acct.ads_account_id}</td></tr>
-                      <tr><th style={headCell}>Status</th><td style={cell}>{acct.status}</td></tr>
-                      <tr><th style={headCell}>Country Codes</th><td style={cell}>{acct.country_codes.join(', ')}</td></tr>
-                      <tr><th style={headCell}>Notes</th><td style={cell}>{acct.notes ?? '—'}</td></tr>
-                    </tbody>
-                  </table>
+                  <div className="table-card" style={{ marginBottom: '1rem' }}>
+                    <table className="data-table">
+                      <tbody>
+                        <tr><th>Ads Account ID</th><td>{acct.ads_account_id}</td></tr>
+                        <tr><th>Status</th><td>{acct.status}</td></tr>
+                        <tr><th>Country Codes</th><td>{acct.country_codes.join(', ')}</td></tr>
+                        <tr><th>Notes</th><td>{acct.notes ?? '—'}</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
 
-                  <h4 style={{ marginBottom: '0.4rem' }}>Profiles ({acctProfiles.length})</h4>
+                  <h4>Profiles ({acctProfiles.length})</h4>
                   {acctProfiles.length === 0 ? (
                     <p>No profiles linked to this ads account.</p>
                   ) : (
-                    <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-                      <thead>
-                        <tr>
-                          {['Profile ID','Country','Currency','Region','Type','Entity ID','Active','Notes'].map(h => (
-                            <th key={h} style={headCell}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {acctProfiles.map((p) => (
-                          <tr key={p.profile_id}>
-                            <td style={cell}>{p.profile_id}</td>
-                            <td style={cell}>{p.country_code}</td>
-                            <td style={cell}>{p.currency_code}</td>
-                            <td style={cell}>{p.region}</td>
-                            <td style={cell}>{p.account_type}</td>
-                            <td style={cell}>{p.entity_id}</td>
-                            <td style={cell}>{p.is_active ? 'Yes' : 'No'}</td>
-                            <td style={cell}>{p.notes ?? '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    <div className="table-card">
+                      <div className="table-scroll">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              {['Profile ID','Country','Currency','Region','Type','Entity ID','Active','Notes'].map(h => (
+                                <th key={h}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {acctProfiles.map((p) => (
+                              <tr key={p.profile_id}>
+                                <td>{p.profile_id}</td>
+                                <td>{p.country_code}</td>
+                                <td>{p.currency_code}</td>
+                                <td>{p.region}</td>
+                                <td>{p.account_type}</td>
+                                <td>{p.entity_id}</td>
+                                <td>{p.is_active ? 'Yes' : 'No'}</td>
+                                <td>{p.notes ?? '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   )}
                 </div>
               )

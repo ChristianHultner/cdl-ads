@@ -2,20 +2,6 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 
-const th: React.CSSProperties = {
-  border: '1px solid #ccc',
-  padding: '6px 10px',
-  background: '#f0f0f0',
-  textAlign: 'left',
-  whiteSpace: 'nowrap',
-}
-const td: React.CSSProperties = {
-  border: '1px solid #ccc',
-  padding: '6px 10px',
-  whiteSpace: 'nowrap',
-}
-const tdR: React.CSSProperties = { ...td, textAlign: 'right' }
-
 interface MarketRow {
   profile_id: string
   country_code: string
@@ -162,85 +148,82 @@ export default async function HomePage() {
   }
 
   return (
-    <div style={{ fontFamily: 'monospace', padding: '1.5rem 2rem' }}>
-      <nav style={{ marginBottom: '1.5rem', borderBottom: '1px solid #eee', paddingBottom: '0.75rem' }}>
-        <a href="/accounts">Accounts</a>{' · '}
-        <a href="/campaigns">Campaigns</a>{' · '}
-        <a href="/spend">Spend</a>{' · '}
-        <a href="/recommendations">Recommendations</a>
-      </nav>
+    <div>
+      <h1>Estate Overview</h1>
 
-      <h1 style={{ fontSize: '1.25rem', marginBottom: '1rem' }}>Estate Overview</h1>
-
-      <div style={{ overflowX: 'auto', marginBottom: '1.5rem' }}>
-        <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
-          <thead>
-            <tr>
-              <th style={th}>Market</th>
-              <th style={th}>Spend 7d / 30d</th>
-              <th style={th}>Sales 30d</th>
-              <th style={th}>ACOS 30d</th>
-              <th style={th}>Campaigns</th>
-              <th style={th}>Recs D/A/P</th>
-              <th style={th}>Last Data</th>
-            </tr>
-          </thead>
-          <tbody>
-            {activeMarkets.map(m => {
-              const target  = resolveTarget(m.profile_id)
-              const acosStr = computeAcos(m.spend_30d, m.sales_30d)
-              const acosNum = acosStr != null ? parseFloat(acosStr) : null
-              const acosClr = acosNum != null
-                ? (acosNum <= target * 100 ? 'green' : 'red')
-                : undefined
-              const camps = campMap.get(m.profile_id)
-              const recs  = recMap.get(m.profile_id)
-              const stale = isStale(m.last_date)
-              return (
-                <tr key={m.profile_id}>
-                  <td style={td}>{m.country_code} ({m.currency_code})</td>
-                  <td style={tdR}>
-                    {fmt(m.spend_7d)} / {fmt(m.spend_30d)} {m.currency_code}
-                  </td>
-                  <td style={tdR}>{fmt(m.sales_30d)} {m.currency_code}</td>
-                  <td style={{ ...tdR, color: acosClr }}>
-                    {acosStr != null ? `${acosStr}%` : '—'}
-                    {acosStr != null && (
-                      <span style={{ color: '#999', fontSize: '0.78em', marginLeft: '0.4em' }}>
-                        tgt {(target * 100).toFixed(0)}%
-                      </span>
-                    )}
-                  </td>
-                  <td style={tdR}>
-                    {camps
-                      ? `${camps.total_campaigns} (${camps.enabled_campaigns} en)`
-                      : '—'}
-                  </td>
-                  <td style={tdR}>
-                    {recs
-                      ? `${recs.draft_count}/${recs.approved_count}/${recs.pushed_count}`
-                      : '0/0/0'}
-                  </td>
-                  <td style={{ ...td, color: stale ? 'red' : undefined }}>
-                    {m.last_date}
+      <div className="table-card">
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Spend 7d / 30d</th>
+                <th>Sales 30d</th>
+                <th>ACOS 30d</th>
+                <th>Campaigns</th>
+                <th>Recs D/A/P</th>
+                <th>Last Data</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeMarkets.map(m => {
+                const target    = resolveTarget(m.profile_id)
+                const acosStr   = computeAcos(m.spend_30d, m.sales_30d)
+                const acosNum   = acosStr != null ? parseFloat(acosStr) : null
+                const acosBadge = acosNum != null
+                  ? (acosNum <= target * 100 ? 'badge badge-ok' : 'badge badge-warn')
+                  : ''
+                const camps = campMap.get(m.profile_id)
+                const recs  = recMap.get(m.profile_id)
+                const stale = isStale(m.last_date)
+                return (
+                  <tr key={m.profile_id}>
+                    <td>{m.country_code} ({m.currency_code})</td>
+                    <td className="num">
+                      {fmt(m.spend_7d)} / {fmt(m.spend_30d)} {m.currency_code}
+                    </td>
+                    <td className="num">{fmt(m.sales_30d)} {m.currency_code}</td>
+                    <td className="num">
+                      {acosStr != null
+                        ? <span className={acosBadge}>{acosStr}%</span>
+                        : '—'}
+                      {acosStr != null && (
+                        <span style={{ color: 'var(--cdl-muted)', fontSize: '0.78em', marginLeft: '0.5em' }}>
+                          tgt {(target * 100).toFixed(0)}%
+                        </span>
+                      )}
+                    </td>
+                    <td className="num">
+                      {camps
+                        ? `${camps.total_campaigns} (${camps.enabled_campaigns} en)`
+                        : '—'}
+                    </td>
+                    <td className="num">
+                      {recs
+                        ? `${recs.draft_count}/${recs.approved_count}/${recs.pushed_count}`
+                        : '0/0/0'}
+                    </td>
+                    <td style={{ color: stale ? 'var(--cdl-warn)' : undefined }}>
+                      {m.last_date}
+                    </td>
+                  </tr>
+                )
+              })}
+              {dormant.length > 0 && (
+                <tr>
+                  <td colSpan={7} style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+                    Dormant (no spend last 30d):{' '}
+                    {dormant.map(d => `${d.country_code} (${d.currency_code})`).join(', ')}
                   </td>
                 </tr>
-              )
-            })}
-            {dormant.length > 0 && (
-              <tr>
-                <td colSpan={7} style={{ ...td, color: '#aaa', fontStyle: 'italic' }}>
-                  Dormant (no spend last 30d):{' '}
-                  {dormant.map(d => `${d.country_code} (${d.currency_code})`).join(', ')}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      <div style={{ fontSize: '0.85rem', color: '#555' }}>
-        <strong>Estate totals (30d window):</strong>{' '}
+      <div style={{ fontSize: '0.85rem', color: 'var(--cdl-muted)' }}>
+        <strong style={{ color: 'var(--cdl-ink)' }}>Estate totals (30d window):</strong>{' '}
         {estateTotals.length === 0
           ? 'No data.'
           : estateTotals.map((e, i) => (
