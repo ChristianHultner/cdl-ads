@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
+import { approveRecommendation, rejectRecommendation } from './actions'
 
 const th: React.CSSProperties = {
   border: '1px solid #ccc', padding: '6px 10px',
@@ -13,8 +14,19 @@ const tdWrap: React.CSSProperties = {
   border: '1px solid #ccc', padding: '6px 10px',
   maxWidth: '360px', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
 }
+const btnApprove: React.CSSProperties = {
+  cursor: 'pointer', padding: '2px 10px', fontFamily: 'monospace',
+  fontSize: '0.8rem', background: '#d4edda',
+  border: '1px solid #28a745', borderRadius: '3px',
+}
+const btnReject: React.CSSProperties = {
+  cursor: 'pointer', padding: '2px 10px', fontFamily: 'monospace',
+  fontSize: '0.8rem', background: '#f8d7da',
+  border: '1px solid #dc3545', borderRadius: '3px',
+}
 
 interface RecRow {
+  id: number
   rec_type: string
   target_text: string
   proposal: string
@@ -28,6 +40,7 @@ export default async function RecommendationsPage() {
 
   const rows = (await sql`
     SELECT
+      r.id,
       r.rec_type,
       r.target_text,
       r.proposal,
@@ -72,16 +85,17 @@ export default async function RecommendationsPage() {
         <strong>Recommendations</strong>
       </nav>
 
-      <h1 style={{ fontSize: '1.25rem', marginBottom: '1.5rem' }}>
-        Recommendations
-      </h1>
+      <h1 style={{ fontSize: '1.25rem', marginBottom: '1.5rem' }}>Recommendations</h1>
 
       {rows.length === 0 ? (
         <p style={{ color: '#888' }}>No recommendations yet.</p>
       ) : (
         <>
+          {/* ── DRAFT groups ── */}
           {draftRows.length === 0 ? (
-            <p style={{ color: '#888' }}>No DRAFT recommendations.</p>
+            <p style={{ color: '#888', marginBottom: '1.5rem' }}>
+              No DRAFT recommendations.
+            </p>
           ) : (
             Array.from(draftByType.entries()).map(([recType, typeRows]) => (
               <div key={recType} style={{ marginBottom: '2.5rem' }}>
@@ -99,15 +113,29 @@ export default async function RecommendationsPage() {
                         <th style={th}>Target</th>
                         <th style={th}>Proposal</th>
                         <th style={th}>Created At</th>
+                        <th style={th}>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {typeRows.map((r, i) => (
-                        <tr key={i}>
+                      {typeRows.map((r) => (
+                        <tr key={r.id}>
                           <td style={td}>{r.country_code}</td>
                           <td style={td}>{r.target_text}</td>
                           <td style={tdWrap}>{r.proposal}</td>
                           <td style={td}>{r.created_at}</td>
+                          <td style={td}>
+                            <form
+                              action={approveRecommendation}
+                              style={{ display: 'inline', marginRight: '0.4rem' }}
+                            >
+                              <input type="hidden" name="id" value={r.id} />
+                              <button type="submit" style={btnApprove}>Approve</button>
+                            </form>
+                            <form action={rejectRecommendation} style={{ display: 'inline' }}>
+                              <input type="hidden" name="id" value={r.id} />
+                              <button type="submit" style={btnReject}>Reject</button>
+                            </form>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -117,6 +145,42 @@ export default async function RecommendationsPage() {
             ))
           )}
 
+          {/* ── Non-DRAFT rows ── */}
+          {nonDraftRows.length > 0 && (
+            <div style={{ marginBottom: '2rem' }}>
+              <h2 style={{ fontSize: '1rem', marginBottom: '0.75rem', color: '#555' }}>
+                Ruled
+              </h2>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                  <thead>
+                    <tr>
+                      <th style={th}>Country</th>
+                      <th style={th}>Rec Type</th>
+                      <th style={th}>Target</th>
+                      <th style={th}>Proposal</th>
+                      <th style={th}>Created At</th>
+                      <th style={th}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {nonDraftRows.map((r) => (
+                      <tr key={r.id}>
+                        <td style={td}>{r.country_code}</td>
+                        <td style={td}>{r.rec_type}</td>
+                        <td style={td}>{r.target_text}</td>
+                        <td style={tdWrap}>{r.proposal}</td>
+                        <td style={td}>{r.created_at}</td>
+                        <td style={td}>{r.status}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ── Summary ── */}
           <hr style={{ margin: '1rem 0 0.75rem', borderColor: '#eee' }} />
           <p style={{ fontSize: '0.8rem', color: '#666' }}>
             Non-draft totals:{' '}
