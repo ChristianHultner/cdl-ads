@@ -90,6 +90,17 @@ function fmtMoney(v: string): string {
   return parseFloat(v).toFixed(2)
 }
 
+const COUNTRY_TLD: Record<string, string> = {
+  ES: 'es', US: 'com', MX: 'com.mx', CA: 'ca', UK: 'co.uk',
+}
+const ASIN_RE = /^([0-9]{9}[0-9xX]|b0[a-z0-9]{8})$/i
+
+function amazonLink(target: string, country: string): string | null {
+  if (!ASIN_RE.test(target)) return null
+  const tld = COUNTRY_TLD[country.toUpperCase()] ?? 'com'
+  return `https://www.amazon.${tld}/dp/${target.toUpperCase()}`
+}
+
 export default async function RecommendationsPage() {
   const sql = neon(process.env.DATABASE_URL!)
 
@@ -219,6 +230,36 @@ export default async function RecommendationsPage() {
     )
   }
 
+  // ── Why line ─────────────────────────────────────────────────────────────
+  function WhyLine({ recType, ev, term, currency }: { recType: string; ev: Evidence; term: string; currency: string }) {
+    const orders    = ev.orders ?? 0
+    const spend     = fmtN(ev.spend)
+    const clicks    = ev.clicks ?? 0
+    const acosRatio = ev.acos ?? (ev.spend && ev.sales ? ev.spend / ev.sales : null)
+    const acosPct   = acosRatio != null ? (acosRatio * 100).toFixed(1) : '—'
+    const tgtPct    = ((ev.params_used?.target_acos ?? 0.30) * 100).toFixed(0)
+    let sentence: string
+    if (recType === 'PROMOTE_ASIN') {
+      sentence = `Your ads shown on this book's product page produced ${orders} orders at ${acosPct}% ACOS (${spend} ${currency} spend) — below your ${tgtPct}% target. Proposal: add it as an explicit product target.`
+    } else if (recType === 'PROMOTE_TERM') {
+      sentence = `Shoppers searching '${term}' bought ${orders} times at ${acosPct}% ACOS — below your ${tgtPct}% target. Proposal: add it as an exact-match keyword.`
+    } else if (recType === 'NEGATE_TERM') {
+      sentence = `This term spent ${spend} ${currency} over ${clicks} clicks with zero orders. It was negated to stop the spend.`
+    } else {
+      return null
+    }
+    return (
+      <p style={{
+        margin: '0 0 0.6rem 0',
+        fontSize: '0.88rem',
+        color: 'var(--cdl-fg)',
+        lineHeight: 1.5,
+      }}>
+        {sentence}
+      </p>
+    )
+  }
+
   // ── "Applies to" table ───────────────────────────────────────────────────
   function AppliesTo({ ev, profileId, currency }: { ev: Evidence; profileId: string; currency: string }) {
     const placements = (ev.placements ?? []).slice().sort((a, b) => b.spend - a.spend)
@@ -230,7 +271,7 @@ export default async function RecommendationsPage() {
           fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase',
           letterSpacing: '0.05em', color: 'var(--cdl-muted)', marginBottom: '0.4rem',
         }}>
-          Applies to
+          Where this happened (evidence)
         </div>
         <div className="table-card" style={{ marginBottom: 0 }}>
           <div className="table-scroll">
@@ -261,7 +302,7 @@ export default async function RecommendationsPage() {
                       borderRadius: '0.3em', padding: '0.1em 0.4em',
                       whiteSpace: 'nowrap',
                     }}>
-                      → proposed destination
+                      → will be added here if approved
                     </span>
                   ) : null
                   return (
@@ -275,12 +316,13 @@ export default async function RecommendationsPage() {
                               </span>
                             )}
                       </td>
-                      <td>
+                      <td style={{ maxWidth: '16em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {camp
                           ? (
                               <a
                                 href={`/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}`}
                                 style={{ color: 'var(--cdl-blue)' }}
+                                title={camp.name}
                               >
                                 {camp.name}
                               </a>
@@ -365,7 +407,7 @@ export default async function RecommendationsPage() {
                     <summary>
                       <span className={recTypeBadge(r.rec_type)}>{r.rec_type}</span>
                       <span style={{ fontWeight: 600, flexShrink: 0 }}>
-                        {r.target_text}
+                        {(() => { const url = amazonLink(r.target_text, r.country_code); return url ? <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cdl-blue)' }}>{r.target_text}</a> : r.target_text })()}
                       </span>
                       <span style={{
                         color: 'var(--cdl-muted)', flex: 1, minWidth: 0,
@@ -387,6 +429,7 @@ export default async function RecommendationsPage() {
                     </summary>
 
                     <div className="rec-card-body">
+                      <WhyLine recType={r.rec_type} ev={r.evidence} term={r.target_text} currency={r.currency_code} />
                       <EvStats ev={r.evidence} currency={r.currency_code} />
                       <AppliesTo ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
                     </div>
@@ -419,7 +462,7 @@ export default async function RecommendationsPage() {
                     <summary>
                       <span className={recTypeBadge(r.rec_type)}>{r.rec_type}</span>
                       <span style={{ fontWeight: 600, flexShrink: 0 }}>
-                        {r.target_text}
+                        {(() => { const url = amazonLink(r.target_text, r.country_code); return url ? <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cdl-blue)' }}>{r.target_text}</a> : r.target_text })()}
                       </span>
                       <span style={{
                         color: 'var(--cdl-muted)', flex: 1, minWidth: 0,
@@ -434,6 +477,7 @@ export default async function RecommendationsPage() {
                     </summary>
 
                     <div className="rec-card-body">
+                      <WhyLine recType={r.rec_type} ev={r.evidence} term={r.target_text} currency={r.currency_code} />
                       <EvStats ev={r.evidence} currency={r.currency_code} />
                       <AppliesTo ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
                       {r.rec_type === 'NEGATE_TERM' && (
