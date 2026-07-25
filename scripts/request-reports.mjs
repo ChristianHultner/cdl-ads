@@ -14,6 +14,15 @@ const profileIdStr = getArg('--profile');
 const startArg = getArg('--start');
 const endArg = getArg('--end');
 
+// ---- optional --type ----
+const VALID_TYPES = ['spCampaigns', 'spSearchTerm'];
+const typeIdx = args.indexOf('--type');
+const reportType = typeIdx !== -1 && args[typeIdx + 1] ? args[typeIdx + 1] : 'spCampaigns';
+if (!VALID_TYPES.includes(reportType)) {
+  console.error(`Invalid --type value: ${reportType}. Must be one of: ${VALID_TYPES.join(', ')}`);
+  process.exit(1);
+}
+
 // ---- validate dates ----
 function parseDate(s) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
@@ -135,10 +144,18 @@ for (const { start, end } of chunks) {
         'Content-Type': 'application/vnd.createasyncreportrequest.v3+json',
       },
       body: JSON.stringify({
-        name: `cdl-ads spCampaigns ${start}_${end}`,
+        name: `cdl-ads ${reportType} ${start}_${end}`,
         startDate: start,
         endDate: end,
-        configuration: {
+        configuration: reportType === 'spSearchTerm' ? {
+          adProduct: 'SPONSORED_PRODUCTS',
+          groupBy: ['searchTerm'],
+          columns: ['campaignId', 'adGroupId', 'keywordId', 'searchTerm', 'matchType',
+                    'date', 'impressions', 'clicks', 'cost', 'purchases14d', 'sales14d'],
+          reportTypeId: 'spSearchTerm',
+          timeUnit: 'DAILY',
+          format: 'GZIP_JSON',
+        } : {
           adProduct: 'SPONSORED_PRODUCTS',
           groupBy: ['campaign'],
           columns: ['campaignId', 'date', 'impressions', 'clicks', 'cost',
@@ -163,9 +180,9 @@ for (const { start, end } of chunks) {
     await pool.query(
       `INSERT INTO amazon_report_requests
          (report_id, profile_id, report_type, start_date, end_date, status)
-       VALUES ($1, $2, 'spCampaigns', $3, $4, $5)
+       VALUES ($1, $2, $6, $3, $4, $5)
        ON CONFLICT (report_id) DO NOTHING`,
-      [reportId, profileIdStr, start, end, status]
+      [reportId, profileIdStr, start, end, status, reportType]
     );
     console.log(`${start}..${end} -> ${reportId} ${status}`);
   } else {
