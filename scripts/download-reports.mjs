@@ -25,6 +25,7 @@ const { rows } = await pool.query(
    JOIN amazon_profiles p USING (profile_id)
    JOIN amazon_credentials c ON p.credential_id = c.id
    WHERE r.status = 'COMPLETED'
+     AND r.report_type = 'spCampaigns'
      AND NOT EXISTS (SELECT 1 FROM amazon_campaign_daily d
                      WHERE d.profile_id = r.profile_id
                        AND d.date BETWEEN r.start_date AND r.end_date
