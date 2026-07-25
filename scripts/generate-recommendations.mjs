@@ -103,6 +103,11 @@ console.log(
 
 // ── 4. CANDIDATES ─────────────────────────────────────────────────────────────
 // Priority order: NEGATE_TERM → PROMOTE_TERM → PROMOTE_ASIN.
+// Classification is based on term shape, not is_targeting:
+// is_targeting describes how the ad matched (auto/category campaigns report
+// genuine queries under TARGETING_EXPRESSION), not what the term is.
+// is_targeting is kept in evidence as a signal but does not decide rec_type.
+const ASIN_SHAPE = /^([0-9]{9}[0-9xX]|b0[a-z0-9]{8})$/i;
 // A term matching multiple types takes the first match.
 const {
   negate_min_spend,
@@ -128,14 +133,14 @@ for (const row of aggRows) {
   if (orders === 0 && spend >= negate_min_spend && clicks >= negate_min_clicks) {
     recType = 'NEGATE_TERM';
   } else if (
-    !isTargeting &&
+    !ASIN_SHAPE.test(row.search_term) &&
     orders >= harvest_min_orders &&
     acos !== null &&
     acos < target_acos
   ) {
     recType = 'PROMOTE_TERM';
   } else if (
-    isTargeting &&
+    ASIN_SHAPE.test(row.search_term) &&
     orders >= promote_asin_min_orders &&
     acos !== null &&
     acos < target_acos
