@@ -1,0 +1,259 @@
+// scripts/generate-recommendations.mjs
+// Usage: node --env-file=.env.local scripts/generate-recommendations.mjs --profile <id>
+import { parseArgs } from 'node:util';
+import { Pool, neonConfig } from '@neondatabase/serverless';
+
+// Node 22+ native WebSocket
+neonConfig.webSocketConstructor = WebSocket;
+
+// ── Args ─────────────────────────────────────────────────────────────────────
+const { values } = parseArgs({
+  args: process.argv.slice(2),
+  options: { profile: { type: 'string' } },
+});
+if (!values.profile) throw new Error('--profile <id> required');
+const profileId    = BigInt(values.profile);
+const profileIdStr = String(profileId); // for text-typed columns (scope, ANY arrays)
+
+// ── DB ───────────────────────────────────────────────────────────────────────
+const { DATABASE_URL } = process.env;
+if (!DATABASE_URL) throw new Error('DATABASE_URL is not set');
+const pool = new Pool({ connectionString: DATABASE_URL });
+
+// ── 1. PARAMETER RESOLUTION ──────────────────────────────────────────────────
+// For each key: use scope = <profile_id> when present, else scope = 'GLOBAL'.
+const { rows: paramRows } = await pool.query(
+  `SELECT key, scope, value
+     FROM engine_parameters
+    WHERE scope = 'GLOBAL' OR scope = $1`,
+  [profileIdStr],
+);
+
+const globalMap  = new Map();
+const profileMap = new Map();
+for (const row of paramRows) {
+  if (row.scope === 'GLOBAL') globalMap.set(row.key,  Number(row.value));
+  else                        profileMap.set(row.key, Number(row.value));
+}
+
+const params = {};
+for (const key of globalMap.keys()) {
+  params[key] = profileMap.has(key) ? profileMap.get(key) : globalMap.get(key);
+}
+// include any profile-only keys absent from GLOBAL
+for (const [key, val] of profileMap) {
+  if (!(key in params)) params[key] = val;
+}
+
+console.log(JSON.stringify(params));
+
+// ── 2. EVALUATION WINDOW ─────────────────────────────────────────────────────
+const MS_PER_DAY = 86_400_000;
+
+const todayMs = Date.UTC(
+  new Date().getUTCFullYear(),
+  new Date().getUTCMonth(),
+  new Date().getUTCDate(),
+);
+const windowEndMs   = todayMs  - params.negate_attribution_buffer_days * MS_PER_DAY;
+const windowStartMs = windowEndMs - params.negate_window_days          * MS_PER_DAY;
+
+const toISO = (ms) => new Date(ms).toISOString().slice(0, 10);
+const windowStart = toISO(windowStartMs);
+const windowEnd   = toISO(windowEndMs);
+
+console.log(JSON.stringify({ window_start: windowStart, window_end: windowEnd }));
+
+// ── Fetch profile (currency) ──────────────────────────────────────────────────
+const { rows: profileRows } = await pool.query(
+  `SELECT currency_code FROM amazon_profiles WHERE profile_id = $1`,
+  [profileId],
+);
+if (!profileRows.length) {
+  await pool.end();
+  throw new Error(`Profile ${profileIdStr} not found`);
+}
+const currencyCode = profileRows[0].currency_code;
+const CURRENCY_SYMBOL = { EUR: '€', USD: '$', GBP: '£', CAD: 'CA$', MXN: 'MX$' };
+const currSym = CURRENCY_SYMBOL[currencyCode] ?? `${currencyCode}\u202f`;
+
+// ── 3. AGGREGATE ─────────────────────────────────────────────────────────────
+// One pass over amazon_search_term_daily for this profile + window,
+// grouped by search_term.
+const { rows: aggRows } = await pool.query(
+  `SELECT
+       search_term,
+       SUM(cost)                                     AS spend,
+       SUM(clicks)                                   AS clicks,
+       SUM(purchases_14d)                            AS orders,
+       SUM(sales_14d)                                AS sales,
+       BOOL_OR(match_type = 'TARGETING_EXPRESSION')  AS is_targeting,
+       ARRAY_AGG(DISTINCT campaign_id)               AS campaign_ids
+     FROM amazon_search_term_daily
+    WHERE profile_id = $1
+      AND date >= $2
+      AND date <= $3
+    GROUP BY search_term`,
+  [profileId, windowStart, windowEnd],
+);
+
+console.log(
+  `Aggregated ${aggRows.length} search term(s) in window ${windowStart} → ${windowEnd}.`,
+);
+
+// ── 4. CANDIDATES ─────────────────────────────────────────────────────────────
+// Priority order: NEGATE_TERM → PROMOTE_TERM → PROMOTE_ASIN.
+// A term matching multiple types takes the first match.
+const {
+  negate_min_spend,
+  negate_min_clicks,
+  harvest_min_orders,
+  promote_asin_min_orders,
+  target_acos,
+} = params;
+
+const candidates = [];
+
+for (const row of aggRows) {
+  const spend       = Number(row.spend);
+  const clicks      = Number(row.clicks);
+  const orders      = Number(row.orders);
+  const sales       = Number(row.sales);
+  const isTargeting = Boolean(row.is_targeting);
+  // acos = null when sales = 0 (avoid ÷0; don't promote what we can't measure)
+  const acos        = sales > 0 ? spend / sales : null;
+
+  let recType = null;
+
+  if (orders === 0 && spend >= negate_min_spend && clicks >= negate_min_clicks) {
+    recType = 'NEGATE_TERM';
+  } else if (
+    !isTargeting &&
+    orders >= harvest_min_orders &&
+    acos !== null &&
+    acos < target_acos
+  ) {
+    recType = 'PROMOTE_TERM';
+  } else if (
+    isTargeting &&
+    orders >= promote_asin_min_orders &&
+    acos !== null &&
+    acos < target_acos
+  ) {
+    recType = 'PROMOTE_ASIN';
+  }
+
+  if (recType !== null) {
+    candidates.push({
+      recType,
+      searchTerm:  row.search_term,
+      spend,
+      clicks,
+      orders,
+      sales,
+      acos,
+      campaignIds: row.campaign_ids,
+    });
+  }
+}
+
+// ── 5. WRITE DRAFTS (idempotent) ─────────────────────────────────────────────
+let written         = 0;
+let skippedExisting = 0;
+let skippedRejected = 0;
+const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0 };
+
+if (candidates.length > 0) {
+  // Fetch any existing rows for these terms in a single query.
+  const termList = candidates.map((c) => c.searchTerm);
+  const { rows: existingRows } = await pool.query(
+    `SELECT rec_type, target_text, status
+       FROM recommendations
+      WHERE profile_id = $1
+        AND target_text = ANY($2)`,
+    [profileId, termList],
+  );
+
+  // Build lookup sets keyed "recType|target_text"
+  const openSet     = new Set(); // DRAFT | APPROVED | PUSHED → skip
+  const rejectedSet = new Set(); // REJECTED → skip in v1
+  for (const row of existingRows) {
+    const key = `${row.rec_type}|${row.target_text}`;
+    if (['DRAFT', 'APPROVED', 'PUSHED'].includes(row.status)) openSet.add(key);
+    else if (row.status === 'REJECTED')                        rejectedSet.add(key);
+  }
+
+  for (const c of candidates) {
+    countsByType[c.recType] = (countsByType[c.recType] ?? 0) + 1;
+    const key = `${c.recType}|${c.searchTerm}`;
+
+    if (openSet.has(key)) {
+      skippedExisting++;
+      continue;
+    }
+    if (rejectedSet.has(key)) {
+      console.log(`  previously rejected, skipped: [${c.recType}] "${c.searchTerm}"`);
+      skippedRejected++;
+      continue;
+    }
+
+    // ── Build human proposal sentence ─────────────────────────────────────────
+    const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
+    const win      = `${windowStart} – ${windowEnd}`;
+    let proposal;
+    if (c.recType === 'NEGATE_TERM') {
+      proposal =
+        `Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, ` +
+        `0 orders in ${win}.`;
+    } else if (c.recType === 'PROMOTE_TERM') {
+      const acosPct = (c.acos * 100).toFixed(1);
+      proposal =
+        `Promote '${c.searchTerm}' to exact match: ${c.orders} orders at ` +
+        `${acosPct}% ACoS (${spendFmt} spend) in ${win}.`;
+    } else {
+      const acosPct = (c.acos * 100).toFixed(1);
+      proposal =
+        `Target ASIN for '${c.searchTerm}': ${c.orders} orders at ` +
+        `${acosPct}% ACoS (${spendFmt} spend) in ${win}.`;
+    }
+
+    const evidence = {
+      window_start: windowStart,
+      window_end:   windowEnd,
+      spend:        c.spend,
+      clicks:       c.clicks,
+      orders:       c.orders,
+      sales:        c.sales,
+      acos:         c.acos,
+      campaign_ids: c.campaignIds,
+      params_used:  params,
+    };
+
+    await pool.query(
+      `INSERT INTO recommendations
+         (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+       VALUES ($1, $2, NULL, $3, $4, $5)`,
+      [c.recType, profileId, c.searchTerm, proposal, JSON.stringify(evidence)],
+    );
+    written++;
+  }
+} else {
+  console.log('No candidates found — nothing to write.');
+}
+
+await pool.end();
+
+// ── 6. SUMMARY ───────────────────────────────────────────────────────────────
+console.log('\n── Summary ──────────────────────────────────────────────────────');
+for (const [type, count] of Object.entries(countsByType)) {
+  if (count > 0) console.log(`  ${type}: ${count} candidate(s)`);
+}
+if (Object.values(countsByType).every((n) => n === 0)) {
+  console.log('  (no candidates matched any rule)');
+}
+console.log(`  Written:            ${written}`);
+console.log(`  Skipped (exists):   ${skippedExisting}`);
+console.log(`  Skipped (rejected): ${skippedRejected}`);
+console.log('─────────────────────────────────────────────────────────────────');
+
+process.exit(0);
