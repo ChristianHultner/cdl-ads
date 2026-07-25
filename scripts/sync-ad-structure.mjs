@@ -101,7 +101,7 @@ const authHeaders = {
   'Amazon-Advertising-API-Scope':       String(profileId),
 };
 
-const PAGE_CAP = 50;
+const PAGE_CAP = 200;
 
 // ---------------------------------------------------------------------------
 // Phase 1: Ad Groups  —  POST /sp/adGroups/list
