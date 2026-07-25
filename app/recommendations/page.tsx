@@ -3,6 +3,15 @@ export const dynamic = 'force-dynamic'
 import { neon } from '@neondatabase/serverless'
 import { approveRecommendation, rejectRecommendation } from './actions'
 
+interface Placement {
+  campaign_id: string
+  ad_group_id: string
+  spend: number
+  clicks: number
+  orders: number
+  sales: number
+}
+
 interface Evidence {
   spend?: number
   clicks?: number
@@ -13,6 +22,8 @@ interface Evidence {
   window_end?: string
   params_used?: { target_acos?: number }
   campaign_ids?: string[]
+  placements?: Placement[]
+  primary_placement?: Placement
   pushed_keyword_ids?: string[]
   pushed_target_ids?: string[]
 }
@@ -35,6 +46,12 @@ interface CampaignInfo {
   campaign_id: string
   name: string
   state: string
+}
+
+interface AdGroupInfo {
+  profile_id: string
+  ad_group_id: string
+  name: string
 }
 
 interface DailyAgg {
@@ -76,7 +93,7 @@ function fmtMoney(v: string): string {
 export default async function RecommendationsPage() {
   const sql = neon(process.env.DATABASE_URL!)
 
-  const [rows, allCampaigns, dailyAgg] = (await Promise.all([
+  const [rows, allCampaigns, dailyAgg, allAdGroups] = (await Promise.all([
     sql`
       SELECT
         r.id,
@@ -111,7 +128,11 @@ export default async function RecommendationsPage() {
       WHERE date >= CURRENT_DATE - INTERVAL '30 days'
       GROUP BY profile_id, campaign_id
     `,
-  ])) as unknown as [RecRow[], CampaignInfo[], DailyAgg[]]
+    sql`
+      SELECT profile_id::text, ad_group_id, name
+      FROM amazon_ad_groups
+    `,
+  ])) as unknown as [RecRow[], CampaignInfo[], DailyAgg[], AdGroupInfo[]]
 
   // Lookup maps
   const campMap = new Map<string, { name: string; state: string }>()
@@ -126,6 +147,11 @@ export default async function RecommendationsPage() {
       sales_30d: d.sales_30d,
       acos: d.acos,
     })
+  }
+
+  const adGroupMap = new Map<string, string>() // "profileId:adGroupId" → name
+  for (const ag of allAdGroups) {
+    adGroupMap.set(`${ag.profile_id}:${ag.ad_group_id}`, ag.name)
   }
 
   const draftRows    = rows.filter(r => r.status === 'DRAFT')
@@ -195,8 +221,9 @@ export default async function RecommendationsPage() {
 
   // ── "Applies to" table ───────────────────────────────────────────────────
   function AppliesTo({ ev, profileId, currency }: { ev: Evidence; profileId: string; currency: string }) {
-    const ids = ev.campaign_ids ?? []
-    if (ids.length === 0) return null
+    const placements = (ev.placements ?? []).slice().sort((a, b) => b.spend - a.spend)
+    if (placements.length === 0) return null
+    const primaryId = ev.primary_placement?.ad_group_id
     return (
       <div style={{ marginTop: '0.85rem' }}>
         <div style={{
@@ -210,28 +237,49 @@ export default async function RecommendationsPage() {
             <table className="data-table">
               <thead>
                 <tr>
+                  <th>Ad Group</th>
                   <th>Campaign</th>
                   <th>State</th>
-                  <th>Spend 30d</th>
-                  <th>Sales 30d</th>
-                  <th>ACOS 30d</th>
+                  <th>Spend</th>
+                  <th>Clicks</th>
+                  <th>Orders</th>
+                  <th>Sales</th>
                 </tr>
               </thead>
               <tbody>
-                {ids.map(cid => {
-                  const key  = `${profileId}:${cid}`
-                  const camp = campMap.get(key)
-                  const day  = dailyMap.get(key)
-                  const dayAcosPct = day?.acos != null
-                    ? (parseFloat(day.acos) * 100).toFixed(1) + '%'
-                    : '—'
+                {placements.map((p) => {
+                  const campKey   = `${profileId}:${p.campaign_id}`
+                  const agKey     = `${profileId}:${p.ad_group_id}`
+                  const camp      = campMap.get(campKey)
+                  const agName    = adGroupMap.get(agKey)
+                  const isPrimary = p.ad_group_id === primaryId
+                  const primaryPill = isPrimary ? (
+                    <span style={{
+                      marginLeft: '0.4em',
+                      fontSize: '0.72rem', fontWeight: 700,
+                      background: 'var(--cdl-blue)', color: '#fff',
+                      borderRadius: '0.3em', padding: '0.1em 0.4em',
+                      whiteSpace: 'nowrap',
+                    }}>
+                      → proposed destination
+                    </span>
+                  ) : null
                   return (
-                    <tr key={cid}>
+                    <tr key={`${p.campaign_id}:${p.ad_group_id}`}>
+                      <td>
+                        {agName
+                          ? <span>{agName}{primaryPill}</span>
+                          : (
+                              <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+                                {p.ad_group_id} (not in sync){primaryPill}
+                              </span>
+                            )}
+                      </td>
                       <td>
                         {camp
                           ? (
                               <a
-                                href={`/campaigns/${profileId}/${encodeURIComponent(cid)}`}
+                                href={`/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}`}
                                 style={{ color: 'var(--cdl-blue)' }}
                               >
                                 {camp.name}
@@ -239,7 +287,7 @@ export default async function RecommendationsPage() {
                             )
                           : (
                               <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
-                                {cid} (not in sync)
+                                {p.campaign_id} (not in sync)
                               </span>
                             )}
                       </td>
@@ -248,13 +296,10 @@ export default async function RecommendationsPage() {
                           ? <span className={stateBadgeCls(camp.state)}>{camp.state}</span>
                           : '—'}
                       </td>
-                      <td className="num">
-                        {day ? `${fmtMoney(day.spend_30d)} ${currency}` : '—'}
-                      </td>
-                      <td className="num">
-                        {day ? `${fmtMoney(day.sales_30d)} ${currency}` : '—'}
-                      </td>
-                      <td className="num">{dayAcosPct}</td>
+                      <td className="num">{p.spend.toFixed(2)} {currency}</td>
+                      <td className="num">{p.clicks}</td>
+                      <td className="num">{p.orders}</td>
+                      <td className="num">{p.sales.toFixed(2)} {currency}</td>
                     </tr>
                   )
                 })}
