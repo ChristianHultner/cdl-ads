@@ -76,7 +76,7 @@ export default async function HomePage() {
         SELECT
           profile_id::text,
           count(*)::text                                        AS total_campaigns,
-          (count(*) FILTER (WHERE state = 'enabled'))::text    AS enabled_campaigns
+          (count(*) FILTER (WHERE state = 'ENABLED'))::text    AS enabled_campaigns
         FROM amazon_campaigns
         GROUP BY profile_id
       `,
@@ -178,7 +178,11 @@ export default async function HomePage() {
                 const stale = isStale(m.last_date)
                 return (
                   <tr key={m.profile_id}>
-                    <td>{m.country_code} ({m.currency_code})</td>
+                    <td>
+                    <a href={`/campaigns#p-${m.profile_id}`} style={{ color: 'var(--cdl-blue)' }}>
+                      {m.country_code} ({m.currency_code})
+                    </a>
+                  </td>
                     <td className="num">
                       {fmt(m.spend_7d)} / {fmt(m.spend_30d)} {m.currency_code}
                     </td>
