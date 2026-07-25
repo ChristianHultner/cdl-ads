@@ -3,6 +3,20 @@ export const dynamic = 'force-dynamic'
 import { neon } from '@neondatabase/serverless'
 import { approveRecommendation, rejectRecommendation } from './actions'
 
+interface Evidence {
+  spend?: number
+  clicks?: number
+  orders?: number
+  sales?: number
+  acos?: number | null
+  window_start?: string
+  window_end?: string
+  params_used?: { target_acos?: number }
+  campaign_ids?: string[]
+  pushed_keyword_ids?: string[]
+  pushed_target_ids?: string[]
+}
+
 interface RecRow {
   id: number
   rec_type: string
@@ -11,48 +25,268 @@ interface RecRow {
   status: string
   created_at: string
   country_code: string
+  profile_id: string
+  currency_code: string
+  evidence: Evidence
 }
 
-function statusBadge(status: string): string {
+interface CampaignInfo {
+  profile_id: string
+  campaign_id: string
+  name: string
+  state: string
+}
+
+interface DailyAgg {
+  profile_id: string
+  campaign_id: string
+  spend_30d: string
+  sales_30d: string
+  acos: string | null
+}
+
+function recTypeBadge(rt: string): string {
+  if (rt === 'PROMOTE_TERM' || rt === 'PROMOTE_ASIN') return 'badge badge-ok'
+  if (rt === 'NEGATE_TERM')  return 'badge badge-warn'
+  return 'badge badge-muted'
+}
+
+function stateBadgeCls(state: string): string {
+  const s = state.toUpperCase()
+  if (s === 'ENABLED')  return 'badge badge-ok'
+  if (s === 'ARCHIVED') return 'badge badge-dim'
+  return 'badge badge-muted'
+}
+
+function statusBadgeCls(status: string): string {
   if (status === 'APPROVED' || status === 'PUSHED') return 'badge badge-ok'
   if (status === 'REJECTED') return 'badge badge-warn'
   return 'badge badge-muted'
 }
 
+function fmtN(v: number | undefined | null): string {
+  if (v == null) return '—'
+  return v.toFixed(2)
+}
+
+function fmtMoney(v: string): string {
+  return parseFloat(v).toFixed(2)
+}
+
 export default async function RecommendationsPage() {
   const sql = neon(process.env.DATABASE_URL!)
 
-  const rows = (await sql`
-    SELECT
-      r.id,
-      r.rec_type,
-      r.target_text,
-      r.proposal,
-      r.status,
-      r.created_at::text,
-      p.country_code
-    FROM recommendations r
-    JOIN amazon_profiles p USING (profile_id)
-    ORDER BY
-      CASE r.status WHEN 'DRAFT' THEN 0 ELSE 1 END,
-      r.rec_type,
-      r.id
-  `) as unknown as RecRow[]
+  const [rows, allCampaigns, dailyAgg] = (await Promise.all([
+    sql`
+      SELECT
+        r.id,
+        r.rec_type,
+        r.target_text,
+        r.proposal,
+        r.status,
+        r.created_at::text,
+        p.country_code,
+        p.profile_id::text,
+        p.currency_code,
+        r.evidence
+      FROM recommendations r
+      JOIN amazon_profiles p USING (profile_id)
+      ORDER BY
+        CASE r.status WHEN 'DRAFT' THEN 0 ELSE 1 END,
+        r.rec_type,
+        r.id
+    `,
+    sql`
+      SELECT profile_id::text, campaign_id, name, state
+      FROM amazon_campaigns
+    `,
+    sql`
+      SELECT
+        profile_id::text,
+        campaign_id,
+        sum(cost)::text       AS spend_30d,
+        sum(sales_14d)::text  AS sales_30d,
+        (sum(cost) / nullif(sum(sales_14d), 0))::text AS acos
+      FROM amazon_campaign_daily
+      WHERE date >= CURRENT_DATE - INTERVAL '30 days'
+      GROUP BY profile_id, campaign_id
+    `,
+  ])) as unknown as [RecRow[], CampaignInfo[], DailyAgg[]]
 
-  const draftRows    = rows.filter((r) => r.status === 'DRAFT')
-  const nonDraftRows = rows.filter((r) => r.status !== 'DRAFT')
+  // Lookup maps
+  const campMap = new Map<string, { name: string; state: string }>()
+  for (const c of allCampaigns) {
+    campMap.set(`${c.profile_id}:${c.campaign_id}`, { name: c.name, state: c.state })
+  }
 
-  // Group DRAFT rows by rec_type (insertion order preserved)
+  const dailyMap = new Map<string, { spend_30d: string; sales_30d: string; acos: string | null }>()
+  for (const d of dailyAgg) {
+    dailyMap.set(`${d.profile_id}:${d.campaign_id}`, {
+      spend_30d: d.spend_30d,
+      sales_30d: d.sales_30d,
+      acos: d.acos,
+    })
+  }
+
+  const draftRows    = rows.filter(r => r.status === 'DRAFT')
+  const nonDraftRows = rows.filter(r => r.status !== 'DRAFT')
+
+  // Group DRAFTs by rec_type; sort within each group by evidence.spend desc
   const draftByType = new Map<string, RecRow[]>()
   for (const row of draftRows) {
     if (!draftByType.has(row.rec_type)) draftByType.set(row.rec_type, [])
     draftByType.get(row.rec_type)!.push(row)
   }
+  for (const group of draftByType.values()) {
+    group.sort((a, b) => (b.evidence.spend ?? 0) - (a.evidence.spend ?? 0))
+  }
 
-  // Non-DRAFT counts by status
   const nonDraftCounts = new Map<string, number>()
   for (const row of nonDraftRows) {
     nonDraftCounts.set(row.status, (nonDraftCounts.get(row.status) ?? 0) + 1)
+  }
+
+  // ── Evidence stat block ──────────────────────────────────────────────────
+  function EvStats({ ev, currency }: { ev: Evidence; currency: string }) {
+    const acosRatio = ev.acos ?? (ev.spend && ev.sales ? ev.spend / ev.sales : null)
+    const acosPct   = acosRatio != null ? acosRatio * 100 : null
+    const tgtPct    = (ev.params_used?.target_acos ?? 0.30) * 100
+    return (
+      <div className="ev-stats">
+        <div>
+          <div className="ev-stat-label">Spend</div>
+          <div>{fmtN(ev.spend)} {currency}</div>
+        </div>
+        <div>
+          <div className="ev-stat-label">Clicks</div>
+          <div>{ev.clicks ?? '—'}</div>
+        </div>
+        <div>
+          <div className="ev-stat-label">Orders</div>
+          <div>{ev.orders ?? '—'}</div>
+        </div>
+        <div>
+          <div className="ev-stat-label">Sales</div>
+          <div>{fmtN(ev.sales)} {currency}</div>
+        </div>
+        <div>
+          <div className="ev-stat-label">ACOS</div>
+          <div>
+            {acosPct != null
+              ? <span className={acosPct <= tgtPct ? 'badge badge-ok' : 'badge badge-warn'}>
+                  {acosPct.toFixed(1)}%
+                </span>
+              : '—'}
+            {' '}
+            <span style={{ color: 'var(--cdl-muted)', fontSize: '0.8em' }}>
+              tgt {tgtPct.toFixed(0)}%
+            </span>
+          </div>
+        </div>
+        <div>
+          <div className="ev-stat-label">Window</div>
+          <div style={{ fontSize: '0.85em', whiteSpace: 'nowrap' }}>
+            {ev.window_start ?? '—'} → {ev.window_end ?? '—'}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── "Applies to" table ───────────────────────────────────────────────────
+  function AppliesTo({ ev, profileId, currency }: { ev: Evidence; profileId: string; currency: string }) {
+    const ids = ev.campaign_ids ?? []
+    if (ids.length === 0) return null
+    return (
+      <div style={{ marginTop: '0.85rem' }}>
+        <div style={{
+          fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase',
+          letterSpacing: '0.05em', color: 'var(--cdl-muted)', marginBottom: '0.4rem',
+        }}>
+          Applies to
+        </div>
+        <div className="table-card" style={{ marginBottom: 0 }}>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Campaign</th>
+                  <th>State</th>
+                  <th>Spend 30d</th>
+                  <th>Sales 30d</th>
+                  <th>ACOS 30d</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ids.map(cid => {
+                  const key  = `${profileId}:${cid}`
+                  const camp = campMap.get(key)
+                  const day  = dailyMap.get(key)
+                  const dayAcosPct = day?.acos != null
+                    ? (parseFloat(day.acos) * 100).toFixed(1) + '%'
+                    : '—'
+                  return (
+                    <tr key={cid}>
+                      <td>
+                        {camp
+                          ? (
+                              <a
+                                href={`/campaigns/${profileId}/${encodeURIComponent(cid)}`}
+                                style={{ color: 'var(--cdl-blue)' }}
+                              >
+                                {camp.name}
+                              </a>
+                            )
+                          : (
+                              <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+                                {cid} (not in sync)
+                              </span>
+                            )}
+                      </td>
+                      <td>
+                        {camp
+                          ? <span className={stateBadgeCls(camp.state)}>{camp.state}</span>
+                          : '—'}
+                      </td>
+                      <td className="num">
+                        {day ? `${fmtMoney(day.spend_30d)} ${currency}` : '—'}
+                      </td>
+                      <td className="num">
+                        {day ? `${fmtMoney(day.sales_30d)} ${currency}` : '—'}
+                      </td>
+                      <td className="num">{dayAcosPct}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Push receipts (NEGATE_TERM ruled rows) ───────────────────────────────
+  function PushReceipts({ ev }: { ev: Evidence }) {
+    const kw  = ev.pushed_keyword_ids ?? []
+    const tgt = ev.pushed_target_ids  ?? []
+    if (kw.length === 0 && tgt.length === 0) return null
+    return (
+      <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--cdl-muted)', lineHeight: 1.6 }}>
+        {kw.length > 0 && (
+          <div>
+            <span style={{ fontWeight: 700 }}>Keyword IDs pushed: </span>
+            {kw.join(', ')}
+          </div>
+        )}
+        {tgt.length > 0 && (
+          <div>
+            <span style={{ fontWeight: 700 }}>Target IDs pushed: </span>
+            {tgt.join(', ')}
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -73,99 +307,99 @@ export default async function RecommendationsPage() {
               <div key={recType} style={{ marginBottom: '2.5rem' }}>
                 <h2>
                   {recType}{' '}
-                  <span style={{ color: 'var(--cdl-muted)', fontWeight: 400, fontFamily: 'inherit' }}>
+                  <span style={{
+                    color: 'var(--cdl-muted)', fontWeight: 400,
+                    fontFamily: 'inherit', fontSize: '0.9rem',
+                  }}>
                     — {typeRows.length} draft{typeRows.length !== 1 ? 's' : ''}
                   </span>
                 </h2>
-                <div className="table-card">
-                  <div className="table-scroll">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Country</th>
-                          <th>Target</th>
-                          <th>Proposal</th>
-                          <th>Created At</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {typeRows.map((r) => (
-                          <tr key={r.id}>
-                            <td>{r.country_code}</td>
-                            <td>{r.target_text}</td>
-                            <td className="wrap">{r.proposal}</td>
-                            <td>{r.created_at}</td>
-                            <td>
-                              <form
-                                action={approveRecommendation}
-                                style={{ display: 'inline', marginRight: '0.4rem' }}
-                              >
-                                <input type="hidden" name="id" value={r.id} />
-                                <button type="submit" className="btn-approve">Approve</button>
-                              </form>
-                              <form action={rejectRecommendation} style={{ display: 'inline' }}>
-                                <input type="hidden" name="id" value={r.id} />
-                                <button type="submit" className="btn-reject">Reject</button>
-                              </form>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+
+                {typeRows.map(r => (
+                  <details key={r.id} className="rec-card">
+                    <summary>
+                      <span className={recTypeBadge(r.rec_type)}>{r.rec_type}</span>
+                      <span style={{ fontWeight: 600, flexShrink: 0 }}>
+                        {r.target_text}
+                      </span>
+                      <span style={{
+                        color: 'var(--cdl-muted)', flex: 1, minWidth: 0,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {r.proposal}
+                      </span>
+                      <span style={{ color: 'var(--cdl-muted)', fontSize: '0.82rem', flexShrink: 0 }}>
+                        {r.country_code}
+                      </span>
+                      <form action={approveRecommendation} style={{ display: 'inline', flexShrink: 0 }}>
+                        <input type="hidden" name="id" value={r.id} />
+                        <button type="submit" className="btn-approve">Approve</button>
+                      </form>
+                      <form action={rejectRecommendation} style={{ display: 'inline', flexShrink: 0 }}>
+                        <input type="hidden" name="id" value={r.id} />
+                        <button type="submit" className="btn-reject">Reject</button>
+                      </form>
+                    </summary>
+
+                    <div className="rec-card-body">
+                      <EvStats ev={r.evidence} currency={r.currency_code} />
+                      <AppliesTo ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
+                    </div>
+                  </details>
+                ))}
               </div>
             ))
           )}
 
-          {/* ── Non-DRAFT rows ── */}
+          {/* ── Ruled section — collapsed ── */}
           {nonDraftRows.length > 0 && (
-            <div style={{ marginBottom: '2rem' }}>
-              <h2 style={{ color: 'var(--cdl-muted)' }}>Ruled</h2>
-              <div className="table-card">
-                <div className="table-scroll">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>Country</th>
-                        <th>Rec Type</th>
-                        <th>Target</th>
-                        <th>Proposal</th>
-                        <th>Created At</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {nonDraftRows.map((r) => (
-                        <tr key={r.id}>
-                          <td>{r.country_code}</td>
-                          <td>{r.rec_type}</td>
-                          <td>{r.target_text}</td>
-                          <td className="wrap">{r.proposal}</td>
-                          <td>{r.created_at}</td>
-                          <td>
-                            <span className={statusBadge(r.status)}>{r.status}</span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
+            <details style={{ marginTop: '0.5rem' }}>
+              <summary style={{
+                cursor: 'pointer',
+                fontFamily: 'var(--font-fraunces, Fraunces, Georgia, serif)',
+                fontSize: '1.1rem', fontWeight: 700, color: 'var(--cdl-muted)',
+                padding: '0.5rem 0',
+              }}>
+                Ruled ({nonDraftRows.length}){' '}
+                <span style={{ fontWeight: 400, fontSize: '0.82rem' }}>
+                  — {(['APPROVED', 'REJECTED', 'PUSHED'] as const)
+                    .map(s => `${s} ${nonDraftCounts.get(s) ?? 0}`)
+                    .join(' · ')}
+                </span>
+              </summary>
 
-          {/* ── Summary ── */}
-          <hr style={{ margin: '0.5rem 0 0.75rem', borderColor: '#c8dfe9' }} />
-          <p style={{ fontSize: '0.82rem', color: 'var(--cdl-muted)' }}>
-            Non-draft totals:{' '}
-            {(['APPROVED', 'REJECTED', 'PUSHED'] as const).map((s) => (
-              <span key={s} style={{ marginRight: '1.25rem' }}>
-                {s}: {nonDraftCounts.get(s) ?? 0}
-              </span>
-            ))}
-          </p>
+              <div style={{ marginTop: '0.75rem' }}>
+                {nonDraftRows.map(r => (
+                  <details key={r.id} className="rec-card">
+                    <summary>
+                      <span className={recTypeBadge(r.rec_type)}>{r.rec_type}</span>
+                      <span style={{ fontWeight: 600, flexShrink: 0 }}>
+                        {r.target_text}
+                      </span>
+                      <span style={{
+                        color: 'var(--cdl-muted)', flex: 1, minWidth: 0,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {r.proposal}
+                      </span>
+                      <span style={{ color: 'var(--cdl-muted)', fontSize: '0.82rem', flexShrink: 0 }}>
+                        {r.country_code}
+                      </span>
+                      <span className={statusBadgeCls(r.status)}>{r.status}</span>
+                    </summary>
+
+                    <div className="rec-card-body">
+                      <EvStats ev={r.evidence} currency={r.currency_code} />
+                      <AppliesTo ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
+                      {r.rec_type === 'NEGATE_TERM' && (
+                        <PushReceipts ev={r.evidence} />
+                      )}
+                    </div>
+                  </details>
+                ))}
+              </div>
+            </details>
+          )}
         </>
       )}
     </div>
