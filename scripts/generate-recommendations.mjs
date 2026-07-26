@@ -402,7 +402,14 @@ if (candidates.length > 0) {
         params_used:       params,
       };
     } else if (finalRecType === 'PROMOTE_TERM') {
-      // Unchanged from v4.
+      // Unchanged from v4. v5.1: compute observed_cpc/proposed_bid and add to evidence when clicks > 0.
+      if (c.clicks > 0) {
+        observedCpc = c.spend / c.clicks;
+        proposedBid = Math.min(
+          Math.round(observedCpc * params.promote_bid_cpc_multiplier * 100) / 100,
+          params.promote_bid_max,
+        );
+      }
       const acosPct = (c.acos * 100).toFixed(1);
       proposal =
         `Promote '${c.searchTerm}' to exact match: ${c.orders} orders at ` +
@@ -421,6 +428,8 @@ if (candidates.length > 0) {
         acos:              c.acos,
         placements:        c.placements,
         primary_placement: primaryPlacement,
+        ...(observedCpc != null ? { observed_cpc: observedCpc } : {}),
+        ...(proposedBid  != null ? { proposed_bid:  proposedBid  } : {}),
         params_used:       params,
       };
     } else if (finalRecType === 'BID_ADJUST') {
