@@ -121,22 +121,48 @@ console.log(`API resource : POST ${ENDPOINT}`);
 console.log(`Content-Type : ${MEDIA_TYPE}`);
 console.log('');
 
-// ── Pre-parse evidences; collect destination ad_group_ids ─────────────────────
+// ── Pre-parse evidences ───────────────────────────────────────────────────────
 const parsedEvidence = recs.map(r =>
   typeof r.evidence === 'string' ? JSON.parse(r.evidence) : r.evidence,
 );
 
+// ── 3a. Collect ALL ad_group_ids across ALL candidates' evidence.placements ───
 const adGroupIds = [
   ...new Set(
-    parsedEvidence
-      .map(ev => ev?.primary_placement?.ad_group_id)
-      .filter(Boolean)
-      .map(String),
+    parsedEvidence.flatMap(ev =>
+      Array.isArray(ev?.placements)
+        ? ev.placements.map(p => String(p.ad_group_id)).filter(Boolean)
+        : [],
+    ),
   ),
 ];
 
-// ── 3. DUPLICATE CHECK — ONE batch query for all candidates ───────────────────
-// Fetch all EXACT ENABLED keywords that exist in any destination ad group,
+// ── 3b. GROUP CLASSIFICATION — ONE batch query over all placement ad groups ───
+// Returns ENABLED keyword counts per group; groups absent from result = zero.
+const groupKwMap = new Map(); // ad_group_id (string) → { exactKws, anyKws }
+
+if (adGroupIds.length > 0) {
+  const { rows: groupRows } = await pool.query(
+    `SELECT ad_group_id::text,
+            count(*) FILTER (WHERE match_type = 'EXACT') AS exact_kws,
+            count(*) AS any_kws
+       FROM amazon_keywords
+      WHERE profile_id  = $1
+        AND ad_group_id = ANY($2)
+        AND state       = 'ENABLED'
+      GROUP BY ad_group_id`,
+    [profileId, adGroupIds],
+  );
+  for (const row of groupRows) {
+    groupKwMap.set(row.ad_group_id, {
+      exactKws: Number(row.exact_kws),
+      anyKws:   Number(row.any_kws),
+    });
+  }
+}
+
+// ── 3c. DUPLICATE CHECK — ONE batch query for all candidates ──────────────────
+// Fetch all EXACT ENABLED keywords across the full placement ad-group set,
 // then match against (ad_group_id, lower(target_text)) in JS.
 const duplicateKeys = new Set(); // 'ad_group_id::lower_text'
 
@@ -175,7 +201,6 @@ let skipped   = 0;
 for (let i = 0; i < recs.length; i++) {
   const rec      = recs[i];
   const evidence = parsedEvidence[i];
-  const placement = evidence?.primary_placement ?? null;
 
   // Bid: approved_bid (user-edited) takes precedence over proposed_bid (engine)
   const rawBid = evidence?.approved_bid != null
@@ -188,8 +213,29 @@ for (let i = 0; i < recs.length; i++) {
   console.log(`Rec id      : ${rec.id}`);
   console.log(`Target text : "${rec.target_text}"`);
 
+  // ── Destination resolution (priority: exact-kw group → any-kw group → skip) ─
+  const placements = Array.isArray(evidence?.placements) ? evidence.placements : [];
+
+  const tierA = placements
+    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1)
+    .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+  const tierB = placements
+    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1)
+    .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+
+  let placement = null;
+  let destTier  = null;
+
+  if (tierA.length > 0) {
+    placement = tierA[0];
+    destTier  = 'exact-kw group';
+  } else if (tierB.length > 0) {
+    placement = tierB[0];
+    destTier  = 'any-kw group';
+  }
+
   if (!placement?.ad_group_id || !placement?.campaign_id) {
-    console.log('  skipped (no valid primary_placement in evidence)');
+    console.log('  skipped (no keyword-holding ad group among placements — needs manual destination)');
     console.log('');
     skipped++;
     continue;
@@ -201,6 +247,7 @@ for (let i = 0; i < recs.length; i++) {
 
   if (duplicateKeys.has(dupKey)) {
     console.log(`Ad group    : ${agName}`);
+    console.log(`Dest. tier  : destination tier: ${destTier}`);
     console.log('  skipped (exact keyword already exists in destination ad group)');
     console.log('');
     skipped++;
@@ -209,6 +256,7 @@ for (let i = 0; i < recs.length; i++) {
 
   if (rawBid == null || rawBid < 0.02) {
     console.log(`Ad group    : ${agName}`);
+    console.log(`Dest. tier  : destination tier: ${destTier}`);
     console.log(`Bid         : ${rawBid == null ? '(none)' : rawBid}`);
     console.log('  skipped (no valid bid)');
     console.log('');
@@ -232,6 +280,7 @@ for (let i = 0; i < recs.length; i++) {
   };
 
   console.log(`Ad group    : ${agName}`);
+  console.log(`Dest. tier  : destination tier: ${destTier}`);
   console.log(`Campaign id : ${placement.campaign_id}`);
   console.log(`Bid         : ${bidToSend.toFixed(2)}`);
   console.log('');
