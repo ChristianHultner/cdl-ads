@@ -67,11 +67,11 @@ if (!LWA_CLIENT_ID || !LWA_CLIENT_SECRET) {
 }
 
 // ---------------------------------------------------------------------------
-// Yesterday (UTC) formatted as YYYY-MM-DD
+// Window: (today − 14 days) through yesterday (UTC), both as YYYY-MM-DD
 // ---------------------------------------------------------------------------
-const yesterday  = new Date(Date.now() - 86_400_000);
-const reportDate = yesterday.toISOString().slice(0, 10);
-console.log(`nightly-sync start: profile=${profileIdStr} date=${reportDate}`);
+const startDate = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);
+const endDate   = new Date(Date.now() -      86_400_000).toISOString().slice(0, 10);
+console.log(`nightly-sync start: profile=${profileIdStr} window=${startDate}..${endDate}`);
 
 // ---------------------------------------------------------------------------
 // Helper: fetch with 30 s AbortController timeout
@@ -255,9 +255,9 @@ let campaignOk = false;
 
   try {
     const reportId = await requestAndPoll(phase, {
-      name:          `cdl-ads spCampaigns ${reportDate}`,
-      startDate:     reportDate,
-      endDate:       reportDate,
+      name:          `cdl-ads spCampaigns ${startDate}_${endDate}`,
+      startDate:     startDate,
+      endDate:       endDate,
       configuration: {
         adProduct:    'SPONSORED_PRODUCTS',
         groupBy:      ['campaign'],
@@ -316,11 +316,11 @@ let campaignOk = false;
     // Count invariant
     const { rows: cntRows } = await pool.query(
       `SELECT COUNT(*) AS c FROM amazon_campaign_daily
-        WHERE profile_id = $1 AND date = $2`,
-      [profileIdStr, reportDate],
+        WHERE profile_id = $1 AND date BETWEEN $2 AND $3`,
+      [profileIdStr, startDate, endDate],
     );
     const tableCount = Number(cntRows[0].c);
-    console.log(`${phase}: fetched ${fetched}, landed ${landed}, table holds ${tableCount} for profile/date`);
+    console.log(`${phase}: fetched ${fetched}, landed ${landed}, table holds ${tableCount} rows for profile across window`);
     campaignOk = true;
   } catch (err) {
     console.error(`${phase}: FAILED — ${err.message}`);
@@ -347,9 +347,9 @@ let searchOk = true; // default true so non-guarded profiles exit 0 on campaign 
 
     try {
       const reportId = await requestAndPoll(phase, {
-        name:          `cdl-ads spSearchTerm ${reportDate}`,
-        startDate:     reportDate,
-        endDate:       reportDate,
+        name:          `cdl-ads spSearchTerm ${startDate}_${endDate}`,
+        startDate:     startDate,
+        endDate:       endDate,
         configuration: {
           adProduct:    'SPONSORED_PRODUCTS',
           groupBy:      ['searchTerm'],
@@ -426,11 +426,11 @@ let searchOk = true; // default true so non-guarded profiles exit 0 on campaign 
       // Count invariant
       const { rows: cntRows } = await pool.query(
         `SELECT COUNT(*) AS c FROM amazon_search_term_daily
-          WHERE profile_id = $1 AND date = $2`,
-        [profileIdStr, reportDate],
+          WHERE profile_id = $1 AND date BETWEEN $2 AND $3`,
+        [profileIdStr, startDate, endDate],
       );
       const tableCount = Number(cntRows[0].c);
-      console.log(`${phase}: fetched ${fetched}, landed ${landed}, table holds ${tableCount} for profile/date`);
+      console.log(`${phase}: fetched ${fetched}, landed ${landed}, table holds ${tableCount} rows for profile across window`);
       searchOk = true;
     } catch (err) {
       console.error(`${phase}: FAILED — ${err.message}`);
