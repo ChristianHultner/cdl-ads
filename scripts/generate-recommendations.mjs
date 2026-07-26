@@ -198,7 +198,7 @@ let written         = 0;
 let skippedExisting = 0;
 let skippedRejected = 0;
 // v5: BID_ADJUST is a new rec_type for harvested PROMOTE_ASIN candidates
-const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0 };
+const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, CREATE_STRUCTURE: 0 };
 
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
@@ -548,9 +548,178 @@ if (candidates.length > 0) {
   console.log('No candidates found — nothing to write.');
 }
 
+// ── 6. CREATE_STRUCTURE PHASE ─────────────────────────────────────────────────
+// Collect orphaned PROMOTE_TERM + PROMOTE_ASIN recs (DRAFT/APPROVED, this profile)
+// whose push-script destination resolution (b31952e tier logic: campaign
+// targeting_type filter) yields no eligible manual group, split by language,
+// and emit one CREATE_STRUCTURE draft per needed room (idempotent).
+console.log('\n── Phase 6: CREATE_STRUCTURE ────────────────────────────────────');
+
+// 6a. Fetch open PROMOTE_TERM + PROMOTE_ASIN recs for this profile.
+const { rows: openPromoteRows } = await pool.query(
+  `SELECT id, rec_type, target_text, evidence
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = ANY($2)
+      AND status     = ANY($3)`,
+  [profileId, ['PROMOTE_TERM', 'PROMOTE_ASIN'], ['DRAFT', 'APPROVED']],
+);
+console.log(`  Fetched ${openPromoteRows.length} open PROMOTE_TERM/PROMOTE_ASIN rec(s).`);
+
+// 6b. Collect all placement ad_group_ids from stored evidence to resolve targeting_type.
+const promoteAdGroupIds = [];
+for (const row of openPromoteRows) {
+  const ev = (typeof row.evidence === 'string') ? JSON.parse(row.evidence) : (row.evidence ?? {});
+  for (const p of (ev.placements ?? [])) {
+    if (p.ad_group_id) promoteAdGroupIds.push(p.ad_group_id);
+  }
+}
+const uniquePromoteAgIds = [...new Set(promoteAdGroupIds)];
+
+// Same two-leg AUTO detection used by the push scripts (b31952e lineage):
+// a group is AUTO if its campaign has targeting_type='AUTO' OR if it has an
+// expression_type='AUTO' enabled target.
+const promoteAutoGroupSet = new Set();
+if (uniquePromoteAgIds.length > 0) {
+  const { rows: autoAgRows } = await pool.query(
+    `SELECT ag.ad_group_id::text
+       FROM amazon_ad_groups ag
+       JOIN amazon_campaigns c ON c.campaign_id  = ag.campaign_id
+                               AND c.profile_id  = ag.profile_id
+      WHERE ag.profile_id  = $1
+        AND ag.ad_group_id = ANY($2)
+        AND c.targeting_type = 'AUTO'
+     UNION
+     SELECT DISTINCT ad_group_id::text
+       FROM amazon_targets
+      WHERE profile_id      = $1
+        AND ad_group_id     = ANY($2)
+        AND state           = 'ENABLED'
+        AND expression_type = 'AUTO'`,
+    [profileId, uniquePromoteAgIds],
+  );
+  for (const r of autoAgRows) promoteAutoGroupSet.add(r.ad_group_id);
+}
+
+// 6c. Orphan detection: rec is orphaned when every placement ad_group_id is AUTO
+//     (or when placements list is empty — no destination at all).
+const orphans = [];
+for (const row of openPromoteRows) {
+  const ev = (typeof row.evidence === 'string') ? JSON.parse(row.evidence) : (row.evidence ?? {});
+  const placements = ev.placements ?? [];
+  const hasManual  = placements.some(
+    (p) => p.ad_group_id && !promoteAutoGroupSet.has(String(p.ad_group_id)),
+  );
+  if (!hasManual) {
+    orphans.push({ id: row.id, rec_type: row.rec_type, target_text: row.target_text, placements, evidence: ev });
+  }
+}
+console.log(`  Orphans (all placements auto or empty): ${orphans.length}`);
+
+if (orphans.length === 0) {
+  console.log('  No orphans — skipping CREATE_STRUCTURE drafts.');
+} else {
+  // 6d. Language split — pad with spaces first to honour the word-boundary tokens
+  //     (' en ', ' para ') from the spec; strip diacritics for accent-insensitive match.
+  const detectLang = (term) => {
+    const s = (' ' + term + ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    return (
+      s.includes(' en ')    ||
+      s.includes(' para ')  ||
+      s.includes('espanol') ||
+      s.includes('libro')   ||
+      s.includes('cuento')  ||
+      s.includes('ninos')   ||
+      s.includes('bebes')   ||
+      s.includes('infantil')
+    ) ? 'ES' : 'EN';
+  };
+
+  const orphansByLang = { ES: [], EN: [] };
+  for (const o of orphans) orphansByLang[detectLang(o.target_text)].push(o);
+  console.log(`  Language split → ES: ${orphansByLang.ES.length}  EN: ${orphansByLang.EN.length}`);
+
+  // 6e. For each language bucket that has orphans: collect seed ASINs, check
+  //     idempotency, and insert one CREATE_STRUCTURE draft.
+  for (const [lang, langOrphans] of Object.entries(orphansByLang)) {
+    if (langOrphans.length === 0) continue;
+
+    const targetText = `Keywords - Exacta US (${lang})`;
+
+    // Idempotency: skip if an open CREATE_STRUCTURE for this target_text already exists.
+    const { rows: existOpen } = await pool.query(
+      `SELECT id FROM recommendations
+        WHERE profile_id  = $1
+          AND rec_type    = 'CREATE_STRUCTURE'
+          AND target_text = $2
+          AND status      = ANY($3)`,
+      [profileId, targetText, ['DRAFT', 'APPROVED', 'PUSHED']],
+    );
+    if (existOpen.length > 0) {
+      console.log(`  [CREATE_STRUCTURE] '${targetText}' already open (id ${existOpen[0].id}) — skipping.`);
+      continue;
+    }
+
+    // Seed ASINs: each orphan's top-spend placement ad_group_id → advertised ASINs
+    // from amazon_product_ads; union per bucket, cap 20, order by orphan-count desc.
+    const orphanTopAgMap = new Map(); // ad_group_id → how many orphans land here as top-spend
+    for (const o of langOrphans) {
+      if (o.placements.length === 0) continue;
+      const top = o.placements.reduce((best, p) => (p.spend > best.spend ? p : best), o.placements[0]);
+      if (!top.ad_group_id) continue;
+      orphanTopAgMap.set(top.ad_group_id, (orphanTopAgMap.get(top.ad_group_id) ?? 0) + 1);
+    }
+
+    const asinOrphanCount = new Map(); // asin → accumulated orphan-count weight
+    if (orphanTopAgMap.size > 0) {
+      const { rows: asinRows } = await pool.query(
+        `SELECT DISTINCT asin, ad_group_id
+           FROM amazon_product_ads
+          WHERE profile_id  = $1
+            AND ad_group_id = ANY($2)
+            AND state       = 'ENABLED'`,
+        [profileId, [...orphanTopAgMap.keys()]],
+      );
+      for (const r of asinRows) {
+        const weight = orphanTopAgMap.get(r.ad_group_id) ?? 0;
+        asinOrphanCount.set(r.asin, (asinOrphanCount.get(r.asin) ?? 0) + weight);
+      }
+    }
+
+    // Sort by weight desc, cap 20.
+    const seedAsins = [...asinOrphanCount.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([asin, orphan_count]) => ({ asin, orphan_count }));
+
+    const N = seedAsins.length;
+    const M = langOrphans.length;
+    const proposal =
+      `Create manual campaign + ad group '${targetText}' seeded with ${N} advertised books ` +
+      `(default bid $0.35) to house ${M} approved harvest keyword(s) with no eligible destination.`;
+    const evidence = {
+      orphan_rec_ids:       langOrphans.map((o) => o.id),
+      orphan_terms:         langOrphans.map((o) => o.target_text),
+      seed_asins:           seedAsins,
+      proposed_default_bid: 0.35,
+      language:             lang,
+    };
+
+    await pool.query(
+      `INSERT INTO recommendations
+         (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+       VALUES ($1, $2, NULL, $3, $4, $5)`,
+      ['CREATE_STRUCTURE', profileId, targetText, proposal, JSON.stringify(evidence)],
+    );
+    countsByType['CREATE_STRUCTURE']++;
+    written++;
+    console.log(`  [CREATE_STRUCTURE] '${targetText}' drafted — ${M} orphan(s), ${N} seed ASIN(s).`);
+  }
+}
+
 await pool.end();
 
-// ── 6. SUMMARY ───────────────────────────────────────────────────────────────
+// ── 7. SUMMARY ───────────────────────────────────────────────────────────────
 console.log('\n── Summary ──────────────────────────────────────────────────────');
 for (const [type, count] of Object.entries(countsByType)) {
   if (count > 0) console.log(`  ${type}: ${count} candidate(s)`);
