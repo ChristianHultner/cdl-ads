@@ -12,6 +12,12 @@ interface Placement {
   sales: number
 }
 
+interface ExistingTarget {
+  ad_group_id: string
+  campaign_id: string
+  bid: number | null
+}
+
 interface Evidence {
   spend?: number
   clicks?: number
@@ -24,6 +30,7 @@ interface Evidence {
   campaign_ids?: string[]
   placements?: Placement[]
   primary_placement?: Placement
+  existing_targets?: ExistingTarget[]
   pushed_keyword_ids?: string[]
   pushed_target_ids?: string[]
 }
@@ -260,6 +267,28 @@ export default async function RecommendationsPage() {
     )
   }
 
+  // ── Existing targets line (PROMOTE_ASIN only) ──────────────────────────
+  function ExistingTargetsLine({ ev, profileId, currency }: { ev: Evidence; profileId: string; currency: string }) {
+    const targets = ev.existing_targets
+    if (!targets || targets.length === 0) return null
+    const CURRENCY_SYMBOL: Record<string, string> = { EUR: '€', USD: '$', GBP: '£', CAD: 'CA$', MXN: 'MX$' }
+    const sym = CURRENCY_SYMBOL[currency] ?? `${currency}\u202f`
+    // Deduplicate by ad_group_id (keep first occurrence)
+    const seen = new Set<string>()
+    const unique = targets.filter((t) => { if (seen.has(t.ad_group_id)) return false; seen.add(t.ad_group_id); return true })
+    const parts = unique.map((t) => {
+      const name   = adGroupMap.get(`${profileId}:${t.ad_group_id}`) ?? t.ad_group_id
+      const bidStr = t.bid != null ? `${sym}${t.bid.toFixed(2)}` : '—'
+    return `${name} (bid ${bidStr})`
+    })
+    return (
+      <p style={{ margin: '0.4rem 0 0.6rem 0', fontSize: '0.85rem', color: 'var(--cdl-muted)', lineHeight: 1.5 }}>
+        Already explicitly targeted in {unique.length} ad group{unique.length !== 1 ? 's' : ''}:{' '}
+        {parts.join(', ')}.
+      </p>
+    )
+  }
+
   // ── "Applies to" table ───────────────────────────────────────────────────
   function AppliesTo({ ev, profileId, currency }: { ev: Evidence; profileId: string; currency: string }) {
     const placements = (ev.placements ?? []).slice().sort((a, b) => b.spend - a.spend)
@@ -430,6 +459,9 @@ export default async function RecommendationsPage() {
 
                     <div className="rec-card-body">
                       <WhyLine recType={r.rec_type} ev={r.evidence} term={r.target_text} currency={r.currency_code} />
+                      {r.rec_type === 'PROMOTE_ASIN' && (
+                        <ExistingTargetsLine ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
+                      )}
                       <EvStats ev={r.evidence} currency={r.currency_code} />
                       <AppliesTo ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
                     </div>
@@ -478,6 +510,9 @@ export default async function RecommendationsPage() {
 
                     <div className="rec-card-body">
                       <WhyLine recType={r.rec_type} ev={r.evidence} term={r.target_text} currency={r.currency_code} />
+                      {r.rec_type === 'PROMOTE_ASIN' && (
+                        <ExistingTargetsLine ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
+                      )}
                       <EvStats ev={r.evidence} currency={r.currency_code} />
                       <AppliesTo ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
                       {r.rec_type === 'NEGATE_TERM' && (
