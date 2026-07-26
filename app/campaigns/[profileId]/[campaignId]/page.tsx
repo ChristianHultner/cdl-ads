@@ -71,9 +71,17 @@ interface AdGroup {
 }
 
 interface ProductAd {
+  ad_id: string
   ad_group_id: string
   asin: string | null
   state: string
+}
+
+interface AdPerfRow {
+  ad_id: string
+  spend: string
+  orders: string
+  sales: string
 }
 
 interface Target {
@@ -177,6 +185,7 @@ export default async function CampaignDetailPage({
     // Product ads
     sql`
       SELECT
+        ad_id,
         ad_group_id,
         asin,
         state
@@ -266,6 +275,23 @@ export default async function CampaignDetailPage({
     list.push(st)
     stByGroup.set(st.ad_group_id, list)
   }
+
+  // Ad-level 60d performance from amazon_advertised_product_daily
+  const adPerfRows = await sql`
+    SELECT
+      ad_id,
+      sum(cost)::text          AS spend,
+      sum(purchases_14d)::text AS orders,
+      sum(sales_14d)::text     AS sales
+    FROM amazon_advertised_product_daily
+    WHERE profile_id = ${profileId}::bigint
+      AND campaign_id = ${campaignId}
+      AND date >= CURRENT_DATE - INTERVAL '60 days'
+    GROUP BY ad_id
+  ` as unknown as AdPerfRow[]
+
+  const adPerfMap = new Map<string, AdPerfRow>()
+  for (const ap of adPerfRows) adPerfMap.set(ap.ad_id, ap)
 
   function stPerfFor(adGroupId: string, resolvedAsin: string): StRow | undefined {
     return (stByGroup.get(adGroupId) ?? []).find(
@@ -407,10 +433,22 @@ export default async function CampaignDetailPage({
                         <tr>
                           <th>ASIN</th>
                           <th>State</th>
+                          <th>Spend 60d</th>
+                          <th>Orders 60d</th>
+                          <th>Sales 60d</th>
+                          <th>ACoS 60d</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {pads.map((pa, i) => (
+                        {pads.map((pa, i) => {
+                          const perf      = adPerfMap.get(pa.ad_id)
+                          const spend60d  = perf ? parseFloat(perf.spend).toFixed(2)  : null
+                          const orders60d = perf ? Number(perf.orders)                 : null
+                          const sales60d  = perf ? parseFloat(perf.sales).toFixed(2)  : null
+                          const acos60d   = perf && parseFloat(perf.sales) > 0
+                            ? (parseFloat(perf.spend) / parseFloat(perf.sales) * 100).toFixed(1)
+                            : null
+                          return (
                           <tr key={i}>
                             <td>
                               {pa.asin ? (
@@ -429,8 +467,13 @@ export default async function CampaignDetailPage({
                             <td>
                               <span className={stateBadgeCls(pa.state)}>{pa.state}</span>
                             </td>
+                            <td className="num">{spend60d  != null ? `${spend60d} ${profile.currency_code}`  : '—'}</td>
+                            <td className="num">{orders60d != null ? orders60d                                : '—'}</td>
+                            <td className="num">{sales60d  != null ? `${sales60d} ${profile.currency_code}`  : '—'}</td>
+                            <td className="num">{acos60d   != null ? `${acos60d}%`                           : '—'}</td>
                           </tr>
-                        ))}
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>

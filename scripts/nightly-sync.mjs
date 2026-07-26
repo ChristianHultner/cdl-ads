@@ -457,9 +457,120 @@ let searchOk = false;
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3: Advertised Product Daily
+// Column names confirmed by first contact — a 4xx listing valid columns is a
+// finding, not improvised around.
+// ---------------------------------------------------------------------------
+let advProdOk = false;
+{
+  const phase = 'advertised-product';
+  console.log(`\n=== ${phase} phase start ===`);
+
+  const BATCH_SIZE = 500;
+  const NUM_COLS   = 12;
+
+  let phasePool;
+  try {
+    const reportId = await requestAndPoll(phase, {
+      name:          `cdl-ads spAdvertisedProduct ${startDate}_${endDate}`,
+      startDate:     startDate,
+      endDate:       endDate,
+      configuration: {
+        adProduct:    'SPONSORED_PRODUCTS',
+        groupBy:      ['advertiser'],
+        columns:      ['adId', 'adGroupId', 'campaignId', 'advertisedAsin',
+                       'date', 'impressions', 'clicks', 'cost',
+                       'purchases14d', 'sales14d'],
+        reportTypeId: 'spAdvertisedProduct',
+        timeUnit:     'DAILY',
+        format:       'GZIP_JSON',
+      },
+    });
+
+    const reportRows = await downloadReport(phase, reportId);
+    const fetched    = reportRows.length;
+
+    // Pool created after COMPLETED + downloaded; closed in finally
+    phasePool    = new Pool({ connectionString: DATABASE_URL });
+    const client = await phasePool.connect();
+    let landed   = 0;
+    let batchN   = 0;
+    try {
+      await client.query('BEGIN');
+      for (let i = 0; i < reportRows.length; i += BATCH_SIZE) {
+        const batch  = reportRows.slice(i, i + BATCH_SIZE);
+        const values = [];
+        const placeholders = batch.map((row, idx) => {
+          const b = idx * NUM_COLS;
+          values.push(
+            profileIdStr,
+            row.adId          != null ? String(row.adId)          : null,
+            row.adGroupId     != null ? String(row.adGroupId)     : null,
+            row.campaignId    != null ? String(row.campaignId)    : null,
+            row.advertisedAsin ?? null,
+            row.date           ?? null,
+            row.impressions    ?? null,
+            row.clicks         ?? null,
+            row.cost           ?? null,
+            row.purchases14d   ?? null,
+            row.sales14d       ?? null,
+            row,
+          );
+          return (
+            `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},` +
+            `$${b+7},$${b+8},$${b+9},$${b+10},$${b+11},$${b+12})`
+          );
+        }).join(',');
+        await client.query(
+          `INSERT INTO amazon_advertised_product_daily
+             (profile_id, ad_id, ad_group_id, campaign_id, asin, date,
+              impressions, clicks, cost, purchases_14d, sales_14d, raw)
+           VALUES ${placeholders}
+           ON CONFLICT (profile_id, ad_id, date) DO UPDATE SET
+             ad_group_id   = EXCLUDED.ad_group_id,
+             campaign_id   = EXCLUDED.campaign_id,
+             asin          = EXCLUDED.asin,
+             impressions   = EXCLUDED.impressions,
+             clicks        = EXCLUDED.clicks,
+             cost          = EXCLUDED.cost,
+             purchases_14d = EXCLUDED.purchases_14d,
+             sales_14d     = EXCLUDED.sales_14d,
+             raw           = EXCLUDED.raw,
+             landed_at     = now()`,
+          values,
+        );
+        landed += batch.length;
+        batchN++;
+      }
+      await client.query('COMMIT');
+      console.log(`${phase}: ${landed} rows landed (${batchN} batches)`);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    // Count invariant
+    const { rows: cntRows } = await phasePool.query(
+      `SELECT COUNT(*) AS c FROM amazon_advertised_product_daily
+        WHERE profile_id = $1 AND date BETWEEN $2 AND $3`,
+      [profileIdStr, startDate, endDate],
+    );
+    const tableCount = Number(cntRows[0].c);
+    console.log(`${phase}: fetched ${fetched}, landed ${landed}, table holds ${tableCount} rows for profile across window`);
+    advProdOk = true;
+  } catch (err) {
+    console.error(`${phase}: FAILED \u2014 ${err.message}`);
+  } finally {
+    if (phasePool) await phasePool.end();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Finalize
 // ---------------------------------------------------------------------------
-if (!campaignOk || !searchOk) {
+if (!campaignOk || !searchOk || !advProdOk) {
   console.error('nightly-sync: one or more phases FAILED');
   process.exit(1);
 }
