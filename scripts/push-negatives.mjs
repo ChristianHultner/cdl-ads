@@ -139,9 +139,11 @@ for (const rec of recs) {
   const evidence    = typeof rec.evidence === 'string'
     ? JSON.parse(rec.evidence)
     : rec.evidence;
-  const campaignIds = Array.isArray(evidence?.campaign_ids)
+  const campaignIds = Array.isArray(evidence?.campaign_ids) && evidence.campaign_ids.length > 0
     ? evidence.campaign_ids
-    : [];
+    : Array.isArray(evidence?.placements)
+      ? [...new Set(evidence.placements.map((p) => p.campaign_id).filter(Boolean))]
+      : [];
 
   console.log('─'.repeat(60));
   console.log(`Rec id     : ${rec.id}`);
@@ -170,8 +172,10 @@ for (const rec of recs) {
   }
 
   if (campaignIds.length === 0) {
-    console.log('Campaigns  : (none in evidence — no API call planned)');
+    console.log('Campaigns  : (none in evidence)');
+    console.log('  skipped (no campaigns in evidence)');
     console.log('');
+    skipped++;
     continue;
   }
 
