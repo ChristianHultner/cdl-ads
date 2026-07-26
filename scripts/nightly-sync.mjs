@@ -147,7 +147,7 @@ async function fetchAPI(url, extraHeaders, fetchOpts, label) {
 // Constants
 // ---------------------------------------------------------------------------
 const POLL_INTERVAL_MS = 30_000;
-const POLL_CAP         = 40;   // 40 × 30 s = 20 min
+const POLL_CAP         = 60;   // 60 × 30 s = 30 min
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
