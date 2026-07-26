@@ -363,6 +363,7 @@ export default async function CampaignDetailPage({
         return (
           <section
             key={ag.ad_group_id}
+            id={`ag-${ag.ad_group_id}`}
             style={{
               border: '1px solid #c8dfe9',
               borderRadius: '8px',

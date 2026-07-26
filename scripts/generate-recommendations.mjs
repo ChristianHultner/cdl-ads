@@ -251,7 +251,14 @@ if (candidates.length > 0) {
     }
 
     // Batch-fetch ad group names for BID_ADJUST proposal sentences.
-    const agIds = [...new Set(existingTargetRows.map((r) => r.ad_group_id))];
+    // Include all PROMOTE_ASIN placement ad_group_ids so DORMANT top-earning group names resolve.
+    const agIds = [...new Set([
+      ...existingTargetRows.map((r) => r.ad_group_id),
+      ...candidates
+        .filter((c) => c.recType === 'PROMOTE_ASIN')
+        .flatMap((c) => c.placements.map((p) => p.ad_group_id))
+        .filter(Boolean),
+    ])];
     if (agIds.length > 0) {
       const { rows: agRows } = await pool.query(
         `SELECT ad_group_id, name

@@ -424,7 +424,12 @@ export default async function RecommendationsPage() {
           Chosen Target
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: '1rem', alignItems: 'baseline', fontSize: '0.88rem' }}>
-          <div style={{ fontWeight: 600 }}>{agName}</div>
+          <div style={{ fontWeight: 600 }}>
+            <a
+              href={`/campaigns/${profileId}/${encodeURIComponent(ct.campaign_id)}#ag-${ct.ad_group_id}`}
+              style={{ color: 'var(--cdl-blue)' }}
+            >{agName}</a>
+          </div>
           <div>
             bid:{' '}
             <span style={{ color: 'var(--cdl-ink)' }}>{curFmt}</span>
@@ -467,7 +472,10 @@ export default async function RecommendationsPage() {
           Destination Ad Group
         </div>
         <div style={{ fontWeight: 600, fontSize: '0.88rem', marginBottom: allTgts.length > 0 ? '0.55rem' : 0 }}>
-          {agName}
+          <a
+            href={`/campaigns/${profileId}/${encodeURIComponent(pp.campaign_id)}#ag-${pp.ad_group_id}`}
+            style={{ color: 'var(--cdl-blue)' }}
+          >{agName}</a>
         </div>
         {allTgts.length === 0 ? (
           <p style={{ color: 'var(--cdl-muted)', fontSize: '0.82rem', margin: 0 }}>
@@ -598,7 +606,12 @@ export default async function RecommendationsPage() {
                     <tr key={`${p.campaign_id}:${p.ad_group_id}`}>
                       <td>
                         {agName
-                          ? <span>{agName}{primaryPill}</span>
+                          ? <span>
+                              <a
+                                href={`/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}#ag-${p.ad_group_id}`}
+                                style={{ color: 'var(--cdl-blue)' }}
+                              >{agName}</a>{primaryPill}
+                            </span>
                           : <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
                               {p.ad_group_id} (not in sync){primaryPill}
                             </span>}
