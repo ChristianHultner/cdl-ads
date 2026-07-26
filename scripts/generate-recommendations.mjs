@@ -219,6 +219,31 @@ if (candidates.length > 0) {
     else if (row.status === 'REJECTED')                        rejectedSet.add(key);
   }
 
+  // ── v4: Batch existing-targets lookup for PROMOTE_ASIN ───────────────────
+  const promoteAsinTerms = candidates
+    .filter((c) => c.recType === 'PROMOTE_ASIN')
+    .map((c) => c.searchTerm.toUpperCase());
+  const existingTargetsMap = new Map(); // UPPER(asin) → [{ad_group_id, campaign_id, bid}]
+  if (promoteAsinTerms.length > 0) {
+    const { rows: existingTargetRows } = await pool.query(
+      `SELECT ad_group_id, campaign_id, bid, resolved_asin
+         FROM amazon_targets
+        WHERE profile_id = $1
+          AND resolved_asin = ANY($2)
+          AND state = 'ENABLED'`,
+      [profileId, promoteAsinTerms],
+    );
+    for (const row of existingTargetRows) {
+      const key = row.resolved_asin.toUpperCase();
+      if (!existingTargetsMap.has(key)) existingTargetsMap.set(key, []);
+      existingTargetsMap.get(key).push({
+        ad_group_id: row.ad_group_id,
+        campaign_id: row.campaign_id,
+        bid:         row.bid != null ? Number(row.bid) : null,
+      });
+    }
+  }
+
   for (const c of candidates) {
     countsByType[c.recType] = (countsByType[c.recType] ?? 0) + 1;
     const key = `${c.recType}|${c.searchTerm}`;
@@ -237,6 +262,21 @@ if (candidates.length > 0) {
     const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
     const win      = `${windowStart} – ${windowEnd}`;
     let proposal;
+
+    // v4: PROMOTE_ASIN — existing-targets destination rule
+    let existingTargets     = [];
+    let effectivePlacements = c.placements;
+    if (c.recType === 'PROMOTE_ASIN') {
+      const asinKey          = c.searchTerm.toUpperCase();
+      existingTargets        = existingTargetsMap.get(asinKey) ?? [];
+      const targetedAdGroups = new Set(existingTargets.map((t) => t.ad_group_id));
+      effectivePlacements    = c.placements.filter((p) => !targetedAdGroups.has(p.ad_group_id));
+      if (effectivePlacements.length === 0) {
+        console.log(`suppressed (already targeted everywhere it converts): ${c.searchTerm}`);
+        continue;
+      }
+    }
+
     if (c.recType === 'NEGATE_TERM') {
       proposal =
         `Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, ` +
@@ -251,11 +291,15 @@ if (candidates.length > 0) {
       proposal =
         `Target ASIN for '${c.searchTerm}': ${c.orders} orders at ` +
         `${acosPct}% ACoS (${spendFmt} spend) in ${win}.`;
+      if (existingTargets.length > 0) {
+        const nGroups = new Set(existingTargets.map((t) => t.ad_group_id)).size;
+        proposal += ` Already explicitly targeted in ${nGroups} other ad group(s).`;
+      }
     }
 
-    const primaryPlacement = c.placements.reduce(
+    const primaryPlacement = effectivePlacements.reduce(
       (max, p) => (p.spend > max.spend ? p : max),
-      c.placements[0],
+      effectivePlacements[0],
     );
     const evidence = {
       window_start:      windowStart,
@@ -267,6 +311,7 @@ if (candidates.length > 0) {
       acos:              c.acos,
       placements:        c.placements,
       primary_placement: primaryPlacement,
+      ...(c.recType === 'PROMOTE_ASIN' ? { existing_targets: existingTargets } : {}),
       params_used:       params,
     };
 
