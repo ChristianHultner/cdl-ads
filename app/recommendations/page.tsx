@@ -50,6 +50,7 @@ interface Evidence {
   primary_placement?: Placement
   existing_targets?: ExistingTarget[]
   chosen_target?: ChosenTarget
+  chosen_target_share?: { spend: number; clicks: number; orders: number; sales: number }
   proposed_bid?: number
   observed_cpc?: number
   approved_bid?: number
@@ -432,6 +433,13 @@ export default async function RecommendationsPage() {
           </div>
           <span className={stateBadgeCls(state)}>{state}</span>
         </div>
+        {ev.chosen_target_share && (
+          <div style={{ fontSize: '0.82rem', color: 'var(--cdl-muted)', marginTop: '0.4rem' }}>
+            This target&apos;s own share of the evidence:{' '}
+            {sym}{ev.chosen_target_share.spend.toFixed(2)} spend,{' '}
+            {ev.chosen_target_share.orders} orders
+          </div>
+        )}
       </div>
     )
   }

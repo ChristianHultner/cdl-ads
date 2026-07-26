@@ -270,11 +270,12 @@ if (candidates.length > 0) {
 
     // ── v5: Determine final rec_type and PROMOTE_ASIN routing ────────────────
     // Must be resolved before idempotency so the guard uses the written type.
-    let finalRecType    = c.recType;
-    let existingTargets = [];
-    let chosenTarget    = null;
-    let observedCpc     = null;
-    let proposedBid     = null;
+    let finalRecType        = c.recType;
+    let existingTargets     = [];
+    let chosenTarget        = null;
+    let observedCpc         = null;
+    let proposedBid         = null;
+    let chosen_target_share = null;
 
     if (c.recType === 'PROMOTE_ASIN') {
       const asinKey   = c.searchTerm.toUpperCase();
@@ -312,6 +313,19 @@ if (candidates.length > 0) {
           Math.round(observedCpc * params.promote_bid_cpc_multiplier * 100) / 100,
           params.promote_bid_max,
         );
+
+        // search-term rows are group-level; the share is the target's GROUP's performance for this term.
+        const matchedPlacement = c.placements.find((p) => p.ad_group_id === chosenTarget.ad_group_id);
+        chosen_target_share = matchedPlacement
+          ? { spend: matchedPlacement.spend, clicks: matchedPlacement.clicks,
+              orders: matchedPlacement.orders, sales: matchedPlacement.sales }
+          : { spend: 0, clicks: 0, orders: 0, sales: 0 };
+
+        // Skip when proposed bid equals current bid — nothing to change.
+        if (chosenTarget.bid != null && proposedBid === chosenTarget.bid) {
+          console.log(`  skipped (bid already at proposal): [BID_ADJUST] "${c.searchTerm}"`);
+          continue;
+        }
       } else {
         // ── UNHARVESTED → PROMOTE_ASIN (new target, v4 rule unchanged) ───────
         if (c.clicks > 0) {
@@ -386,37 +400,61 @@ if (candidates.length > 0) {
         params_used:       params,
       };
     } else if (finalRecType === 'BID_ADJUST') {
-      // v5: HARVESTED PROMOTE_ASIN — raise bid on chosen existing target.
-      const adGroupName   = adGroupNameMap.get(chosenTarget.ad_group_id) ?? chosenTarget.ad_group_id;
-      const currentBidFmt = chosenTarget.bid != null
+      // v5.1: honest BID_ADJUST — EARNING or DORMANT based on chosen target's group share.
+      const adGroupName    = adGroupNameMap.get(chosenTarget.ad_group_id) ?? chosenTarget.ad_group_id;
+      const currentBidFmt  = chosenTarget.bid != null
         ? `${currSym}${chosenTarget.bid.toFixed(2)}`
         : '—';
       const proposedBidFmt = `${currSym}${proposedBid.toFixed(2)}`;
-      const acosPct        = (c.acos * 100).toFixed(1);
+      const direction      = proposedBid > (chosenTarget.bid ?? 0) ? 'Raise' : 'Cut';
+      const asin           = c.searchTerm.toUpperCase();
+      const share          = chosen_target_share ?? { spend: 0, clicks: 0, orders: 0, sales: 0 };
 
-      proposal =
-        `Raise bid on existing target for '${c.searchTerm.toUpperCase()}' in '${adGroupName}' ` +
-        `from ${currentBidFmt} to ${proposedBidFmt}: ${c.orders} orders at ${acosPct}% ACoS in ${win}.`;
+      if (share.orders >= 1) {
+        // EARNING: chosen target's group contributed at least one order for this term.
+        const shareAcosPct = share.sales > 0
+          ? (share.spend / share.sales * 100).toFixed(1)
+          : '—';
+        proposal =
+          `${direction} bid on target for '${asin}' in '${adGroupName}' ` +
+          `from ${currentBidFmt} to ${proposedBidFmt}: this placement won ` +
+          `${share.orders} of ${c.orders} orders (${shareAcosPct}% ACoS) in ${win}.`;
+      } else {
+        // DORMANT: chosen target's group earned no orders for this term.
+        const topPlacement  = c.placements.reduce(
+          (best, p) => ((p.sales ?? 0) > (best.sales ?? 0) ? p : best),
+          c.placements[0],
+        );
+        const topGroupName  = adGroupNameMap.get(topPlacement.ad_group_id) ?? topPlacement.ad_group_id;
+        const termAcosPct   = (c.acos * 100).toFixed(1);
+        const termCpc       = (c.spend / c.clicks).toFixed(2);
+        const shareSpendFmt = `${currSym}${share.spend.toFixed(2)}`;
+        proposal =
+          `Reprice dormant target for '${asin}' in '${adGroupName}' ` +
+          `from ${currentBidFmt} to ${proposedBidFmt}: it spent ${shareSpendFmt} with no sales in ${win}, ` +
+          `while the term converted at ${termAcosPct}% ACoS elsewhere (${topGroupName}, ${currSym}${termCpc}/click).`;
+      }
 
       evidence = {
-        window_start:  windowStart,
-        window_end:    windowEnd,
-        spend:         c.spend,
-        clicks:        c.clicks,
-        orders:        c.orders,
-        sales:         c.sales,
-        acos:          c.acos,
-        observed_cpc:  observedCpc,
-        proposed_bid:  proposedBid,
+        window_start:        windowStart,
+        window_end:          windowEnd,
+        spend:               c.spend,
+        clicks:              c.clicks,
+        orders:              c.orders,
+        sales:               c.sales,
+        acos:                c.acos,
+        observed_cpc:        observedCpc,
+        proposed_bid:        proposedBid,
         chosen_target: {
           target_id:   chosenTarget.target_id,
           ad_group_id: chosenTarget.ad_group_id,
           campaign_id: chosenTarget.campaign_id,
           current_bid: chosenTarget.bid,
         },
-        existing_targets: existingTargets,
-        placements:       c.placements,
-        params_used:      params,
+        chosen_target_share: share,
+        existing_targets:    existingTargets,
+        placements:          c.placements,
+        params_used:         params,
       };
     } else {
       // PROMOTE_ASIN — UNHARVESTED (new target, destination = highest-spend placement).
