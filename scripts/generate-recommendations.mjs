@@ -197,7 +197,8 @@ for (const row of termRows) {
 let written         = 0;
 let skippedExisting = 0;
 let skippedRejected = 0;
-const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0 };
+// v5: BID_ADJUST is a new rec_type for harvested PROMOTE_ASIN candidates
+const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0 };
 
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
@@ -211,22 +212,27 @@ if (candidates.length > 0) {
   );
 
   // Build lookup sets keyed "recType|target_text"
+  // v5: BID_ADJUST keyed same way — profile+type+target.
   const openSet     = new Set(); // DRAFT | APPROVED | PUSHED → skip
-  const rejectedSet = new Set(); // REJECTED → skip in v1
+  const rejectedSet = new Set(); // REJECTED → skip
   for (const row of existingRows) {
     const key = `${row.rec_type}|${row.target_text}`;
     if (['DRAFT', 'APPROVED', 'PUSHED'].includes(row.status)) openSet.add(key);
     else if (row.status === 'REJECTED')                        rejectedSet.add(key);
   }
 
-  // ── v4: Batch existing-targets lookup for PROMOTE_ASIN ───────────────────
+  // ── v5: Batch existing-targets lookup for PROMOTE_ASIN candidates ─────────
+  // target_id included — the push path will need it for BID_ADJUST.
   const promoteAsinTerms = candidates
     .filter((c) => c.recType === 'PROMOTE_ASIN')
     .map((c) => c.searchTerm.toUpperCase());
-  const existingTargetsMap = new Map(); // UPPER(asin) → [{ad_group_id, campaign_id, bid}]
+
+  const existingTargetsMap = new Map(); // UPPER(asin) → [{target_id, ad_group_id, campaign_id, bid}]
+  const adGroupNameMap     = new Map(); // ad_group_id → name (for BID_ADJUST proposal sentences)
+
   if (promoteAsinTerms.length > 0) {
     const { rows: existingTargetRows } = await pool.query(
-      `SELECT ad_group_id, campaign_id, bid, resolved_asin
+      `SELECT target_id, ad_group_id, campaign_id, bid, resolved_asin
          FROM amazon_targets
         WHERE profile_id = $1
           AND resolved_asin = ANY($2)
@@ -237,89 +243,213 @@ if (candidates.length > 0) {
       const key = row.resolved_asin.toUpperCase();
       if (!existingTargetsMap.has(key)) existingTargetsMap.set(key, []);
       existingTargetsMap.get(key).push({
+        target_id:   row.target_id,
         ad_group_id: row.ad_group_id,
         campaign_id: row.campaign_id,
         bid:         row.bid != null ? Number(row.bid) : null,
       });
     }
+
+    // Batch-fetch ad group names for BID_ADJUST proposal sentences.
+    const agIds = [...new Set(existingTargetRows.map((r) => r.ad_group_id))];
+    if (agIds.length > 0) {
+      const { rows: agRows } = await pool.query(
+        `SELECT ad_group_id, name
+           FROM amazon_ad_groups
+          WHERE profile_id = $1
+            AND ad_group_id = ANY($2)`,
+        [profileId, agIds],
+      );
+      for (const ag of agRows) adGroupNameMap.set(ag.ad_group_id, ag.name);
+    }
   }
 
   for (const c of candidates) {
-    countsByType[c.recType] = (countsByType[c.recType] ?? 0) + 1;
-    const key = `${c.recType}|${c.searchTerm}`;
+    const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
+    const win      = `${windowStart} – ${windowEnd}`;
+
+    // ── v5: Determine final rec_type and PROMOTE_ASIN routing ────────────────
+    // Must be resolved before idempotency so the guard uses the written type.
+    let finalRecType    = c.recType;
+    let existingTargets = [];
+    let chosenTarget    = null;
+    let observedCpc     = null;
+    let proposedBid     = null;
+
+    if (c.recType === 'PROMOTE_ASIN') {
+      const asinKey   = c.searchTerm.toUpperCase();
+      existingTargets = existingTargetsMap.get(asinKey) ?? [];
+
+      if (existingTargets.length >= 1) {
+        // ── HARVESTED → BID_ADJUST ──────────────────────────────────────────
+        finalRecType = 'BID_ADJUST';
+
+        if (c.clicks === 0) {
+          console.log(`  skipped (cannot price — 0 clicks): [BID_ADJUST] "${c.searchTerm}"`);
+          continue;
+        }
+
+        // Chosen target: existing target whose ad group appears in placements
+        // with the highest spend; fallback = existing target with highest bid.
+        const placementSpendByAg = new Map(c.placements.map((p) => [p.ad_group_id, p.spend]));
+        const targetsInPlacements = existingTargets.filter((t) => placementSpendByAg.has(t.ad_group_id));
+
+        if (targetsInPlacements.length > 0) {
+          chosenTarget = targetsInPlacements.reduce((best, t) =>
+            (placementSpendByAg.get(t.ad_group_id) ?? 0) > (placementSpendByAg.get(best.ad_group_id) ?? 0)
+              ? t : best,
+            targetsInPlacements[0],
+          );
+        } else {
+          chosenTarget = existingTargets.reduce((best, t) =>
+            (t.bid ?? 0) > (best.bid ?? 0) ? t : best,
+            existingTargets[0],
+          );
+        }
+
+        observedCpc = c.spend / c.clicks;
+        proposedBid = Math.min(
+          Math.round(observedCpc * params.promote_bid_cpc_multiplier * 100) / 100,
+          params.promote_bid_max,
+        );
+      } else {
+        // ── UNHARVESTED → PROMOTE_ASIN (new target, v4 rule unchanged) ───────
+        if (c.clicks > 0) {
+          observedCpc = c.spend / c.clicks;
+          proposedBid = Math.min(
+            Math.round(observedCpc * params.promote_bid_cpc_multiplier * 100) / 100,
+            params.promote_bid_max,
+          );
+        }
+      }
+    }
+
+    // ── Idempotency check — uses finalRecType ─────────────────────────────────
+    countsByType[finalRecType] = (countsByType[finalRecType] ?? 0) + 1;
+    const key = `${finalRecType}|${c.searchTerm}`;
 
     if (openSet.has(key)) {
       skippedExisting++;
       continue;
     }
     if (rejectedSet.has(key)) {
-      console.log(`  previously rejected, skipped: [${c.recType}] "${c.searchTerm}"`);
+      console.log(`  previously rejected, skipped: [${finalRecType}] "${c.searchTerm}"`);
       skippedRejected++;
       continue;
     }
 
-    // ── Build human proposal sentence ─────────────────────────────────────────
-    const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
-    const win      = `${windowStart} – ${windowEnd}`;
+    // ── Build proposal + evidence ─────────────────────────────────────────────
     let proposal;
+    let evidence;
 
-    // v4: PROMOTE_ASIN — existing-targets destination rule
-    let existingTargets     = [];
-    let effectivePlacements = c.placements;
-    if (c.recType === 'PROMOTE_ASIN') {
-      const asinKey          = c.searchTerm.toUpperCase();
-      existingTargets        = existingTargetsMap.get(asinKey) ?? [];
-      const targetedAdGroups = new Set(existingTargets.map((t) => t.ad_group_id));
-      effectivePlacements    = c.placements.filter((p) => !targetedAdGroups.has(p.ad_group_id));
-      if (effectivePlacements.length === 0) {
-        console.log(`suppressed (already targeted everywhere it converts): ${c.searchTerm}`);
-        continue;
-      }
-    }
-
-    if (c.recType === 'NEGATE_TERM') {
+    if (finalRecType === 'NEGATE_TERM') {
+      // Unchanged from v4.
       proposal =
         `Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, ` +
         `0 orders in ${win}.`;
-    } else if (c.recType === 'PROMOTE_TERM') {
+      const primaryPlacement = c.placements.reduce(
+        (max, p) => (p.spend > max.spend ? p : max),
+        c.placements[0],
+      );
+      evidence = {
+        window_start:      windowStart,
+        window_end:        windowEnd,
+        spend:             c.spend,
+        clicks:            c.clicks,
+        orders:            c.orders,
+        sales:             c.sales,
+        acos:              c.acos,
+        placements:        c.placements,
+        primary_placement: primaryPlacement,
+        params_used:       params,
+      };
+    } else if (finalRecType === 'PROMOTE_TERM') {
+      // Unchanged from v4.
       const acosPct = (c.acos * 100).toFixed(1);
       proposal =
         `Promote '${c.searchTerm}' to exact match: ${c.orders} orders at ` +
         `${acosPct}% ACoS (${spendFmt} spend) in ${win}.`;
+      const primaryPlacement = c.placements.reduce(
+        (max, p) => (p.spend > max.spend ? p : max),
+        c.placements[0],
+      );
+      evidence = {
+        window_start:      windowStart,
+        window_end:        windowEnd,
+        spend:             c.spend,
+        clicks:            c.clicks,
+        orders:            c.orders,
+        sales:             c.sales,
+        acos:              c.acos,
+        placements:        c.placements,
+        primary_placement: primaryPlacement,
+        params_used:       params,
+      };
+    } else if (finalRecType === 'BID_ADJUST') {
+      // v5: HARVESTED PROMOTE_ASIN — raise bid on chosen existing target.
+      const adGroupName   = adGroupNameMap.get(chosenTarget.ad_group_id) ?? chosenTarget.ad_group_id;
+      const currentBidFmt = chosenTarget.bid != null
+        ? `${currSym}${chosenTarget.bid.toFixed(2)}`
+        : '—';
+      const proposedBidFmt = `${currSym}${proposedBid.toFixed(2)}`;
+      const acosPct        = (c.acos * 100).toFixed(1);
+
+      proposal =
+        `Raise bid on existing target for '${c.searchTerm.toUpperCase()}' in '${adGroupName}' ` +
+        `from ${currentBidFmt} to ${proposedBidFmt}: ${c.orders} orders at ${acosPct}% ACoS in ${win}.`;
+
+      evidence = {
+        window_start:  windowStart,
+        window_end:    windowEnd,
+        spend:         c.spend,
+        clicks:        c.clicks,
+        orders:        c.orders,
+        sales:         c.sales,
+        acos:          c.acos,
+        observed_cpc:  observedCpc,
+        proposed_bid:  proposedBid,
+        chosen_target: {
+          target_id:   chosenTarget.target_id,
+          ad_group_id: chosenTarget.ad_group_id,
+          campaign_id: chosenTarget.campaign_id,
+          current_bid: chosenTarget.bid,
+        },
+        existing_targets: existingTargets,
+        placements:       c.placements,
+        params_used:      params,
+      };
     } else {
+      // PROMOTE_ASIN — UNHARVESTED (new target, destination = highest-spend placement).
       const acosPct = (c.acos * 100).toFixed(1);
       proposal =
         `Target ASIN for '${c.searchTerm}': ${c.orders} orders at ` +
         `${acosPct}% ACoS (${spendFmt} spend) in ${win}.`;
-      if (existingTargets.length > 0) {
-        const nGroups = new Set(existingTargets.map((t) => t.ad_group_id)).size;
-        proposal += ` Already explicitly targeted in ${nGroups} other ad group(s).`;
-      }
+      const primaryPlacement = c.placements.reduce(
+        (max, p) => (p.spend > max.spend ? p : max),
+        c.placements[0],
+      );
+      evidence = {
+        window_start:      windowStart,
+        window_end:        windowEnd,
+        spend:             c.spend,
+        clicks:            c.clicks,
+        orders:            c.orders,
+        sales:             c.sales,
+        acos:              c.acos,
+        placements:        c.placements,
+        primary_placement: primaryPlacement,
+        existing_targets:  [],
+        ...(observedCpc != null ? { observed_cpc: observedCpc } : {}),
+        ...(proposedBid  != null ? { proposed_bid:  proposedBid  } : {}),
+        params_used:       params,
+      };
     }
-
-    const primaryPlacement = effectivePlacements.reduce(
-      (max, p) => (p.spend > max.spend ? p : max),
-      effectivePlacements[0],
-    );
-    const evidence = {
-      window_start:      windowStart,
-      window_end:        windowEnd,
-      spend:             c.spend,
-      clicks:            c.clicks,
-      orders:            c.orders,
-      sales:             c.sales,
-      acos:              c.acos,
-      placements:        c.placements,
-      primary_placement: primaryPlacement,
-      ...(c.recType === 'PROMOTE_ASIN' ? { existing_targets: existingTargets } : {}),
-      params_used:       params,
-    };
 
     await pool.query(
       `INSERT INTO recommendations
          (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
        VALUES ($1, $2, NULL, $3, $4, $5)`,
-      [c.recType, profileId, c.searchTerm, proposal, JSON.stringify(evidence)],
+      [finalRecType, profileId, c.searchTerm, proposal, JSON.stringify(evidence)],
     );
     written++;
   }
