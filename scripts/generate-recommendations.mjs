@@ -284,12 +284,20 @@ if (candidates.length > 0) {
   const autoGroupSet = new Set(); // ad_group_id (string) — group has expression_type='AUTO' target
   if (allPromotePlacementAgIds.length > 0) {
     const { rows: autoRows } = await pool.query(
-      `SELECT DISTINCT ad_group_id
+      `SELECT DISTINCT ad_group_id::text
          FROM amazon_targets
         WHERE profile_id      = $1
           AND ad_group_id     = ANY($2)
           AND state           = 'ENABLED'
-          AND expression_type = 'AUTO'`,
+          AND expression_type = 'AUTO'
+       UNION
+       SELECT ag.ad_group_id::text
+         FROM amazon_ad_groups ag
+         JOIN amazon_campaigns  c ON c.campaign_id = ag.campaign_id
+                                 AND c.profile_id  = ag.profile_id
+        WHERE ag.profile_id  = $1
+          AND ag.ad_group_id = ANY($2)
+          AND c.targeting_type = 'AUTO'`,
       [profileId, allPromotePlacementAgIds],
     );
     for (const row of autoRows) autoGroupSet.add(String(row.ad_group_id));

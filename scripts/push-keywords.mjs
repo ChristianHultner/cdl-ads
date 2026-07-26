@@ -140,6 +140,7 @@ const adGroupIds = [
 // ── 3b. GROUP CLASSIFICATION — ONE batch query over all placement ad groups ───
 // Returns ENABLED keyword counts per group; groups absent from result = zero.
 const groupKwMap = new Map(); // ad_group_id (string) → { exactKws, anyKws, hasAuto }
+const autoCampaignGroupIds = new Set(); // ad_group_ids whose campaign.targeting_type = 'AUTO'
 
 if (adGroupIds.length > 0) {
   const { rows: groupRows } = await pool.query(
@@ -176,6 +177,19 @@ if (adGroupIds.length > 0) {
     if (entry) entry.hasAuto = Number(row.has_auto);
     else groupKwMap.set(row.ad_group_id, { exactKws: 0, anyKws: 0, hasAuto: Number(row.has_auto) });
   }
+  // Campaign-level AUTO exclusion — targeting_type is the authority; ad-group-level
+  // expression checks can be fooled by agency-era manual keywords inside auto campaigns.
+  const { rows: autoCampRows } = await pool.query(
+    `SELECT ag.ad_group_id::text
+       FROM amazon_ad_groups ag
+       JOIN amazon_campaigns  c ON c.campaign_id = ag.campaign_id
+                                AND c.profile_id  = ag.profile_id
+      WHERE ag.profile_id  = $1
+        AND ag.ad_group_id = ANY($2)
+        AND c.targeting_type = 'AUTO'`,
+    [profileId, adGroupIds],
+  );
+  for (const row of autoCampRows) autoCampaignGroupIds.add(row.ad_group_id);
 }
 
 // ── 3c. DUPLICATE CHECK — ONE batch query for all candidates ──────────────────
@@ -235,11 +249,13 @@ for (let i = 0; i < recs.length; i++) {
 
   const tierA = placements
     .filter(p => (groupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1
-              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0)
+              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+              && !autoCampaignGroupIds.has(String(p.ad_group_id)))
     .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
   const tierB = placements
     .filter(p => (groupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1
-              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0)
+              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+              && !autoCampaignGroupIds.has(String(p.ad_group_id)))
     .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
 
   let placement = null;
