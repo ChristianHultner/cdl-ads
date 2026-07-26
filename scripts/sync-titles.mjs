@@ -10,10 +10,10 @@ import { Pool, neonConfig } from '@neondatabase/serverless';
 neonConfig.webSocketConstructor = WebSocket;
 
 // ---------------------------------------------------------------------------
-// Endpoint — BEST GUESS; shape confirmed by first probe at runtime, never
-// assumed. Adjust if the API uses a different path (e.g. /api/books/<isbn>).
+// Endpoint — verified live 2026-07-26. GET ?isbns=<isbn> returns envelope
+// { books: [{isbn, found, title, cover_url, …}], count }.
 // ---------------------------------------------------------------------------
-const BOOKS_API_PATH = '/api/public/books'; // /<asin> appended per call
+const BOOKS_API_PATH = '/api/v1/books/public'; // ?isbns=<isbn> query param
 
 const DELAY_MS = 100; // ms between API calls
 
@@ -61,7 +61,7 @@ if (candidates.length === 0) {
 // Fetch helper
 // ---------------------------------------------------------------------------
 async function fetchBook(asin) {
-  return fetch(`${CDL_BOOKS_API_URL}${BOOKS_API_PATH}/${encodeURIComponent(asin)}`, {
+  return fetch(`${CDL_BOOKS_API_URL}${BOOKS_API_PATH}?isbns=${encodeURIComponent(asin)}`, {
     headers: {
       'X-Api-Key': CDL_BOOKS_API_KEY,
       'Accept':    'application/json',
@@ -108,14 +108,22 @@ async function fetchBook(asin) {
       await pool.end();
       process.exit(1);
     }
-    if (!body || typeof body.title !== 'string') {
+    if (!body || !Array.isArray(body.books)) {
       console.error(`probe: unrecognized shape (HTTP ${probeRes.status}): ${raw.slice(0, 300)}`);
       await pool.end();
       process.exit(1);
     }
-    console.log(`probe: shape confirmed via ${probeAsin} (title present)`);
-  } else if (probeRes.status === 404) {
-    console.log(`probe: 404 on ${probeAsin} — auth OK, endpoint reachable`);
+    const probeRecord = body.books[0];
+    if (probeRecord?.found) {
+      if (typeof probeRecord.title !== 'string' || !('cover_url' in probeRecord)) {
+        console.error(`probe: unexpected record keys — ${JSON.stringify(Object.keys(probeRecord))}`);
+        await pool.end();
+        process.exit(1);
+      }
+      console.log(`probe: shape confirmed via ${probeAsin} (title present)`);
+    } else {
+      console.log(`probe: not-found on ${probeAsin} — auth OK, endpoint reachable`);
+    }
   } else {
     const body = await probeRes.text();
     console.error(`probe: unexpected HTTP ${probeRes.status}: ${body.slice(0, 300)}`);
@@ -150,31 +158,34 @@ for (const asin of candidates) {
       await new Promise(r => setTimeout(r, DELAY_MS));
       continue;
     }
-    const title     = body.title     ?? null;
-    const cover_url = body.coverUrl  ?? body.cover_url ?? body.cover ?? null;
-    await pool.query(
-      `INSERT INTO title_cache (asin, title, cover_url, found, fetched_at)
-       VALUES ($1, $2, $3, true, now())
-       ON CONFLICT (asin) DO UPDATE SET
-         title      = EXCLUDED.title,
-         cover_url  = EXCLUDED.cover_url,
-         found      = true,
-         fetched_at = EXCLUDED.fetched_at`,
-      [asin, title, cover_url],
-    );
-    console.log(`${asin}: found — ${title}`);
-    found++;
-  } else if (res.status === 404) {
-    // Negative cache — third-party ASINs stay quiet for 30 days
-    await pool.query(
-      `INSERT INTO title_cache (asin, found, fetched_at)
-       VALUES ($1, false, now())
-       ON CONFLICT (asin) DO UPDATE SET
-         found      = false,
-         fetched_at = EXCLUDED.fetched_at`,
-      [asin],
-    );
-    notFound++;
+    const record    = body.books?.[0];
+    if (record?.found) {
+      const title     = record.title     ?? null;
+      const cover_url = record.cover_url ?? null;
+      await pool.query(
+        `INSERT INTO title_cache (asin, title, cover_url, found, fetched_at)
+         VALUES ($1, $2, $3, true, now())
+         ON CONFLICT (asin) DO UPDATE SET
+           title      = EXCLUDED.title,
+           cover_url  = EXCLUDED.cover_url,
+           found      = true,
+           fetched_at = EXCLUDED.fetched_at`,
+        [asin, title, cover_url],
+      );
+      console.log(`${asin}: found — ${title}`);
+      found++;
+    } else {
+      // Negative cache — not in CDL catalogue (found: false in envelope)
+      await pool.query(
+        `INSERT INTO title_cache (asin, found, fetched_at)
+         VALUES ($1, false, now())
+         ON CONFLICT (asin) DO UPDATE SET
+           found      = false,
+           fetched_at = EXCLUDED.fetched_at`,
+        [asin],
+      );
+      notFound++;
+    }
   } else {
     const body = await res.text();
     console.error(`${asin}: HTTP ${res.status} — ${body.slice(0, 200)}`);
