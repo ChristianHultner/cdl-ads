@@ -275,10 +275,11 @@ for (let i = 0; i < recs.length; i++) {
   const requestBody = {
     targetingClauses: [
       {
-        campaignId: String(placement.campaign_id),
-        adGroupId:  String(placement.ad_group_id),
-        state:      'ENABLED',
-        bid:        bidToSend,
+        campaignId:     String(placement.campaign_id),
+        adGroupId:      String(placement.ad_group_id),
+        state:          'ENABLED',
+        expressionType: 'MANUAL',
+        bid:            bidToSend,
         expression: [
           { type: 'ASIN_SAME_AS', value: asin },
         ],
