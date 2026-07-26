@@ -264,6 +264,30 @@ if (candidates.length > 0) {
     }
   }
 
+  // Detect auto ad groups: any group whose ENABLED targets include expression_type='AUTO'.
+  // Used to exclude auto destinations from PROMOTE_ASIN primary_placement selection.
+  const allPromotePlacementAgIds = [
+    ...new Set(
+      candidates
+        .filter((c) => c.recType === 'PROMOTE_ASIN')
+        .flatMap((c) => c.placements.map((p) => p.ad_group_id))
+        .filter(Boolean),
+    ),
+  ];
+  const autoGroupSet = new Set(); // ad_group_id (string) — group has expression_type='AUTO' target
+  if (allPromotePlacementAgIds.length > 0) {
+    const { rows: autoRows } = await pool.query(
+      `SELECT DISTINCT ad_group_id
+         FROM amazon_targets
+        WHERE profile_id      = $1
+          AND ad_group_id     = ANY($2)
+          AND state           = 'ENABLED'
+          AND expression_type = 'AUTO'`,
+      [profileId, allPromotePlacementAgIds],
+    );
+    for (const row of autoRows) autoGroupSet.add(String(row.ad_group_id));
+  }
+
   for (const c of candidates) {
     const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
     const win      = `${windowStart} – ${windowEnd}`;
@@ -458,13 +482,18 @@ if (candidates.length > 0) {
       };
     } else {
       // PROMOTE_ASIN — UNHARVESTED (new target, destination = highest-spend placement).
+      const eligiblePlacements = c.placements.filter((p) => !autoGroupSet.has(String(p.ad_group_id)));
+      if (eligiblePlacements.length === 0) {
+        console.log(`  skipped (no manual destination — all placements are auto groups): [PROMOTE_ASIN] "${c.searchTerm}"`);
+        continue;
+      }
       const acosPct = (c.acos * 100).toFixed(1);
       proposal =
         `Target ASIN for '${c.searchTerm}': ${c.orders} orders at ` +
         `${acosPct}% ACoS (${spendFmt} spend) in ${win}.`;
-      const primaryPlacement = c.placements.reduce(
+      const primaryPlacement = eligiblePlacements.reduce(
         (max, p) => (p.spend > max.spend ? p : max),
-        c.placements[0],
+        eligiblePlacements[0],
       );
       evidence = {
         window_start:      windowStart,

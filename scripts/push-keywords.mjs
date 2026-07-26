@@ -139,7 +139,7 @@ const adGroupIds = [
 
 // ── 3b. GROUP CLASSIFICATION — ONE batch query over all placement ad groups ───
 // Returns ENABLED keyword counts per group; groups absent from result = zero.
-const groupKwMap = new Map(); // ad_group_id (string) → { exactKws, anyKws }
+const groupKwMap = new Map(); // ad_group_id (string) → { exactKws, anyKws, hasAuto }
 
 if (adGroupIds.length > 0) {
   const { rows: groupRows } = await pool.query(
@@ -157,7 +157,24 @@ if (adGroupIds.length > 0) {
     groupKwMap.set(row.ad_group_id, {
       exactKws: Number(row.exact_kws),
       anyKws:   Number(row.any_kws),
+      hasAuto:  0,
     });
+  }
+  // has_auto: count FILTER WHERE expression_type='AUTO' > 0 — excludes auto groups from tier selection.
+  const { rows: autoRows } = await pool.query(
+    `SELECT ad_group_id::text,
+            count(*) FILTER (WHERE expression_type = 'AUTO') AS has_auto
+       FROM amazon_targets
+      WHERE profile_id  = $1
+        AND ad_group_id = ANY($2)
+        AND state       = 'ENABLED'
+      GROUP BY ad_group_id`,
+    [profileId, adGroupIds],
+  );
+  for (const row of autoRows) {
+    const entry = groupKwMap.get(row.ad_group_id);
+    if (entry) entry.hasAuto = Number(row.has_auto);
+    else groupKwMap.set(row.ad_group_id, { exactKws: 0, anyKws: 0, hasAuto: Number(row.has_auto) });
   }
 }
 
@@ -217,10 +234,12 @@ for (let i = 0; i < recs.length; i++) {
   const placements = Array.isArray(evidence?.placements) ? evidence.placements : [];
 
   const tierA = placements
-    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1)
+    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1
+              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0)
     .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
   const tierB = placements
-    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1)
+    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1
+              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0)
     .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
 
   let placement = null;

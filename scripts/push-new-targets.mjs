@@ -143,13 +143,14 @@ const adGroupIds = [
 // asin_targets = count of ASIN targets (resolved_asin IS NOT NULL)
 // any_targets  = count of any ENABLED targets
 // Groups absent from result = zero targets.
-const groupTargetMap = new Map(); // ad_group_id (string) → { asinTargets, anyTargets }
+const groupTargetMap = new Map(); // ad_group_id (string) → { asinTargets, anyTargets, hasAuto }
 
 if (adGroupIds.length > 0) {
   const { rows: groupRows } = await pool.query(
     `SELECT ad_group_id::text,
             count(*) FILTER (WHERE resolved_asin IS NOT NULL) AS asin_targets,
-            count(*) AS any_targets
+            count(*) AS any_targets,
+            count(*) FILTER (WHERE expression_type = 'AUTO') AS has_auto
        FROM amazon_targets
       WHERE profile_id  = $1
         AND ad_group_id = ANY($2)
@@ -161,6 +162,7 @@ if (adGroupIds.length > 0) {
     groupTargetMap.set(row.ad_group_id, {
       asinTargets: Number(row.asin_targets),
       anyTargets:  Number(row.any_targets),
+      hasAuto:     Number(row.has_auto),
     });
   }
 }
@@ -223,10 +225,12 @@ for (let i = 0; i < recs.length; i++) {
   const placements = Array.isArray(evidence?.placements) ? evidence.placements : [];
 
   const tierA = placements
-    .filter(p => (groupTargetMap.get(String(p.ad_group_id))?.asinTargets ?? 0) >= 1)
+    .filter(p => (groupTargetMap.get(String(p.ad_group_id))?.asinTargets ?? 0) >= 1
+              && (groupTargetMap.get(String(p.ad_group_id))?.hasAuto     ?? 0) === 0)
     .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
   const tierB = placements
-    .filter(p => (groupTargetMap.get(String(p.ad_group_id))?.anyTargets  ?? 0) >= 1)
+    .filter(p => (groupTargetMap.get(String(p.ad_group_id))?.anyTargets  ?? 0) >= 1
+              && (groupTargetMap.get(String(p.ad_group_id))?.hasAuto     ?? 0) === 0)
     .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
 
   let placement = null;
