@@ -17,27 +17,29 @@ const profileIdStr = values.profile;
 const profileId    = BigInt(profileIdStr);
 
 // ---------------------------------------------------------------------------
-// DB
+// DB — one short-lived pool for profile lookup only; closed immediately after.
+// Each phase opens its own pool after COMPLETED + download, closes in finally.
 // ---------------------------------------------------------------------------
 const { DATABASE_URL } = process.env;
 if (!DATABASE_URL) throw new Error('DATABASE_URL is not set');
-const pool = new Pool({ connectionString: DATABASE_URL });
 
 // ---------------------------------------------------------------------------
 // Look up profile row → credential env_var_name + region
 // ---------------------------------------------------------------------------
-const { rows: profileRows } = await pool.query(
-  `SELECT p.profile_id, p.region, c.env_var_name
-     FROM amazon_profiles p
-     JOIN amazon_credentials c ON c.id = p.credential_id
-    WHERE p.profile_id = $1`,
-  [profileId],
-);
-if (profileRows.length === 0) {
-  await pool.end();
-  throw new Error(`Profile ${profileIdStr} not found in DB`);
+let region, env_var_name;
+{
+  const lookupPool = new Pool({ connectionString: DATABASE_URL });
+  const { rows: profileRows } = await lookupPool.query(
+    `SELECT p.profile_id, p.region, c.env_var_name
+       FROM amazon_profiles p
+       JOIN amazon_credentials c ON c.id = p.credential_id
+      WHERE p.profile_id = $1`,
+    [profileId],
+  );
+  await lookupPool.end();
+  if (profileRows.length === 0) throw new Error(`Profile ${profileIdStr} not found in DB`);
+  ({ region, env_var_name } = profileRows[0]);
 }
-const { region, env_var_name } = profileRows[0];
 
 // Region → API host (with protocol)
 const REGION_HOST = {
@@ -46,25 +48,17 @@ const REGION_HOST = {
   FE: 'https://advertising-api-fe.amazon.com',
 };
 const host = REGION_HOST[region];
-if (!host) {
-  await pool.end();
-  throw new Error(`Unknown region: ${region}`);
-}
+if (!host) throw new Error(`Unknown region: ${region}`);
 
 // ---------------------------------------------------------------------------
 // Credentials
 // ---------------------------------------------------------------------------
 const refreshToken = process.env[env_var_name];
-if (!refreshToken) {
-  await pool.end();
-  throw new Error(`Env var ${env_var_name} not set`);
-}
+if (!refreshToken) throw new Error(`Env var ${env_var_name} not set`);
 
 const { LWA_CLIENT_ID, LWA_CLIENT_SECRET } = process.env;
-if (!LWA_CLIENT_ID || !LWA_CLIENT_SECRET) {
-  await pool.end();
+if (!LWA_CLIENT_ID || !LWA_CLIENT_SECRET)
   throw new Error('LWA_CLIENT_ID / LWA_CLIENT_SECRET not set');
-}
 
 // ---------------------------------------------------------------------------
 // Window: (today − 14 days) through yesterday (UTC), both as YYYY-MM-DD
@@ -253,6 +247,7 @@ let campaignOk = false;
   const phase = 'campaign-daily';
   console.log(`\n=== ${phase} phase start ===`);
 
+  let phasePool;
   try {
     const reportId = await requestAndPoll(phase, {
       name:          `cdl-ads spCampaigns ${startDate}_${endDate}`,
@@ -272,8 +267,9 @@ let campaignOk = false;
     const reportRows = await downloadReport(phase, reportId);
     const fetched    = reportRows.length;
 
-    // Land rows — upsert shape verbatim from download-reports.mjs
-    const client = await pool.connect();
+    // Pool created after COMPLETED + downloaded; closed in finally
+    phasePool    = new Pool({ connectionString: DATABASE_URL });
+    const client = await phasePool.connect();
     let landed   = 0;
     try {
       await client.query('BEGIN');
@@ -314,7 +310,7 @@ let campaignOk = false;
     }
 
     // Count invariant
-    const { rows: cntRows } = await pool.query(
+    const { rows: cntRows } = await phasePool.query(
       `SELECT COUNT(*) AS c FROM amazon_campaign_daily
         WHERE profile_id = $1 AND date BETWEEN $2 AND $3`,
       [profileIdStr, startDate, endDate],
@@ -324,6 +320,8 @@ let campaignOk = false;
     campaignOk = true;
   } catch (err) {
     console.error(`${phase}: FAILED — ${err.message}`);
+  } finally {
+    if (phasePool) await phasePool.end();
   }
 }
 
@@ -345,6 +343,7 @@ let searchOk = true; // default true so non-guarded profiles exit 0 on campaign 
     const BATCH_SIZE = 500;
     const NUM_COLS   = 13;
 
+    let phasePool;
     try {
       const reportId = await requestAndPoll(phase, {
         name:          `cdl-ads spSearchTerm ${startDate}_${endDate}`,
@@ -364,8 +363,9 @@ let searchOk = true; // default true so non-guarded profiles exit 0 on campaign 
       const reportRows = await downloadReport(phase, reportId);
       const fetched    = reportRows.length;
 
-      // Land rows — batched upsert shape verbatim from download-search-terms.mjs
-      const client = await pool.connect();
+      // Pool created after COMPLETED + downloaded; closed in finally
+      phasePool    = new Pool({ connectionString: DATABASE_URL });
+      const client = await phasePool.connect();
       let landed   = 0;
       let batchN   = 0;
       try {
@@ -424,7 +424,7 @@ let searchOk = true; // default true so non-guarded profiles exit 0 on campaign 
       }
 
       // Count invariant
-      const { rows: cntRows } = await pool.query(
+      const { rows: cntRows } = await phasePool.query(
         `SELECT COUNT(*) AS c FROM amazon_search_term_daily
           WHERE profile_id = $1 AND date BETWEEN $2 AND $3`,
         [profileIdStr, startDate, endDate],
@@ -434,6 +434,8 @@ let searchOk = true; // default true so non-guarded profiles exit 0 on campaign 
       searchOk = true;
     } catch (err) {
       console.error(`${phase}: FAILED — ${err.message}`);
+    } finally {
+      if (phasePool) await phasePool.end();
     }
   }
 }
@@ -441,8 +443,6 @@ let searchOk = true; // default true so non-guarded profiles exit 0 on campaign 
 // ---------------------------------------------------------------------------
 // Finalize
 // ---------------------------------------------------------------------------
-await pool.end();
-
 if (!campaignOk || !searchOk) {
   console.error('nightly-sync: one or more phases FAILED');
   process.exit(1);
