@@ -601,20 +601,52 @@ if (uniquePromoteAgIds.length > 0) {
   for (const r of autoAgRows) promoteAutoGroupSet.add(r.ad_group_id);
 }
 
-// 6c. Orphan detection: rec is orphaned when every placement ad_group_id is AUTO
-//     (or when placements list is empty — no destination at all).
+// Groups with >= 1 ENABLED keyword — HOME test for PROMOTE_TERM.
+const hasKeywordGroupSet = new Set();
+// Groups with >= 1 ENABLED target — HOME test for PROMOTE_ASIN.
+const hasTargetGroupSet  = new Set();
+if (uniquePromoteAgIds.length > 0) {
+  const { rows: kwRows } = await pool.query(
+    `SELECT DISTINCT ad_group_id::text
+       FROM amazon_keywords
+      WHERE profile_id  = $1
+        AND ad_group_id = ANY($2)
+        AND state       = 'ENABLED'`,
+    [profileId, uniquePromoteAgIds],
+  );
+  for (const r of kwRows) hasKeywordGroupSet.add(r.ad_group_id);
+
+  const { rows: tgtRows } = await pool.query(
+    `SELECT DISTINCT ad_group_id::text
+       FROM amazon_targets
+      WHERE profile_id  = $1
+        AND ad_group_id = ANY($2)
+        AND state       = 'ENABLED'`,
+    [profileId, uniquePromoteAgIds],
+  );
+  for (const r of tgtRows) hasTargetGroupSet.add(r.ad_group_id);
+}
+
+// 6c. Orphan detection: rec has no HOME group.
+//     HOME for PROMOTE_TERM = not AUTO AND has >= 1 ENABLED keyword.
+//     HOME for PROMOTE_ASIN = not AUTO AND has >= 1 ENABLED target.
+//     A manual-but-keyword-less group is neither pushable nor a HOME — it would
+//     create permanent limbo — so it must NOT satisfy the HOME test.
 const orphans = [];
 for (const row of openPromoteRows) {
   const ev = (typeof row.evidence === 'string') ? JSON.parse(row.evidence) : (row.evidence ?? {});
   const placements = ev.placements ?? [];
+  const holdingSet = row.rec_type === 'PROMOTE_TERM' ? hasKeywordGroupSet : hasTargetGroupSet;
   const hasManual  = placements.some(
-    (p) => p.ad_group_id && !promoteAutoGroupSet.has(String(p.ad_group_id)),
+    (p) => p.ad_group_id &&
+           !promoteAutoGroupSet.has(String(p.ad_group_id)) &&
+           holdingSet.has(String(p.ad_group_id)),
   );
   if (!hasManual) {
     orphans.push({ id: row.id, rec_type: row.rec_type, target_text: row.target_text, placements, evidence: ev });
   }
 }
-console.log(`  Orphans (all placements auto or empty): ${orphans.length}`);
+console.log(`  Orphans (no HOME — auto, keyword-less, or target-less): ${orphans.length}`);
 
 if (orphans.length === 0) {
   console.log('  No orphans — skipping CREATE_STRUCTURE drafts.');
