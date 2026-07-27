@@ -11,8 +11,7 @@
 //    Christian enables in console after inspection, or a later frame
 //    flips state after verification. Never change state: 'PAUSED' here.
 //
-// NOTE (startDate): SP v3 campaigns typically expect YYYYMMDD (e.g. "20260726").
-// If the API rejects this, try ISO "YYYY-MM-DD". Confirm shape on first live run.
+// NOTE (startDate): SP v3 campaigns require ISO "YYYY-MM-DD" (confirmed via 400 regex).
 
 import { parseArgs } from 'node:util';
 import { Pool, neonConfig } from '@neondatabase/serverless';
@@ -76,16 +75,8 @@ if (!host) {
 }
 
 // ── Date helper ───────────────────────────────────────────────────────────────
-// SP v3 campaigns startDate: YYYYMMDD is the most common shape in the SP API
-// family. If the API rejects this, try ISO "YYYY-MM-DD". Confirm on first live run.
-const todayYYYYMMDD = () => {
-  const d = new Date();
-  return (
-    String(d.getUTCFullYear()) +
-    String(d.getUTCMonth() + 1).padStart(2, '0') +
-    String(d.getUTCDate()).padStart(2, '0')
-  );
-};
+// SP v3 campaigns startDate: confirmed shape is ISO "YYYY-MM-DD" (e.g. "2026-07-27").
+const todayISODate = () => new Date().toISOString().slice(0, 10);
 
 // ── 1. SELECT APPROVED CREATE_STRUCTURE recs (PUSHED guard via status filter) ─
 const { rows: recs } = await pool.query(
@@ -136,7 +127,7 @@ if (!executeMode) {
           state:          'PAUSED',
           dynamicBidding: { strategy: 'LEGACY_FOR_SALES' },
           budget:         { budgetType: 'DAILY', budget: 5 },
-          startDate:      todayYYYYMMDD(),
+          startDate:      todayISODate(),
         },
       ],
     };
