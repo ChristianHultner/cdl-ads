@@ -2,6 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 import { approveRecommendation, rejectRecommendation } from './actions'
+import { PushAllButton } from './PushAllButton'
+import type { ProfileMeta } from './PushAllButton'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CURRENCY_SYMBOL: Record<string, string> = {
@@ -309,6 +311,19 @@ export default async function RecommendationsPage() {
   for (const row of nonDraftRows) {
     nonDraftCounts.set(row.status, (nonDraftCounts.get(row.status) ?? 0) + 1)
   }
+
+  // ── Push-all: approved count + per-profile metadata ───────────────────────
+  const approvedRows  = nonDraftRows.filter(r => r.status === 'APPROVED')
+  const totalApproved = approvedRows.length
+  const profileApprMap = new Map<string, { count: number; country: string }>()
+  for (const r of approvedRows) {
+    const entry = profileApprMap.get(r.profile_id) ?? { count: 0, country: r.country_code }
+    entry.count++
+    profileApprMap.set(r.profile_id, entry)
+  }
+  const approvedProfiles: ProfileMeta[] = Array.from(profileApprMap.entries()).map(
+    ([profileId, { count, country }]) => ({ profileId, label: country, count }),
+  )
 
   // ── Sub-components ─────────────────────────────────────────────────────────
 
@@ -786,6 +801,8 @@ export default async function RecommendationsPage() {
   return (
     <div>
       <h1>Recommendations</h1>
+
+      <PushAllButton totalApproved={totalApproved} profiles={approvedProfiles} />
 
       {rows.length === 0 ? (
         <p style={{ color: 'var(--cdl-muted)' }}>No recommendations yet.</p>
