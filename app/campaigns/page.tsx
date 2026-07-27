@@ -83,24 +83,24 @@ export default async function CampaignsPage({
         HAVING sum(acd.cost) > 0
         ORDER BY sum(acd.cost) DESC
       `,
-      // All campaigns with 30d spend — all states, filtered client-side
+      // All ENABLED+PAUSED campaigns — LEFT JOIN daily so newborns (zero spend) still appear
       sql`
         SELECT
-          d.profile_id::text,
-          d.campaign_id,
-          coalesce(c.name, d.campaign_id)      AS campaign_name,
-          coalesce(c.state, 'UNKNOWN')          AS state,
-          sum(d.cost)::text                     AS spend_30d,
-          sum(d.sales_14d)::text                AS sales_30d,
-          (sum(d.cost) / nullif(sum(d.sales_14d), 0))::text AS acos
-        FROM amazon_campaign_daily d
-        LEFT JOIN amazon_campaigns c
-          ON c.campaign_id = d.campaign_id AND c.profile_id = d.profile_id
-        WHERE d.date >= CURRENT_DATE - INTERVAL '30 days'
-        GROUP BY d.profile_id, d.campaign_id,
-                 coalesce(c.name, d.campaign_id),
-                 coalesce(c.state, 'UNKNOWN')
-        ORDER BY d.profile_id, sum(d.cost) DESC
+          c.profile_id::text,
+          c.campaign_id,
+          c.name                                              AS campaign_name,
+          c.state,
+          coalesce(sum(d.cost), 0)::text                      AS spend_30d,
+          coalesce(sum(d.sales_14d), 0)::text                 AS sales_30d,
+          (sum(d.cost) / nullif(sum(d.sales_14d), 0))::text  AS acos
+        FROM amazon_campaigns c
+        LEFT JOIN amazon_campaign_daily d
+          ON  d.campaign_id = c.campaign_id
+          AND d.profile_id  = c.profile_id
+          AND d.date >= CURRENT_DATE - INTERVAL '30 days'
+        WHERE c.state IN ('ENABLED', 'PAUSED')
+        GROUP BY c.profile_id, c.campaign_id, c.name, c.state
+        ORDER BY c.profile_id, sum(d.cost) DESC NULLS LAST
       `,
       // Total campaign count per profile (all states)
       sql`
@@ -225,7 +225,7 @@ export default async function CampaignsPage({
             {/* Campaign table */}
             {camps.length === 0 ? (
               <p style={{ color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
-                No {filterLabel} campaigns with spend in the last 30 days.
+                No {filterLabel} campaigns.
               </p>
             ) : (
               <div className="table-card">
