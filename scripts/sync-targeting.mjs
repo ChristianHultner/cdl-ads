@@ -142,7 +142,11 @@ async function fetchListPage(url, media, reqBody, phase, page) {
 // ---------------------------------------------------------------------------
 function resolveAsin(t) {
   const expressionArr = Array.isArray(t.expression) ? t.expression : [];
-  const asinEntry     = expressionArr.find(e => e.type === 'ASIN_SAME_AS');
+  // Match both exact (ASIN_SAME_AS) and expanded (ASIN_EXPANDED_FROM) product targets;
+  // the value field carries the ASIN in both cases.
+  const asinEntry     = expressionArr.find(
+    e => e.type === 'ASIN_SAME_AS' || e.type === 'ASIN_EXPANDED_FROM',
+  );
   return asinEntry ? String(asinEntry.value).toUpperCase() : null;
 }
 

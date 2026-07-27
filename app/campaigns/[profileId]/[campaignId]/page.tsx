@@ -89,6 +89,7 @@ interface Target {
   ad_group_id: string
   state: string
   expression_type: string | null
+  expression_subtype: string | null
   resolved_asin: string | null
   bid: string | null
 }
@@ -210,6 +211,7 @@ export default async function CampaignDetailPage({
         ad_group_id,
         state,
         expression_type,
+        expression->0->>'type' AS expression_subtype,
         resolved_asin,
         bid::text
       FROM amazon_targets
@@ -597,14 +599,19 @@ export default async function CampaignDetailPage({
                             <tr key={t.target_id}>
                               <td>
                                 {t.resolved_asin ? (
-                                  <a
-                                    href={asinUrl(t.resolved_asin, profile.country_code)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    style={{ color: 'var(--cdl-blue)', fontFamily: 'monospace', fontSize: '0.88em' }}
-                                  >
-                                    {t.resolved_asin.toUpperCase()}
-                                  </a>
+                                  <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: '0.4em' }}>
+                                    <a
+                                      href={asinUrl(t.resolved_asin, profile.country_code)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      style={{ color: 'var(--cdl-blue)', fontFamily: 'monospace', fontSize: '0.88em' }}
+                                    >
+                                      {t.resolved_asin.toUpperCase()}
+                                    </a>
+                                    {t.expression_subtype === 'ASIN_EXPANDED_FROM' && (
+                                      <span className="badge badge-muted">Expanded</span>
+                                    )}
+                                  </span>
                                 ) : (
                                   <span style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem' }}>
                                     {t.expression_type ?? '—'}
