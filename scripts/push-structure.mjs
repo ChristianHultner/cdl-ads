@@ -286,7 +286,18 @@ for (const rec of recs) {
   console.log(`Seed ASINs  : ${seedAsins.length}`);
   console.log('');
 
+  // ── RESUME CHECK ─────────────────────────────────────────────────────────────
+  const sp = ev.structure_progress ?? {};
+  let createdCampaignId = sp.created_campaign_id ?? null;
+  let createdAdGroupId  = sp.created_ad_group_id ?? null;
+
+  if (createdCampaignId) {
+    console.log(`Resuming rec ${rec.id} from existing campaign ${createdCampaignId}`);
+    console.log('');
+  }
+
   // ── 2a. CAMPAIGN ────────────────────────────────────────────────────────────
+  if (!createdCampaignId) {
   const campaignBody = {
     campaigns: [
       {
@@ -336,13 +347,25 @@ for (const rec of recs) {
     process.exit(1);
   }
   if (campErrors.length) console.warn('CAMPAIGN warnings:', JSON.stringify(campErrors));
-  const createdCampaignId = campIds[0];
+  createdCampaignId = campIds[0];
   console.log(`Created campaignId: ${createdCampaignId}`);
   console.log('');
 
+  // ── Incremental evidence write: campaign created ───────────────────────────
+  await pool.query(
+    `UPDATE recommendations
+        SET evidence = evidence || jsonb_build_object('structure_progress', jsonb_build_object('created_campaign_id', $2::text))
+      WHERE id = $1 AND status = 'APPROVED'`,
+    [rec.id, createdCampaignId],
+  );
+  console.log(`Rec ${rec.id} — campaign id saved to evidence.`);
+  console.log('');
+
   await delay(DELAY_MS);
+  } // end if (!createdCampaignId)
 
   // ── 2b. AD GROUP ────────────────────────────────────────────────────────────
+  if (!createdAdGroupId) {
   const adGroupBody = {
     adGroups: [
       {
@@ -390,11 +413,24 @@ for (const rec of recs) {
     process.exit(1);
   }
   if (agErrors.length) console.warn('AD GROUP warnings:', JSON.stringify(agErrors));
-  const createdAdGroupId = agIds[0];
+  createdAdGroupId = agIds[0];
   console.log(`Created adGroupId: ${createdAdGroupId}`);
   console.log('');
 
+  // ── Incremental evidence write: ad group created ───────────────────────────
+  await pool.query(
+    `UPDATE recommendations
+        SET evidence = jsonb_set(evidence, '{structure_progress}',
+              COALESCE(evidence->'structure_progress', '{}'::jsonb) ||
+              jsonb_build_object('created_ad_group_id', $2::text))
+      WHERE id = $1 AND status = 'APPROVED'`,
+    [rec.id, createdAdGroupId],
+  );
+  console.log(`Rec ${rec.id} — ad group id saved to evidence.`);
+  console.log('');
+
   await delay(DELAY_MS);
+  } // end if (!createdAdGroupId)
 
   // ── 2c. PRODUCT ADS ─────────────────────────────────────────────────────────
   // Partial failures OK: >= 1 success still counts the room as built.
