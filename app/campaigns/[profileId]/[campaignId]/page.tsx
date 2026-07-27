@@ -41,6 +41,15 @@ function computeAcos(spend: string | number, sales: string | number): string | n
   return ((parseFloat(String(spend)) / sa) * 100).toFixed(1)
 }
 
+// ── Expression-type → human label map (census: 2026-07-27) ─────────────────
+const EXPRESSION_LABELS: Record<string, string> = {
+  QUERY_HIGH_REL_MATCHES:  'Auto: close match',
+  QUERY_BROAD_REL_MATCHES: 'Auto: loose match',
+  ASIN_SUBSTITUTE_RELATED: 'Auto: substitutes',
+  ASIN_ACCESSORY_RELATED:  'Auto: complements',
+  KEYWORD_GROUP_SAME_AS:   'Keyword group',
+}
+
 // ── Interfaces ───────────────────────────────────────────────────────────────
 interface ProfileRow {
   country_code: string
@@ -618,7 +627,9 @@ export default async function CampaignDetailPage({
                                   <span style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem' }}>
                                     {t.expression_subtype === 'ASIN_CATEGORY_SAME_AS'
                                       ? `Category: ${t.expression_subvalue ?? '—'}`
-                                      : (t.expression_subtype ?? t.expression_type ?? '—')}
+                                      : t.expression_subtype
+                                        ? (EXPRESSION_LABELS[t.expression_subtype] ?? t.expression_subtype)
+                                        : (t.expression_type ?? '—')}
                                   </span>
                                 )}
                               </td>
