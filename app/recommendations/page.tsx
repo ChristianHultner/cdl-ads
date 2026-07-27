@@ -471,11 +471,12 @@ export default async function RecommendationsPage() {
   }) {
     const pp = ev.primary_placement
     if (!pp) return null
-    const agName      = adGroupMap.get(`${profileId}:${pp.ad_group_id}`) ?? pp.ad_group_id
-    const allTgts     = destTargetsMap.get(`${profileId}:${pp.ad_group_id}`) ?? []
-    const sym         = CURRENCY_SYMBOL[currency] ?? `${currency} `
-    const displayTgts = allTgts.slice(0, 10)
-    const extraCount  = allTgts.length - displayTgts.length
+    const agName  = adGroupMap.get(`${profileId}:${pp.ad_group_id}`) ?? pp.ad_group_id
+    const allTgts = destTargetsMap.get(`${profileId}:${pp.ad_group_id}`) ?? []
+    const sym     = CURRENCY_SYMBOL[currency] ?? `${currency} `
+    const bids    = allTgts.map(t => (t.bid != null ? parseFloat(t.bid) : null)).filter((b): b is number => b != null)
+    const bidMin  = bids.length > 0 ? `${sym}${Math.min(...bids).toFixed(2)}` : '—'
+    const bidMax  = bids.length > 0 ? `${sym}${Math.max(...bids).toFixed(2)}` : '—'
     return (
       <div style={{
         border: '1px solid #c8dfe9', borderRadius: '6px',
@@ -487,66 +488,18 @@ export default async function RecommendationsPage() {
         }}>
           Destination Ad Group
         </div>
-        <div style={{ fontWeight: 600, fontSize: '0.88rem', marginBottom: allTgts.length > 0 ? '0.55rem' : 0 }}>
+        <div style={{ fontSize: '0.85rem', color: 'var(--cdl-ink)', marginBottom: '0.4rem' }}>
+          {allTgts.length} existing target{allTgts.length !== 1 ? 's' : ''}{' '}
+          · bids {bidMin}–{bidMax}{' '}
+          ·{' '}
           <a
             href={`/campaigns/${profileId}/${encodeURIComponent(pp.campaign_id)}#ag-${pp.ad_group_id}`}
             style={{ color: 'var(--cdl-blue)' }}
           >{agName}</a>
         </div>
-        {allTgts.length === 0 ? (
-          <p style={{ color: 'var(--cdl-muted)', fontSize: '0.82rem', margin: 0 }}>
-            No existing targets in this group yet.
-          </p>
-        ) : (
-          <div className="table-card" style={{ marginBottom: 0 }}>
-            <div className="table-scroll">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Target</th>
-                    <th>State</th>
-                    <th>Bid</th>
-                    <th>ACOS 60d</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayTgts.map(t => {
-                    const acosKey  = `${profileId}:${t.ad_group_id}:${(t.resolved_asin ?? '').toLowerCase()}`
-                    const acosData = t.resolved_asin ? targetAcosMap.get(acosKey) : undefined
-                    const acosStr  = (() => {
-                      if (!acosData) return '—'
-                      const sales = parseFloat(acosData.sales)
-                      if (!sales) return '—'
-                      return (parseFloat(acosData.spend) / sales * 100).toFixed(1) + '%'
-                    })()
-                    return (
-                      <tr key={t.target_id}>
-                        <td style={{ fontFamily: 'monospace', fontSize: '0.85em' }}>
-                          {t.resolved_asin?.toUpperCase() ?? t.expression_type ?? '—'}
-                        </td>
-                        <td><span className={stateBadgeCls(t.state)}>{t.state}</span></td>
-                        <td className="num">
-                          {t.bid != null ? `${sym}${parseFloat(t.bid).toFixed(2)}` : '—'}
-                        </td>
-                        <td className="num">{acosStr}</td>
-                      </tr>
-                    )
-                  })}
-                  {extraCount > 0 && (
-                    <tr>
-                      <td colSpan={4} style={{
-                        color: 'var(--cdl-muted)', fontStyle: 'italic',
-                        textAlign: 'center' as const, padding: '6px',
-                      }}>
-                        +{extraCount} more
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+        <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+          This ASIN&apos;s traffic currently reaches this group via auto/expanded matching — an explicit target takes bid control at your chosen price.
+        </p>
       </div>
     )
   }
@@ -581,7 +534,6 @@ export default async function RecommendationsPage() {
   }) {
     const placements = (ev.placements ?? []).slice().sort((a, b) => b.spend - a.spend)
     if (placements.length === 0) return null
-    const primaryId = ev.primary_placement?.ad_group_id
     return (
       <div style={{ marginTop: '0.85rem' }}>
         <div style={{
@@ -608,28 +560,16 @@ export default async function RecommendationsPage() {
                 {placements.map(p => {
                   const camp      = campMap.get(`${profileId}:${p.campaign_id}`)
                   const agName    = adGroupMap.get(`${profileId}:${p.ad_group_id}`)
-                  const isPrimary = p.ad_group_id === primaryId
-                  const primaryPill = isPrimary ? (
-                    <span style={{
-                      marginLeft: '0.4em', fontSize: '0.72rem', fontWeight: 700,
-                      background: 'var(--cdl-blue)', color: '#fff',
-                      borderRadius: '0.3em', padding: '0.1em 0.4em', whiteSpace: 'nowrap',
-                    }}>
-                      → will be added here if approved
-                    </span>
-                  ) : null
                   return (
                     <tr key={`${p.campaign_id}:${p.ad_group_id}`}>
                       <td>
                         {agName
-                          ? <span>
-                              <a
-                                href={`/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}#ag-${p.ad_group_id}`}
-                                style={{ color: 'var(--cdl-blue)' }}
-                              >{agName}</a>{primaryPill}
-                            </span>
+                          ? <a
+                              href={`/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}#ag-${p.ad_group_id}`}
+                              style={{ color: 'var(--cdl-blue)' }}
+                            >{agName}</a>
                           : <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
-                              {p.ad_group_id} (not in sync){primaryPill}
+                              {p.ad_group_id} (not in sync)
                             </span>}
                       </td>
                       <td style={{ maxWidth: '16em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
