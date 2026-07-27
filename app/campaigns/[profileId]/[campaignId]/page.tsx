@@ -101,6 +101,15 @@ interface StRow {
   sales: string
 }
 
+interface Keyword {
+  keyword_id: string
+  ad_group_id: string
+  keyword_text: string
+  match_type: string
+  state: string
+  bid: string | null
+}
+
 // ── Stat label helper ────────────────────────────────────────────────────────
 function StatLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -293,6 +302,28 @@ export default async function CampaignDetailPage({
   const adPerfMap = new Map<string, AdPerfRow>()
   for (const ap of adPerfRows) adPerfMap.set(ap.ad_id, ap)
 
+  // Keywords for the campaign (all ad groups) — profile_id bigint per migration 007
+  const keywords = await sql`
+    SELECT
+      keyword_id,
+      ad_group_id,
+      keyword_text,
+      match_type,
+      state,
+      bid::text
+    FROM amazon_keywords
+    WHERE profile_id = ${profileId}::bigint
+      AND campaign_id = ${campaignId}::text
+    ORDER BY ad_group_id, keyword_text
+  ` as unknown as Keyword[]
+
+  const kwsByGroup = new Map<string, Keyword[]>()
+  for (const kw of keywords) {
+    const list = kwsByGroup.get(kw.ad_group_id) ?? []
+    list.push(kw)
+    kwsByGroup.set(kw.ad_group_id, list)
+  }
+
   function stPerfFor(adGroupId: string, resolvedAsin: string): StRow | undefined {
     return (stByGroup.get(adGroupId) ?? []).find(
       r => r.search_term === resolvedAsin.toLowerCase()
@@ -381,10 +412,12 @@ export default async function CampaignDetailPage({
       )}
 
       {adGroups.map(ag => {
-        const pads     = padsByGroup.get(ag.ad_group_id)     ?? []
-        const tgts     = targetsByGroup.get(ag.ad_group_id)  ?? []
-        const topTerms = top8(ag.ad_group_id)
+        const pads      = padsByGroup.get(ag.ad_group_id)     ?? []
+        const tgts      = targetsByGroup.get(ag.ad_group_id)  ?? []
+        const topTerms  = top8(ag.ad_group_id)
+        const kws       = kwsByGroup.get(ag.ad_group_id)      ?? []
         const hasStPerf = tgts.some(t => t.resolved_asin && stPerfFor(ag.ad_group_id, t.resolved_asin))
+        const hasKwPerf = kws.some(kw => !!stPerfFor(ag.ad_group_id, kw.keyword_text))
 
         return (
           <section
@@ -480,7 +513,63 @@ export default async function CampaignDetailPage({
                 </div>
               )}
 
-              {/* ── c. Targets ── */}
+              {/* ── c. Keywords ── */}
+              <h4 style={{ marginBottom: '0.5rem' }}>Keywords</h4>
+              {kws.length === 0 ? (
+                <p style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem', marginBottom: '1.5rem' }}>
+                  No keywords in this ad group.
+                </p>
+              ) : (
+                <div className="table-card" style={{ marginBottom: '1.5rem' }}>
+                  <div className="table-scroll">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Keyword</th>
+                          <th>Match</th>
+                          <th>State</th>
+                          <th>Bid</th>
+                          <th>Spend 60d</th>
+                          <th>Orders 60d</th>
+                          <th>ACOS 60d</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {kws.map(kw => {
+                          const perf   = stPerfFor(ag.ad_group_id, kw.keyword_text)
+                          const kwAcos = perf ? computeAcos(perf.spend, perf.sales) : null
+                          return (
+                            <tr key={kw.keyword_id}>
+                              <td>{kw.keyword_text}</td>
+                              <td><span className="badge badge-muted">{kw.match_type}</span></td>
+                              <td><span className={stateBadgeCls(kw.state)}>{kw.state}</span></td>
+                              <td className="num">{kw.bid != null ? fmt(kw.bid) : '—'}</td>
+                              <td className="num">{perf ? `${fmt(perf.spend)} ${profile.currency_code}` : '—'}</td>
+                              <td className="num">{perf ? perf.orders : '—'}</td>
+                              <td className="num">{kwAcos != null ? `${kwAcos}%` : '—'}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {hasKwPerf && (
+                    <div style={{
+                      padding: '0.3rem 0.75rem',
+                      fontSize: '0.72rem',
+                      color: 'var(--cdl-muted)',
+                      borderTop: '1px solid #eef4f8',
+                      ...subLabel,
+                      textTransform: 'none',
+                      letterSpacing: 0,
+                    }}>
+                      Spend / Orders / ACOS: via search-term data (last 60d)
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── d. Targets ── */}
               <h4 style={{ marginBottom: '0.5rem' }}>Targets</h4>
               {tgts.length === 0 ? (
                 <p style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem', marginBottom: '1.5rem' }}>
