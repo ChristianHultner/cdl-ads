@@ -3,6 +3,8 @@
 import { neon } from '@neondatabase/serverless'
 import { redirect } from 'next/navigation'
 
+const SERVER_ASIN_RE = /^([0-9]{9}[0-9Xx]|B0[A-Za-z0-9]{8})$/i
+
 export async function approveRecommendation(formData: FormData) {
   const id = Number(formData.get('id'))
   if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid id')
@@ -12,14 +14,25 @@ export async function approveRecommendation(formData: FormData) {
     ? parseFloat(String(rawBid))
     : NaN
 
+  // CREATIVE_TARGET: ASIN supplied by reviewer after Amazon verification
+  const rawAsin = formData.get('asin')
+  const asin    = rawAsin !== null ? String(rawAsin).trim().toUpperCase() : null
+  const asinValid = asin ? SERVER_ASIN_RE.test(asin) : false
+
   const sql = neon(process.env.DATABASE_URL!)
 
-  if (!isNaN(bidNum) && isFinite(bidNum) && bidNum > 0) {
+  const hasBid  = !isNaN(bidNum) && isFinite(bidNum) && bidNum > 0
+  const hasAsin = asinValid && asin !== null
+
+  if (hasBid || hasAsin) {
+    const patch: Record<string, unknown> = {}
+    if (hasBid)  patch.approved_bid = bidNum
+    if (hasAsin) patch.asin = asin
     await sql`
       UPDATE recommendations
          SET status   = 'APPROVED',
              ruled_at = now(),
-             evidence = evidence || jsonb_build_object('approved_bid', ${bidNum}::numeric)
+             evidence = evidence || ${JSON.stringify(patch)}::jsonb
        WHERE id     = ${id}
          AND status  = 'DRAFT'
     `

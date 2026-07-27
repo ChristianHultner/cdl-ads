@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { neon } from '@neondatabase/serverless'
 import { approveRecommendation, rejectRecommendation } from './actions'
 import { PushAllButton } from './PushAllButton'
+import { CreativeTargetApproveForm } from './CreativeTargetApproveForm'
 import type { ProfileMeta } from './PushAllButton'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -730,33 +731,37 @@ export default async function RecommendationsPage() {
           <span style={{ color: 'var(--cdl-muted)', fontSize: '0.82rem', flexShrink: 0 }}>
             {r.country_code}
           </span>
-          {/* 2. Approve form with optional bid input */}
-          <form
-            action={approveRecommendation}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}
-          >
-            <input type="hidden" name="id" value={r.id} />
-            {hasBidInput && (
-              <input
-                type="number"
-                name="approved_bid"
-                step="0.01"
-                min="0.02"
-                defaultValue={proposedBid}
-                placeholder="bid"
-                style={{
-                  width: '5.2rem',
-                  padding: '3px 6px',
-                  fontSize: '0.82rem',
-                  border: '1px solid #c8dfe9',
-                  borderRadius: '4px',
-                  fontFamily: 'inherit',
-                  textAlign: 'right' as const,
-                }}
-              />
-            )}
-            <button type="submit" className="btn-approve">Approve</button>
-          </form>
+          {/* 2. Approve form — CREATIVE_TARGET: client form with ASIN gate; others: server action */}
+          {r.rec_type === 'CREATIVE_TARGET' ? (
+            <CreativeTargetApproveForm id={r.id} proposedBid={proposedBid} />
+          ) : (
+            <form
+              action={approveRecommendation}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}
+            >
+              <input type="hidden" name="id" value={r.id} />
+              {hasBidInput && (
+                <input
+                  type="number"
+                  name="approved_bid"
+                  step="0.01"
+                  min="0.02"
+                  defaultValue={proposedBid}
+                  placeholder="bid"
+                  style={{
+                    width: '5.2rem',
+                    padding: '3px 6px',
+                    fontSize: '0.82rem',
+                    border: '1px solid #c8dfe9',
+                    borderRadius: '4px',
+                    fontFamily: 'inherit',
+                    textAlign: 'right' as const,
+                  }}
+                />
+              )}
+              <button type="submit" className="btn-approve">Approve</button>
+            </form>
+          )}
           <form action={rejectRecommendation} style={{ display: 'inline', flexShrink: 0 }}>
             <input type="hidden" name="id" value={r.id} />
             <button type="submit" className="btn-reject">Reject</button>

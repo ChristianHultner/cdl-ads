@@ -93,15 +93,15 @@ if (!host) throw new Error(`Unknown region: ${region}`);
 const ENDPOINT   = `${host}/sp/targets`;
 const MEDIA_TYPE = 'application/vnd.spTargetingClause.v3+json';
 
-// ── 2. SELECT APPROVED PROMOTE_ASIN recs ─────────────────────────────────────
+// ── 2. SELECT APPROVED PROMOTE_ASIN + CREATIVE_TARGET recs ───────────────────
 const limit = Math.floor(params.push_max_per_run ?? 20);
 
 const { rows: recs } = await pool.query(
-  `SELECT id, target_text, evidence
+  `SELECT id, rec_type, target_text, evidence
      FROM recommendations
     WHERE profile_id = $1
       AND status     = 'APPROVED'
-      AND rec_type   = 'PROMOTE_ASIN'
+      AND rec_type   = ANY (ARRAY['PROMOTE_ASIN'::text, 'CREATIVE_TARGET'::text])
     ORDER BY id
     LIMIT $2`,
   [profileId, limit],
@@ -114,7 +114,7 @@ if (recs.length === 0) {
 }
 
 console.log(
-  `Found ${recs.length} approved PROMOTE_ASIN recommendation(s)` +
+  `Found ${recs.length} approved PROMOTE_ASIN / CREATIVE_TARGET recommendation(s)` +
   ` (limit: ${limit}, region: ${region})`,
 );
 console.log('');
@@ -127,15 +127,26 @@ const parsedEvidence = recs.map(r =>
   typeof r.evidence === 'string' ? JSON.parse(r.evidence) : r.evidence,
 );
 
-// ── 3a. Collect ALL ad_group_ids across ALL candidates' evidence.placements ───
-const adGroupIds = [
+// ── 3a. Collect ALL ad_group_ids: PROMOTE_ASIN placements + CREATIVE_TARGET
+//         explicit destinations ──────────────────────────────────────────────
+const creativeTargetDestIds = [
   ...new Set(
-    parsedEvidence.flatMap(ev =>
+    parsedEvidence
+      .filter((_, i) => recs[i].rec_type === 'CREATIVE_TARGET')
+      .map(ev => ev?.destination_ad_group_id)
+      .filter((id) => typeof id === 'string' && id.length > 0),
+  ),
+];
+
+const adGroupIds = [
+  ...new Set([
+    ...parsedEvidence.flatMap(ev =>
       Array.isArray(ev?.placements)
         ? ev.placements.map(p => String(p.ad_group_id)).filter(Boolean)
         : [],
     ),
-  ),
+    ...creativeTargetDestIds,
+  ]),
 ];
 
 // ── 3b. GROUP CLASSIFICATION — ONE batch query over all placement ad groups ───
@@ -202,6 +213,19 @@ if (adGroupIds.length > 0) {
   }
 }
 
+// ── 3d. agCampaignMap — campaign_id for each CREATIVE_TARGET destination group
+const agCampaignMap = new Map(); // ad_group_id (string) → campaign_id (string)
+if (creativeTargetDestIds.length > 0) {
+  const { rows: agCampRows } = await pool.query(
+    `SELECT ad_group_id::text, campaign_id::text
+       FROM amazon_ad_groups
+      WHERE profile_id  = $1
+        AND ad_group_id = ANY($2)`,
+    [profileId, creativeTargetDestIds],
+  );
+  for (const row of agCampRows) agCampaignMap.set(row.ad_group_id, row.campaign_id);
+}
+
 // ── 4. Batch-fetch ad group names for display ─────────────────────────────────
 const agNameMap = new Map(); // ad_group_id (string) → name
 if (adGroupIds.length > 0) {
@@ -222,6 +246,104 @@ let skipped   = 0;
 for (let i = 0; i < recs.length; i++) {
   const rec      = recs[i];
   const evidence = parsedEvidence[i];
+
+  // ── CREATIVE_TARGET: explicit destination from evidence ────────────────────
+  if (rec.rec_type === 'CREATIVE_TARGET') {
+    const asin     = evidence?.asin ? String(evidence.asin).toUpperCase() : null;
+    const destAgId = evidence?.destination_ad_group_id
+      ? String(evidence.destination_ad_group_id) : null;
+
+    console.log('─'.repeat(60));
+    console.log(`Rec id      : ${rec.id}`);
+    console.log(`Type        : CREATIVE_TARGET`);
+    console.log(`Target      : ${rec.target_text}`);
+
+    if (!asin) {
+      console.log('  skipped (evidence.asin is null — verify on Amazon and re-approve with ASIN)');
+      console.log('');
+      skipped++;
+      continue;
+    }
+
+    const destCampId = destAgId ? agCampaignMap.get(destAgId) : null;
+    if (!destAgId || !destCampId) {
+      console.log(`  skipped (destination_ad_group_id "${destAgId ?? '(none)'}" not resolved to a campaign)`);
+      console.log('');
+      skipped++;
+      continue;
+    }
+
+    const agName = agNameMap.get(destAgId) ?? destAgId;
+    const dupKey = `${destAgId}::${asin}`;
+    if (duplicateKeys.has(dupKey)) {
+      console.log(`Ad group    : ${agName}`);
+      console.log('  skipped (ASIN already targeted in destination)');
+      console.log('');
+      skipped++;
+      continue;
+    }
+
+    const rawBidT = evidence?.approved_bid != null
+      ? Number(evidence.approved_bid)
+      : evidence?.proposed_bid != null
+        ? Number(evidence.proposed_bid)
+        : null;
+
+    if (rawBidT == null || rawBidT < 0.02) {
+      console.log(`Ad group    : ${agName}`);
+      console.log(`Bid         : ${rawBidT == null ? '(none)' : rawBidT}`);
+      console.log('  skipped (no valid bid)');
+      console.log('');
+      skipped++;
+      continue;
+    }
+
+    const bidToSend = Math.round(rawBidT * 100) / 100;
+    const requestBody = {
+      targetingClauses: [
+        {
+          campaignId:     destCampId,
+          adGroupId:      destAgId,
+          state:          'ENABLED',
+          expressionType: 'MANUAL',
+          bid:            bidToSend,
+          expression: [{ type: 'ASIN_SAME_AS', value: asin }],
+        },
+      ],
+    };
+
+    console.log(`ASIN        : ${asin}`);
+    console.log(`Ad group    : ${agName}`);
+    console.log(`Campaign id : ${destCampId}`);
+    console.log(`Bid         : ${bidToSend.toFixed(2)}`);
+    console.log('');
+    console.log(`→ POST ${ENDPOINT}`);
+    console.log('  Headers:');
+    console.log(`    Amazon-Advertising-API-ClientId : <LWA_CLIENT_ID>`);
+    console.log(`    Amazon-Advertising-API-Scope    : ${profileIdStr}`);
+    console.log(`    Authorization                   : Bearer <access_token>`);
+    console.log(`    Content-Type                    : ${MEDIA_TYPE}`);
+    console.log(`    Accept                          : ${MEDIA_TYPE}`);
+    console.log('  Body:');
+    console.log(
+      JSON.stringify(requestBody, null, 2)
+        .split('\n')
+        .map(l => '    ' + l)
+        .join('\n'),
+    );
+    console.log('');
+
+    planned.push({
+      rec,
+      asin,
+      placement: { campaign_id: destCampId, ad_group_id: destAgId },
+      bidToSend,
+      requestBody,
+    });
+    continue;
+  }
+
+  // ── PROMOTE_ASIN: existing routing logic (unchanged) ──────────────────────
   const asin     = rec.target_text.toUpperCase();
 
   // Bid: approved_bid (user-edited) takes precedence over proposed_bid (engine)
