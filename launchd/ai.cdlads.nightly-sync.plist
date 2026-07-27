@@ -6,9 +6,7 @@
 	<string>ai.cdlads.nightly-sync</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/sh</string>
-		<string>-c</string>
-		<string>cd /Users/christianhultner/cdl-ads &amp;&amp; /opt/homebrew/bin/vercel env pull .env.local --environment production &amp;&amp; set -a; . .env.local; . /Users/christianhultner/secrets/cdl-ads-lwa.env; set +a &amp;&amp; /opt/homebrew/bin/node scripts/nightly-sync.mjs --profile 2263723137827296 &gt;&gt; /Users/christianhultner/cdl-ads/artifacts/cron-nightly.log 2&gt;&amp;1</string>
+		<string>/Users/christianhultner/cdl-ads/scripts/cron-nightly.sh</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict>
@@ -19,5 +17,9 @@
 	</dict>
 	<key>WorkingDirectory</key>
 	<string>/Users/christianhultner/cdl-ads</string>
+	<key>StandardOutPath</key>
+	<string>/Users/christianhultner/cdl-ads/artifacts/cron-nightly.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/christianhultner/cdl-ads/artifacts/cron-nightly.log</string>
 </dict>
 </plist>
