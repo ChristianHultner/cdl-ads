@@ -170,7 +170,8 @@ async function collectBidEntities(bidPool, bidProfileId, bTermMap) {
     `SELECT target_id::text   AS entity_id,
             ad_group_id::text,
             campaign_id::text,
-            bid
+            bid,
+            expression
        FROM amazon_targets
       WHERE profile_id      = $1
         AND state           = 'ENABLED'
@@ -209,6 +210,7 @@ async function collectBidEntities(bidPool, bidProfileId, bTermMap) {
       ad_group_id:       row.ad_group_id,
       campaign_id:       row.campaign_id,
       current_bid:       row.bid != null ? Number(row.bid) : null,
+      resolved_asin:     row.resolved_asin,
       spend, clicks, orders, sales,
       acos:              sales > 0 ? spend / sales : null,
       performance_basis: 'term-in-group',
@@ -230,6 +232,7 @@ async function collectBidEntities(bidPool, bidProfileId, bTermMap) {
       ad_group_id:       row.ad_group_id,
       campaign_id:       row.campaign_id,
       current_bid:       row.bid != null ? Number(row.bid) : null,
+      keyword_text:      row.keyword_text,
       spend, clicks, orders, sales,
       acos:              sales > 0 ? spend / sales : null,
       performance_basis: 'term-in-group',
@@ -245,6 +248,7 @@ async function collectBidEntities(bidPool, bidProfileId, bTermMap) {
       ad_group_id:       row.ad_group_id,
       campaign_id:       row.campaign_id,
       current_bid:       row.bid != null ? Number(row.bid) : null,
+      expression:        row.expression,
       spend:             perf.spend,
       clicks:            perf.clicks,
       orders:            perf.orders,
@@ -332,8 +336,7 @@ for (const row of termRows) {
 let written         = 0;
 let skippedExisting = 0;
 let skippedRejected = 0;
-// v5: BID_ADJUST is a new rec_type for harvested PROMOTE_ASIN candidates
-const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, CREATE_STRUCTURE: 0 };
+const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0 };
 
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
@@ -354,56 +357,6 @@ if (candidates.length > 0) {
     const key = `${row.rec_type}|${row.target_text}`;
     if (['DRAFT', 'APPROVED', 'PUSHED'].includes(row.status)) openSet.add(key);
     else if (row.status === 'REJECTED')                        rejectedSet.add(key);
-  }
-
-  // ── v5: Batch existing-targets lookup for PROMOTE_ASIN candidates ─────────
-  // target_id included — the push path will need it for BID_ADJUST.
-  const promoteAsinTerms = candidates
-    .filter((c) => c.recType === 'PROMOTE_ASIN')
-    .map((c) => c.searchTerm.toUpperCase());
-
-  const existingTargetsMap = new Map(); // UPPER(asin) → [{target_id, ad_group_id, campaign_id, bid}]
-  const adGroupNameMap     = new Map(); // ad_group_id → name (for BID_ADJUST proposal sentences)
-
-  if (promoteAsinTerms.length > 0) {
-    const { rows: existingTargetRows } = await pool.query(
-      `SELECT target_id, ad_group_id, campaign_id, bid, resolved_asin
-         FROM amazon_targets
-        WHERE profile_id = $1
-          AND resolved_asin = ANY($2)
-          AND state = 'ENABLED'`,
-      [profileId, promoteAsinTerms],
-    );
-    for (const row of existingTargetRows) {
-      const key = row.resolved_asin.toUpperCase();
-      if (!existingTargetsMap.has(key)) existingTargetsMap.set(key, []);
-      existingTargetsMap.get(key).push({
-        target_id:   row.target_id,
-        ad_group_id: row.ad_group_id,
-        campaign_id: row.campaign_id,
-        bid:         row.bid != null ? Number(row.bid) : null,
-      });
-    }
-
-    // Batch-fetch ad group names for BID_ADJUST proposal sentences.
-    // Include all PROMOTE_ASIN placement ad_group_ids so DORMANT top-earning group names resolve.
-    const agIds = [...new Set([
-      ...existingTargetRows.map((r) => r.ad_group_id),
-      ...candidates
-        .filter((c) => c.recType === 'PROMOTE_ASIN')
-        .flatMap((c) => c.placements.map((p) => p.ad_group_id))
-        .filter(Boolean),
-    ])];
-    if (agIds.length > 0) {
-      const { rows: agRows } = await pool.query(
-        `SELECT ad_group_id, name
-           FROM amazon_ad_groups
-          WHERE profile_id = $1
-            AND ad_group_id = ANY($2)`,
-        [profileId, agIds],
-      );
-      for (const ag of agRows) adGroupNameMap.set(ag.ad_group_id, ag.name);
-    }
   }
 
   // Detect auto ad groups: any group whose ENABLED targets include expression_type='AUTO'.
@@ -442,74 +395,17 @@ if (candidates.length > 0) {
     const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
     const win      = `${windowStart} – ${windowEnd}`;
 
-    // ── v5: Determine final rec_type and PROMOTE_ASIN routing ────────────────
-    // Must be resolved before idempotency so the guard uses the written type.
-    let finalRecType        = c.recType;
-    let existingTargets     = [];
-    let chosenTarget        = null;
-    let observedCpc         = null;
-    let proposedBid         = null;
-    let chosen_target_share = null;
+    // All PROMOTE_ASIN candidates are now UNHARVESTED — BID_ADJUST comes from bidEntities (v6).
+    const finalRecType = c.recType;
+    let observedCpc    = null;
+    let proposedBid    = null;
 
-    if (c.recType === 'PROMOTE_ASIN') {
-      const asinKey   = c.searchTerm.toUpperCase();
-      existingTargets = existingTargetsMap.get(asinKey) ?? [];
-
-      if (existingTargets.length >= 1) {
-        // ── HARVESTED → BID_ADJUST ──────────────────────────────────────────
-        finalRecType = 'BID_ADJUST';
-
-        if (c.clicks === 0) {
-          console.log(`  skipped (cannot price — 0 clicks): [BID_ADJUST] "${c.searchTerm}"`);
-          continue;
-        }
-
-        // Chosen target: existing target whose ad group appears in placements
-        // with the highest spend; fallback = existing target with highest bid.
-        const placementSpendByAg = new Map(c.placements.map((p) => [p.ad_group_id, p.spend]));
-        const targetsInPlacements = existingTargets.filter((t) => placementSpendByAg.has(t.ad_group_id));
-
-        if (targetsInPlacements.length > 0) {
-          chosenTarget = targetsInPlacements.reduce((best, t) =>
-            (placementSpendByAg.get(t.ad_group_id) ?? 0) > (placementSpendByAg.get(best.ad_group_id) ?? 0)
-              ? t : best,
-            targetsInPlacements[0],
-          );
-        } else {
-          chosenTarget = existingTargets.reduce((best, t) =>
-            (t.bid ?? 0) > (best.bid ?? 0) ? t : best,
-            existingTargets[0],
-          );
-        }
-
-        observedCpc = c.spend / c.clicks;
-        proposedBid = Math.min(
-          Math.round(observedCpc * params.promote_bid_cpc_multiplier * 100) / 100,
-          params.promote_bid_max,
-        );
-
-        // search-term rows are group-level; the share is the target's GROUP's performance for this term.
-        const matchedPlacement = c.placements.find((p) => p.ad_group_id === chosenTarget.ad_group_id);
-        chosen_target_share = matchedPlacement
-          ? { spend: matchedPlacement.spend, clicks: matchedPlacement.clicks,
-              orders: matchedPlacement.orders, sales: matchedPlacement.sales }
-          : { spend: 0, clicks: 0, orders: 0, sales: 0 };
-
-        // Skip when proposed bid equals current bid — nothing to change.
-        if (chosenTarget.bid != null && proposedBid === chosenTarget.bid) {
-          console.log(`  skipped (bid already at proposal): [BID_ADJUST] "${c.searchTerm}"`);
-          continue;
-        }
-      } else {
-        // ── UNHARVESTED → PROMOTE_ASIN (new target, v4 rule unchanged) ───────
-        if (c.clicks > 0) {
-          observedCpc = c.spend / c.clicks;
-          proposedBid = Math.min(
-            Math.round(observedCpc * params.promote_bid_cpc_multiplier * 100) / 100,
-            params.promote_bid_max,
-          );
-        }
-      }
+    if (c.recType === 'PROMOTE_ASIN' && c.clicks > 0) {
+      observedCpc = c.spend / c.clicks;
+      proposedBid = Math.min(
+        Math.round(observedCpc * params.promote_bid_cpc_multiplier * 100) / 100,
+        params.promote_bid_max,
+      );
     }
 
     // ── Idempotency check — uses finalRecType ─────────────────────────────────
@@ -582,63 +478,6 @@ if (candidates.length > 0) {
         ...(proposedBid  != null ? { proposed_bid:  proposedBid  } : {}),
         params_used:       params,
       };
-    } else if (finalRecType === 'BID_ADJUST') {
-      // v5.1: honest BID_ADJUST — EARNING or DORMANT based on chosen target's group share.
-      const adGroupName    = adGroupNameMap.get(chosenTarget.ad_group_id) ?? chosenTarget.ad_group_id;
-      const currentBidFmt  = chosenTarget.bid != null
-        ? `${currSym}${chosenTarget.bid.toFixed(2)}`
-        : '—';
-      const proposedBidFmt = `${currSym}${proposedBid.toFixed(2)}`;
-      const direction      = proposedBid > (chosenTarget.bid ?? 0) ? 'Raise' : 'Cut';
-      const asin           = c.searchTerm.toUpperCase();
-      const share          = chosen_target_share ?? { spend: 0, clicks: 0, orders: 0, sales: 0 };
-
-      if (share.orders >= 1) {
-        // EARNING: chosen target's group contributed at least one order for this term.
-        const shareAcosPct = share.sales > 0
-          ? (share.spend / share.sales * 100).toFixed(1)
-          : '—';
-        proposal =
-          `${direction} bid on target for '${asin}' in '${adGroupName}' ` +
-          `from ${currentBidFmt} to ${proposedBidFmt}: this placement won ` +
-          `${share.orders} of ${c.orders} orders (${shareAcosPct}% ACoS) in ${win}.`;
-      } else {
-        // DORMANT: chosen target's group earned no orders for this term.
-        const topPlacement  = c.placements.reduce(
-          (best, p) => ((p.sales ?? 0) > (best.sales ?? 0) ? p : best),
-          c.placements[0],
-        );
-        const topGroupName  = adGroupNameMap.get(topPlacement.ad_group_id) ?? topPlacement.ad_group_id;
-        const termAcosPct   = (c.acos * 100).toFixed(1);
-        const termCpc       = (c.spend / c.clicks).toFixed(2);
-        const shareSpendFmt = `${currSym}${share.spend.toFixed(2)}`;
-        proposal =
-          `Reprice dormant target for '${asin}' in '${adGroupName}' ` +
-          `from ${currentBidFmt} to ${proposedBidFmt}: it spent ${shareSpendFmt} with no sales in ${win}, ` +
-          `while the term converted at ${termAcosPct}% ACoS elsewhere (${topGroupName}, ${currSym}${termCpc}/click).`;
-      }
-
-      evidence = {
-        window_start:        windowStart,
-        window_end:          windowEnd,
-        spend:               c.spend,
-        clicks:              c.clicks,
-        orders:              c.orders,
-        sales:               c.sales,
-        acos:                c.acos,
-        observed_cpc:        observedCpc,
-        proposed_bid:        proposedBid,
-        chosen_target: {
-          target_id:   chosenTarget.target_id,
-          ad_group_id: chosenTarget.ad_group_id,
-          campaign_id: chosenTarget.campaign_id,
-          current_bid: chosenTarget.bid,
-        },
-        chosen_target_share: share,
-        existing_targets:    existingTargets,
-        placements:          c.placements,
-        params_used:         params,
-      };
     } else {
       // PROMOTE_ASIN — UNHARVESTED (new target, destination = highest-spend placement).
       const eligiblePlacements = c.placements.filter((p) => !autoGroupSet.has(String(p.ad_group_id)));
@@ -683,6 +522,192 @@ if (candidates.length > 0) {
   console.log('No candidates found — nothing to write.');
 }
 
+
+// ── 5.5 v6 BID_ADJUST — RAISE / CUT / DEFUSE from bidEntities ─────────────────
+console.log('\n── v6 BID_ADJUST (RAISE/CUT/DEFUSE) ──────────────────────────────────');
+
+// Map AUTO expression type to readable label for kind-phrase.
+const AUTO_EXPR_LABEL = {
+  'close-match': 'close match',
+  'loose-match': 'loose match',
+  'substitutes':  'substitutes',
+  'complements':  'complements',
+};
+
+function bidKindPhrase(entity, agName) {
+  const grp = agName ?? entity.ad_group_id;
+  if (entity.entity_kind === 'TARGET') {
+    return `target '${entity.resolved_asin}' in '${grp}'`;
+  }
+  if (entity.entity_kind === 'KEYWORD') {
+    return `keyword '${entity.keyword_text}' in '${grp}'`;
+  }
+  // AUTO_STRATEGY — map from expression JSON
+  const exprArr   = Array.isArray(entity.expression) ? entity.expression : [];
+  const rawType   = (exprArr[0] ?? {}).type ?? null;
+  const exprLabel = (rawType && AUTO_EXPR_LABEL[rawType]) ?? 'auto targeting';
+  return `auto strategy ${exprLabel} in '${grp}'`;
+}
+
+// Batch-fetch ad group names for all bidEntities (::text cast on column — 42883 safety).
+const bidAgIds     = [...new Set(bidEntities.map((e) => e.ad_group_id).filter(Boolean))];
+const bidAgNameMap = new Map(); // ad_group_id (string) → name
+if (bidAgIds.length > 0) {
+  const { rows: bidAgRows } = await pool.query(
+    `SELECT ad_group_id::text, name
+       FROM amazon_ad_groups
+      WHERE profile_id        = $1
+        AND ad_group_id::text = ANY($2)`,
+    [profileId, bidAgIds],
+  );
+  for (const r of bidAgRows) bidAgNameMap.set(r.ad_group_id, r.name);
+}
+
+// Idempotency: open BID_ADJUST recs keyed on target_text = entity_id.
+const { rows: openBidRows } = await pool.query(
+  `SELECT target_text
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'BID_ADJUST'
+      AND status     = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+);
+const openBidSet = new Set(openBidRows.map((r) => r.target_text));
+
+// Volume filter: entity must meet v6_min_clicks OR v6_min_orders, and have a bid.
+const bidMinClicks = params.v6_min_clicks ?? 30;
+const bidMinOrders = params.v6_min_orders ?? 3;
+const bidEligible  = bidEntities.filter(
+  (e) => e.current_bid !== null &&
+         (e.clicks >= bidMinClicks || e.orders >= bidMinOrders),
+);
+console.log(`  Eligible for bid review (volume filter): ${bidEligible.length}`);
+
+for (const entity of bidEligible) {
+  const currentBid = entity.current_bid;
+  const agName     = bidAgNameMap.get(entity.ad_group_id);
+  const kindPhrase = bidKindPhrase(entity, agName);
+
+  // Idempotency — skip when open BID_ADJUST for this entity_id already exists.
+  if (openBidSet.has(entity.entity_id)) {
+    console.log(`  skipped (open rec exists): [BID_ADJUST] ${entity.entity_kind} ${entity.entity_id}`);
+    skippedExisting++;
+    continue;
+  }
+
+  let direction   = null;
+  let proposedBid = null;
+  let vpc         = null;
+  let boundBy     = 'none';
+  let isDefuse    = false;
+
+  if (entity.sales > 0) {
+    // vpc = value per click at target ACoS; sales > 0 and clicks > 0 required.
+    if (entity.clicks === 0) continue;
+    vpc = Math.round((entity.sales / entity.clicks) * params.target_acos * 100) / 100;
+
+    if (entity.acos < params.target_acos && vpc > currentBid) {
+      // RAISE
+      const step    = entity.entity_kind === 'AUTO_STRATEGY'
+        ? (params.auto_strategy_raise_step ?? 1.3)
+        : (params.raise_max_step           ?? 1.5);
+      const stepBid = Math.round(currentBid * step * 100) / 100;
+      const capBid  = params.raise_bid_max ?? 0.75;
+      proposedBid   = Math.min(vpc, stepBid, capBid);
+      direction     = 'Raise';
+      if      (proposedBid === capBid  && capBid  <= vpc && capBid  <= stepBid) boundBy = 'cap';
+      else if (proposedBid === stepBid && stepBid <= vpc)                        boundBy = 'step';
+    } else if (entity.acos > params.target_acos && vpc < currentBid) {
+      // CUT
+      const step    = entity.entity_kind === 'AUTO_STRATEGY'
+        ? (params.auto_strategy_cut_step ?? 0.7)
+        : (params.cut_max_step           ?? 0.6);
+      const stepBid = Math.round(currentBid * step * 100) / 100;
+      proposedBid   = Math.max(vpc, stepBid, 0.05);
+      direction     = 'Cut';
+      if      (proposedBid === 0.05    && 0.05    >= vpc && 0.05    >= stepBid) boundBy = 'cap';
+      else if (proposedBid === stepBid && stepBid >= vpc)                        boundBy = 'step';
+    } else {
+      continue; // neither condition met
+    }
+
+    // Skip negligible delta.
+    if (Math.abs(proposedBid - currentBid) < 0.02) {
+      console.log(`  skipped (delta < $0.02): [${direction.toUpperCase()}] ${entity.entity_kind} ${entity.entity_id}`);
+      continue;
+    }
+  } else if (entity.spend > 0 && entity.entity_kind === 'TARGET') {
+    // DEFUSE — zero-sales TARGET with spend (v5.1 DORMANT logic, proposal prefixed 'Defuse dormant target').
+    isDefuse    = true;
+    direction   = 'Cut';
+    const step  = params.cut_max_step ?? 0.6;
+    proposedBid = Math.max(Math.round(currentBid * step * 100) / 100, 0.05);
+    if (Math.abs(proposedBid - currentBid) < 0.02) {
+      console.log(`  skipped (delta < $0.02): [DEFUSE] ${entity.entity_id}`);
+      continue;
+    }
+  } else {
+    continue; // no actionable signal
+  }
+
+  // Build proposal sentence.
+  const curFmt      = `${currSym}${currentBid.toFixed(2)}`;
+  const propFmt     = `${currSym}${proposedBid.toFixed(2)}`;
+  const boundSuffix = boundBy !== 'none' ? ` (bounded by ${boundBy})` : '';
+
+  let proposal;
+  if (isDefuse) {
+    proposal =
+      `Defuse dormant target ${kindPhrase}: ` +
+      `${currSym}${entity.spend.toFixed(2)} spend, ${entity.clicks} clicks, 0 sales in ` +
+      `${windowStart} – ${windowEnd} — cut bid from ${curFmt} to ${propFmt}.`;
+  } else {
+    const acosPct = (entity.acos * 100).toFixed(1);
+    const cpcFmt  = entity.clicks > 0
+      ? `${currSym}${(entity.spend / entity.clicks).toFixed(2)}`
+      : '—';
+    const vpcFmt  = `${currSym}${vpc.toFixed(2)}`;
+    const tgtPct  = (params.target_acos * 100).toFixed(0);
+    proposal =
+      `${direction} bid on ${kindPhrase} ` +
+      `from ${curFmt} to ${propFmt}: ` +
+      `its clicks are worth ${vpcFmt} at your ${tgtPct}% target ` +
+      `(60d: ${entity.orders} orders, ${acosPct}% ACoS, ${cpcFmt}/click).${boundSuffix}`;
+  }
+
+  // Build evidence.
+  const bidEvidence = {
+    entity_kind:       entity.entity_kind,
+    entity_id:         entity.entity_id,
+    ad_group_id:       entity.ad_group_id,
+    campaign_id:       entity.campaign_id,
+    current_bid:       currentBid,
+    proposed_bid:      proposedBid,
+    vpc,
+    spend:             entity.spend,
+    clicks:            entity.clicks,
+    orders:            entity.orders,
+    sales:             entity.sales,
+    acos:              entity.acos,
+    performance_basis: entity.performance_basis,
+    params_used:       params,
+    bound_by:          boundBy,
+  };
+
+  await pool.query(
+    `INSERT INTO recommendations
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+     VALUES ($1, $2, NULL, $3, $4, $5)`,
+    ['BID_ADJUST', profileId, entity.entity_id, proposal, JSON.stringify(bidEvidence)],
+  );
+
+  const tag = isDefuse ? 'DEFUSE' : direction.toUpperCase();
+  countsByType['BID_ADJUST']++;
+  if (isDefuse) countsByType['DEFUSE']++;
+  written++;
+  console.log(`  [${tag}] ${entity.entity_kind} ${entity.entity_id}: ${curFmt} → ${propFmt}${boundSuffix}`);
+}
+console.log('──────────────────────────────────────────────────────────────────────');
 // ── 6. CREATE_STRUCTURE PHASE ─────────────────────────────────────────────────
 // Collect orphaned PROMOTE_TERM + PROMOTE_ASIN recs (DRAFT/APPROVED, this profile)
 // whose push-script destination resolution (b31952e tier logic: campaign
