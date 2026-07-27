@@ -6,10 +6,17 @@
 //   Content-Type / Accept: application/vnd.spTargetingClause.v3+json
 //   Body: { targetingClauses: [ { targetId: <id>, bid: <bid> } ] }
 //
+// API NOTE — SP v3 keyword bid update:
+//   PUT /sp/keywords
+//   Content-Type / Accept: application/vnd.spKeyword.v3+json
+//   Body: { keywords: [ { keywordId: <id>, bid: <bid> } ] }
+//
+// Keyword update shape confirmed by first contact; 4xx = finding, never improvised.
+//
 // v3 UPDATE resource/shape is to be CONFIRMED by dry-run + first live response.
 // 4xx on shape = reported finding — NEVER improvised around.
 //
-// One PUT per rec (one targetId per call) for clean per-item status tracking.
+// One PUT per rec (one entity per call) for clean per-item status tracking.
 
 import { parseArgs } from 'node:util';
 import { Pool, neonConfig } from '@neondatabase/serverless';
@@ -90,8 +97,10 @@ const REGION_HOST = {
 const host = REGION_HOST[region];
 if (!host) throw new Error(`Unknown region: ${region}`);
 
-const ENDPOINT   = `${host}/sp/targets`;
-const MEDIA_TYPE = 'application/vnd.spTargetingClause.v3+json';
+const TARGETS_ENDPOINT  = `${host}/sp/targets`;
+const TARGETS_MEDIA     = 'application/vnd.spTargetingClause.v3+json';
+const KEYWORDS_ENDPOINT = `${host}/sp/keywords`;
+const KEYWORDS_MEDIA    = 'application/vnd.spKeyword.v3+json';
 
 // ── 2. SELECT APPROVED BID_ADJUST recs ───────────────────────────────────────
 const limit = Math.floor(params.push_max_per_run ?? 20);
@@ -118,17 +127,17 @@ console.log(
   ` (limit: ${limit}, region: ${region})`,
 );
 console.log('');
-console.log(`API resource : PUT ${ENDPOINT}`);
-console.log(`Content-Type : ${MEDIA_TYPE}`);
+console.log(`API resources: PUT ${TARGETS_ENDPOINT} (TARGET/AUTO_STRATEGY)`);
+console.log(`             : PUT ${KEYWORDS_ENDPOINT} (KEYWORD)`);
 console.log('');
 
 // ── Batch-fetch ad group names for dry-run display ────────────────────────────
 const adGroupIds = [
   ...new Set(
     recs
-      .map(r => {
+      .flatMap(r => {
         const ev = typeof r.evidence === 'string' ? JSON.parse(r.evidence) : r.evidence;
-        return ev?.chosen_target?.ad_group_id;
+        return [ev?.ad_group_id, ev?.chosen_target?.ad_group_id];
       })
       .filter(Boolean),
   ),
@@ -147,14 +156,14 @@ if (adGroupIds.length > 0) {
 }
 
 // ── PLAN ──────────────────────────────────────────────────────────────────────
-const planned = []; // { rec, chosenTarget, bidToSend, requestBody }
+const planned = []; // { rec, entityKind, entityId, bidToSend, endpoint, mediaType, requestBody }
 let skipped   = 0;
 
 for (const rec of recs) {
-  const evidence     = typeof rec.evidence === 'string'
+  const evidence    = typeof rec.evidence === 'string'
     ? JSON.parse(rec.evidence)
     : rec.evidence;
-  const chosenTarget = evidence?.chosen_target ?? null;
+  const entityKind  = evidence?.entity_kind ?? 'TARGET'; // default TARGET for v5-era recs
 
   // Bid to send: approved_bid (user-edited) takes precedence over proposed_bid (engine)
   const bidToSend = evidence?.approved_bid != null
@@ -165,21 +174,27 @@ for (const rec of recs) {
 
   console.log('─'.repeat(60));
   console.log(`Rec id      : ${rec.id}`);
+  console.log(`Entity kind : ${entityKind}`);
   console.log(`Target text : "${rec.target_text}"`);
 
-  if (!chosenTarget?.target_id) {
-    console.log('  skipped (no chosen_target.target_id in evidence)');
+  // Entity ID: v6 uses evidence.entity_id; v5-era TARGET falls back to chosen_target.target_id.
+  const chosenTarget = evidence?.chosen_target ?? null;
+  const entityId     = entityKind === 'KEYWORD'
+    ? (evidence?.entity_id ?? null)
+    : (evidence?.entity_id ?? chosenTarget?.target_id ?? null);
+  const agId         = evidence?.ad_group_id ?? chosenTarget?.ad_group_id ?? null;
+  const agName       = (agId ? agNameMap.get(agId) : null) ?? agId ?? '—';
+  const currentBid   = evidence?.current_bid ?? chosenTarget?.current_bid ?? null;
+  const curBidFmt    = currentBid != null ? Number(currentBid).toFixed(2) : '—';
+
+  if (!entityId) {
+    console.log('  skipped (no entity id in evidence)');
     console.log('');
     skipped++;
     continue;
   }
 
-  const agName = agNameMap.get(chosenTarget.ad_group_id) ?? chosenTarget.ad_group_id;
-  const curBidFmt  = chosenTarget.current_bid != null
-    ? Number(chosenTarget.current_bid).toFixed(2)
-    : '—';
-
-  console.log(`Target id   : ${chosenTarget.target_id}`);
+  console.log(`Entity id   : ${entityId}`);
   console.log(`Ad group    : ${agName}`);
 
   if (bidToSend == null) {
@@ -192,23 +207,27 @@ for (const rec of recs) {
 
   console.log(`Bid         : ${curBidFmt} → ${bidToSend.toFixed(2)}`);
 
-  const requestBody = {
-    targetingClauses: [
-      {
-        targetId: chosenTarget.target_id,
-        bid:      bidToSend,
-      },
-    ],
-  };
+  // Route endpoint and build request body by entity kind.
+  let endpoint, mediaType, requestBody;
+  if (entityKind === 'KEYWORD') {
+    endpoint    = KEYWORDS_ENDPOINT;
+    mediaType   = KEYWORDS_MEDIA;
+    requestBody = { keywords: [{ keywordId: entityId, bid: bidToSend }] };
+  } else {
+    // TARGET or AUTO_STRATEGY
+    endpoint    = TARGETS_ENDPOINT;
+    mediaType   = TARGETS_MEDIA;
+    requestBody = { targetingClauses: [{ targetId: entityId, bid: bidToSend }] };
+  }
 
   console.log('');
-  console.log(`→ PUT ${ENDPOINT}`);
+  console.log(`→ PUT ${endpoint}`);
   console.log('  Headers:');
   console.log(`    Amazon-Advertising-API-ClientId : <LWA_CLIENT_ID>`);
   console.log(`    Amazon-Advertising-API-Scope    : ${profileIdStr}`);
   console.log(`    Authorization                   : Bearer <access_token>`);
-  console.log(`    Content-Type                    : ${MEDIA_TYPE}`);
-  console.log(`    Accept                          : ${MEDIA_TYPE}`);
+  console.log(`    Content-Type                    : ${mediaType}`);
+  console.log(`    Accept                          : ${mediaType}`);
   console.log('  Body:');
   console.log(
     JSON.stringify(requestBody, null, 2)
@@ -218,7 +237,7 @@ for (const rec of recs) {
   );
   console.log('');
 
-  planned.push({ rec, chosenTarget, bidToSend, requestBody });
+  planned.push({ rec, entityKind, entityId, bidToSend, endpoint, mediaType, requestBody });
 }
 
 // ── PLAN TOTALS ───────────────────────────────────────────────────────────────
@@ -303,28 +322,28 @@ console.log('');
 let pushed   = 0;
 let partials = 0;
 
-for (const { rec, chosenTarget, bidToSend, requestBody } of planned) {
+for (const { rec, entityKind, entityId, bidToSend, endpoint, mediaType, requestBody } of planned) {
   console.log('─'.repeat(60));
   console.log(
     `Executing rec id=${rec.id}  term="${rec.target_text}"` +
-    `  target_id=${chosenTarget.target_id}  bid=${bidToSend.toFixed(2)}…`,
+    `  entity_kind=${entityKind}  entity_id=${entityId}  bid=${bidToSend.toFixed(2)}…`,
   );
 
   // ── PUT to Amazon ─────────────────────────────────────────────────────────
   const res = await fetchWithTimeout(
-    ENDPOINT,
+    endpoint,
     {
       method:  'PUT',
       headers: {
         'Authorization':                    `Bearer ${accessToken}`,
         'Amazon-Advertising-API-ClientId':   LWA_CLIENT_ID,
         'Amazon-Advertising-API-Scope':      profileIdStr,
-        'Content-Type':                      MEDIA_TYPE,
-        'Accept':                            MEDIA_TYPE,
+        'Content-Type':                      mediaType,
+        'Accept':                            mediaType,
       },
       body: JSON.stringify(requestBody),
     },
-    `targets update rec ${rec.id}`,
+    `${entityKind.toLowerCase()} update rec ${rec.id}`,
   );
 
   // Print full response verbatim
@@ -355,7 +374,9 @@ for (const { rec, chosenTarget, bidToSend, requestBody } of planned) {
     process.exit(1);
   }
 
-  const tc = responseData?.targetingClauses;
+  // Response container key: 'keywords' for KEYWORD, 'targetingClauses' for TARGET/AUTO_STRATEGY.
+  const responseKey = entityKind === 'KEYWORD' ? 'keywords' : 'targetingClauses';
+  const tc = responseData?.[responseKey];
   let successItems = [];
   let errorItems   = [];
 
@@ -376,7 +397,7 @@ for (const { rec, chosenTarget, bidToSend, requestBody } of planned) {
   } else {
     // Unrecognised shape — stop and report
     console.error(
-      'ERROR: unrecognised response shape (expected targetingClauses object or array) — stopping.',
+      `ERROR: unrecognised response shape (expected ${responseKey} object or array) — stopping.`,
     );
     console.error('Full response:', responseText);
     await pool.end();
@@ -387,7 +408,7 @@ for (const { rec, chosenTarget, bidToSend, requestBody } of planned) {
   if (errorItems.length > 0) {
     console.log(
       `PARTIAL — left APPROVED ` +
-      `(${successItems.length}/${requestBody.targetingClauses.length} succeeded)`,
+      `(${successItems.length}/1 succeeded)`,
     );
     console.log('Failing items:', JSON.stringify(errorItems, null, 2));
     console.log('');
@@ -414,7 +435,7 @@ for (const { rec, chosenTarget, bidToSend, requestBody } of planned) {
 
   console.log(
     `PUSHED — rec id=${rec.id}, pushed_bid=${bidToSend.toFixed(2)}, ` +
-    `target_id=${chosenTarget.target_id}`,
+    `entity_kind=${entityKind}  entity_id=${entityId}`,
   );
   console.log('');
   pushed++;
