@@ -90,6 +90,7 @@ interface Target {
   state: string
   expression_type: string | null
   expression_subtype: string | null
+  expression_subvalue: string | null
   resolved_asin: string | null
   bid: string | null
 }
@@ -212,6 +213,7 @@ export default async function CampaignDetailPage({
         state,
         expression_type,
         expression->0->>'type' AS expression_subtype,
+        expression->0->>'value' AS expression_subvalue,
         resolved_asin,
         bid::text
       FROM amazon_targets
@@ -614,7 +616,9 @@ export default async function CampaignDetailPage({
                                   </span>
                                 ) : (
                                   <span style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem' }}>
-                                    {t.expression_type ?? '—'}
+                                    {t.expression_subtype === 'ASIN_CATEGORY_SAME_AS'
+                                      ? `Category: ${t.expression_subvalue ?? '—'}`
+                                      : (t.expression_subtype ?? t.expression_type ?? '—')}
                                   </span>
                                 )}
                               </td>
