@@ -284,8 +284,8 @@ export default async function CampaignDetailPage({
       sum(purchases_14d)::text AS orders,
       sum(sales_14d)::text     AS sales
     FROM amazon_advertised_product_daily
-    WHERE profile_id = ${profileId}::bigint
-      AND campaign_id = ${campaignId}
+    WHERE profile_id = ${profileId}::text
+      AND campaign_id = ${campaignId}::text
       AND date >= CURRENT_DATE - INTERVAL '60 days'
     GROUP BY ad_id
   ` as unknown as AdPerfRow[]
