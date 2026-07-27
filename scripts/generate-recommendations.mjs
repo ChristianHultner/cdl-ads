@@ -66,7 +66,7 @@ console.log(JSON.stringify({ window_start: windowStart, window_end: windowEnd })
 
 // ── Fetch profile (currency) ──────────────────────────────────────────────────
 const { rows: profileRows } = await pool.query(
-  `SELECT currency_code FROM amazon_profiles WHERE profile_id = $1`,
+  `SELECT currency_code, country_code FROM amazon_profiles WHERE profile_id = $1`,
   [profileId],
 );
 if (!profileRows.length) {
@@ -74,6 +74,7 @@ if (!profileRows.length) {
   throw new Error(`Profile ${profileIdStr} not found`);
 }
 const currencyCode = profileRows[0].currency_code;
+const countryCode  = profileRows[0].country_code ?? 'US';
 const CURRENCY_SYMBOL = { EUR: '€', USD: '$', GBP: '£', CAD: 'CA$', MXN: 'MX$' };
 const currSym = CURRENCY_SYMBOL[currencyCode] ?? `${currencyCode}\u202f`;
 
@@ -528,10 +529,15 @@ console.log('\n── v6 BID_ADJUST (RAISE/CUT/DEFUSE) ────────�
 
 // Map AUTO expression type to readable label for kind-phrase.
 const AUTO_EXPR_LABEL = {
-  'close-match': 'close match',
-  'loose-match': 'loose match',
-  'substitutes':  'substitutes',
-  'complements':  'complements',
+  'close-match':             'close match',
+  'loose-match':             'loose match',
+  'substitutes':             'substitutes',
+  'complements':             'complements',
+  // Amazon API raw expression types
+  'QUERY_HIGH_REL_MATCHES':  'close match',
+  'QUERY_BROAD_REL_MATCHES': 'loose match',
+  'ASIN_SUBSTITUTE_RELATED': 'substitutes',
+  'ASIN_ACCESSORY_RELATED':  'complements',
 };
 
 function bidKindPhrase(entity, agName) {
@@ -836,7 +842,7 @@ if (orphans.length === 0) {
   for (const [lang, langOrphans] of Object.entries(orphansByLang)) {
     if (langOrphans.length === 0) continue;
 
-    const targetText = `Keywords - Exacta US (${lang})`;
+    const targetText = `Keywords - Exacta ${countryCode} (${lang})`;
 
     // Idempotency: skip if an open CREATE_STRUCTURE for this target_text already exists.
     const { rows: existOpen } = await pool.query(
