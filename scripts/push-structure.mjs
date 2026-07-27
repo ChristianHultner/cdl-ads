@@ -297,7 +297,7 @@ for (const rec of recs) {
         state:          'PAUSED',
         dynamicBidding: { strategy: 'LEGACY_FOR_SALES' },
         budget:         { budgetType: 'DAILY', budget: 5 },
-        startDate:      todayYYYYMMDD(),
+        startDate:      todayISODate(),
       },
     ],
   };
