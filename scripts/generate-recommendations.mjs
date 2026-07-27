@@ -132,6 +132,141 @@ for (const row of aggRows) {
 const termRows = [...termMap.values()];
 console.log(`Rolled up to ${termRows.length} unique search term(s).`);
 
+// ── v6: collectBidEntities — scaffold (Frame 2) ───────────────────────────────
+// Returns one entry per ENABLED bidding entity with its performance data.
+// Census print only — no draft changes this frame.
+async function collectBidEntities(bidPool, bidProfileId, bTermMap) {
+  // TARGET: ENABLED amazon_targets, resolved_asin NOT NULL, not AUTO
+  const { rows: tRows } = await bidPool.query(
+    `SELECT target_id::text   AS entity_id,
+            ad_group_id::text,
+            campaign_id::text,
+            bid,
+            resolved_asin
+       FROM amazon_targets
+      WHERE profile_id      = $1
+        AND state           = 'ENABLED'
+        AND resolved_asin   IS NOT NULL
+        AND expression_type != 'AUTO'`,
+    [bidProfileId],
+  );
+
+  // KEYWORD: ENABLED EXACT amazon_keywords
+  const { rows: kRows } = await bidPool.query(
+    `SELECT keyword_id::text  AS entity_id,
+            ad_group_id::text,
+            campaign_id::text,
+            bid,
+            keyword_text
+       FROM amazon_keywords
+      WHERE profile_id  = $1
+        AND state       = 'ENABLED'
+        AND match_type  = 'EXACT'`,
+    [bidProfileId],
+  );
+
+  // AUTO_STRATEGY: ENABLED amazon_targets expression_type='AUTO'
+  const { rows: aRows } = await bidPool.query(
+    `SELECT target_id::text   AS entity_id,
+            ad_group_id::text,
+            campaign_id::text,
+            bid
+       FROM amazon_targets
+      WHERE profile_id      = $1
+        AND state           = 'ENABLED'
+        AND expression_type = 'AUTO'`,
+    [bidProfileId],
+  );
+
+  // Group-level performance index for AUTO_STRATEGY (all placements → ad_group_id).
+  const groupPerf = new Map(); // ad_group_id (string) → { spend, clicks, orders, sales }
+  for (const [, termEntry] of bTermMap) {
+    for (const p of termEntry.placements) {
+      const gKey = String(p.ad_group_id);
+      if (!groupPerf.has(gKey)) groupPerf.set(gKey, { spend: 0, clicks: 0, orders: 0, sales: 0 });
+      const g   = groupPerf.get(gKey);
+      g.spend  += p.spend;
+      g.clicks += p.clicks;
+      g.orders += p.orders;
+      g.sales  += p.sales;
+    }
+  }
+
+  const entities = [];
+
+  // TARGET — basis: term-in-group (search_term = lower(resolved_asin) + same ad_group_id)
+  for (const row of tRows) {
+    const lookupKey = row.resolved_asin.toLowerCase();
+    const termEntry = bTermMap.get(lookupKey);
+    const placement = termEntry?.placements.find((p) => String(p.ad_group_id) === row.ad_group_id);
+    const spend     = placement?.spend  ?? 0;
+    const clicks    = placement?.clicks ?? 0;
+    const orders    = placement?.orders ?? 0;
+    const sales     = placement?.sales  ?? 0;
+    entities.push({
+      entity_kind:       'TARGET',
+      entity_id:         row.entity_id,
+      ad_group_id:       row.ad_group_id,
+      campaign_id:       row.campaign_id,
+      current_bid:       row.bid != null ? Number(row.bid) : null,
+      spend, clicks, orders, sales,
+      acos:              sales > 0 ? spend / sales : null,
+      performance_basis: 'term-in-group',
+    });
+  }
+
+  // KEYWORD — basis: term-in-group (search_term = lower(keyword_text) + same ad_group_id)
+  for (const row of kRows) {
+    const lookupKey = row.keyword_text.toLowerCase();
+    const termEntry = bTermMap.get(lookupKey);
+    const placement = termEntry?.placements.find((p) => String(p.ad_group_id) === row.ad_group_id);
+    const spend     = placement?.spend  ?? 0;
+    const clicks    = placement?.clicks ?? 0;
+    const orders    = placement?.orders ?? 0;
+    const sales     = placement?.sales  ?? 0;
+    entities.push({
+      entity_kind:       'KEYWORD',
+      entity_id:         row.entity_id,
+      ad_group_id:       row.ad_group_id,
+      campaign_id:       row.campaign_id,
+      current_bid:       row.bid != null ? Number(row.bid) : null,
+      spend, clicks, orders, sales,
+      acos:              sales > 0 ? spend / sales : null,
+      performance_basis: 'term-in-group',
+    });
+  }
+
+  // AUTO_STRATEGY — basis: group-level (SUM all rollup rows for this ad_group_id)
+  for (const row of aRows) {
+    const perf = groupPerf.get(row.ad_group_id) ?? { spend: 0, clicks: 0, orders: 0, sales: 0 };
+    entities.push({
+      entity_kind:       'AUTO_STRATEGY',
+      entity_id:         row.entity_id,
+      ad_group_id:       row.ad_group_id,
+      campaign_id:       row.campaign_id,
+      current_bid:       row.bid != null ? Number(row.bid) : null,
+      spend:             perf.spend,
+      clicks:            perf.clicks,
+      orders:            perf.orders,
+      sales:             perf.sales,
+      acos:              perf.sales > 0 ? perf.spend / perf.sales : null,
+      performance_basis: 'group-level',
+    });
+  }
+
+  return entities;
+}
+
+const bidEntities  = await collectBidEntities(pool, profileId, termMap);
+const v6Counts     = { TARGET: 0, KEYWORD: 0, AUTO_STRATEGY: 0 };
+for (const e of bidEntities) v6Counts[e.entity_kind]++;
+const v6WithVolume = bidEntities.filter(
+  (e) => e.clicks >= (params.v6_min_clicks ?? 30) || e.orders >= (params.v6_min_orders ?? 3),
+).length;
+console.log(
+  `v6 entities: TARGET ${v6Counts.TARGET} / KEYWORD ${v6Counts.KEYWORD} / AUTO_STRATEGY ${v6Counts.AUTO_STRATEGY} (with volume: ${v6WithVolume})`,
+);
+
 // ── 4. CANDIDATES ─────────────────────────────────────────────────────────────
 // Priority order: NEGATE_TERM → PROMOTE_TERM → PROMOTE_ASIN.
 // Classification is based on term shape, not is_targeting:
