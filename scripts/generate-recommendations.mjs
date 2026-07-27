@@ -392,9 +392,36 @@ if (candidates.length > 0) {
     for (const row of autoRows) autoGroupSet.add(String(row.ad_group_id));
   }
 
+  // ── Already-targeted ASIN check (v5 harvested-check restored in v6) ──────────
+  // Batch-fetch ASINs already ENABLED as targets for this profile.
+  // Candidates whose ASIN appears are skipped entirely — bid tuning for existing
+  // targets is v6 entity territory; no card should be raised here.
+  const promoteAsinTermsUpper = candidates
+    .filter((c) => c.recType === 'PROMOTE_ASIN')
+    .map((c) => c.searchTerm.toUpperCase());
+  const alreadyTargetedAsinSet = new Set();
+  if (promoteAsinTermsUpper.length > 0) {
+    const { rows: harvestedRows } = await pool.query(
+      `SELECT DISTINCT upper(resolved_asin) AS asin
+         FROM amazon_targets
+        WHERE profile_id    = $1
+          AND state         = 'ENABLED'
+          AND resolved_asin IS NOT NULL
+          AND upper(resolved_asin) = ANY($2)`,
+      [profileId, promoteAsinTermsUpper],
+    );
+    for (const row of harvestedRows) alreadyTargetedAsinSet.add(row.asin);
+  }
+
   for (const c of candidates) {
     const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
     const win      = `${windowStart} – ${windowEnd}`;
+
+    // ── Already-targeted ASIN skip (v5 harvested-check restored) ────────────────
+    if (c.recType === 'PROMOTE_ASIN' && alreadyTargetedAsinSet.has(c.searchTerm.toUpperCase())) {
+      console.log(`  skipped (already targeted): [PROMOTE_ASIN] ${c.searchTerm.toUpperCase()}`);
+      continue;
+    }
 
     // All PROMOTE_ASIN candidates are now UNHARVESTED — BID_ADJUST comes from bidEntities (v6).
     const finalRecType = c.recType;
