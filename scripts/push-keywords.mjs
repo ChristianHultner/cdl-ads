@@ -121,20 +121,52 @@ console.log(`API resource : POST ${ENDPOINT}`);
 console.log(`Content-Type : ${MEDIA_TYPE}`);
 console.log('');
 
+// ── 2b. Load PUSHED CREATE_STRUCTURE recs → orphan route map ─────────────────
+// Maps orphan PROMOTE_TERM rec ids to their built structure room.
+const { rows: structRows } = await pool.query(
+  `SELECT evidence
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'CREATE_STRUCTURE'
+      AND status     = 'PUSHED'`,
+  [profileId],
+);
+
+const orphanRouteMap = new Map(); // rec_id (Number) → { ad_group_id, campaign_id }
+for (const row of structRows) {
+  const sev        = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence;
+  const adGroupId  = sev?.created_ad_group_id  ?? null;
+  const campaignId = sev?.created_campaign_id  ?? null;
+  if (!adGroupId || !campaignId) continue;
+  for (const orphanId of (sev?.orphan_rec_ids ?? [])) {
+    orphanRouteMap.set(Number(orphanId), {
+      ad_group_id: String(adGroupId),
+      campaign_id: String(campaignId),
+    });
+  }
+}
+
+if (orphanRouteMap.size > 0) {
+  console.log(`Orphan route map: ${orphanRouteMap.size} rec(s) pre-routed to structure rooms.`);
+  console.log('');
+}
+
 // ── Pre-parse evidences ───────────────────────────────────────────────────────
 const parsedEvidence = recs.map(r =>
   typeof r.evidence === 'string' ? JSON.parse(r.evidence) : r.evidence,
 );
 
 // ── 3a. Collect ALL ad_group_ids across ALL candidates' evidence.placements ───
+// Also include ad_group_ids from orphan route map so dup-check and name lookup cover them.
 const adGroupIds = [
-  ...new Set(
-    parsedEvidence.flatMap(ev =>
+  ...new Set([
+    ...parsedEvidence.flatMap(ev =>
       Array.isArray(ev?.placements)
         ? ev.placements.map(p => String(p.ad_group_id)).filter(Boolean)
         : [],
     ),
-  ),
+    ...[...orphanRouteMap.values()].map(r => r.ad_group_id),
+  ]),
 ];
 
 // ── 3b. GROUP CLASSIFICATION — ONE batch query over all placement ad groups ───
@@ -244,29 +276,40 @@ for (let i = 0; i < recs.length; i++) {
   console.log(`Rec id      : ${rec.id}`);
   console.log(`Target text : "${rec.target_text}"`);
 
-  // ── Destination resolution (priority: exact-kw group → any-kw group → skip) ─
-  const placements = Array.isArray(evidence?.placements) ? evidence.placements : [];
-
-  const tierA = placements
-    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1
-              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
-              && !autoCampaignGroupIds.has(String(p.ad_group_id)))
-    .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
-  const tierB = placements
-    .filter(p => (groupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1
-              && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
-              && !autoCampaignGroupIds.has(String(p.ad_group_id)))
-    .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
-
+  // ── Destination resolution ─────────────────────────────────────────────────
   let placement = null;
   let destTier  = null;
 
-  if (tierA.length > 0) {
-    placement = tierA[0];
-    destTier  = 'exact-kw group';
-  } else if (tierB.length > 0) {
-    placement = tierB[0];
-    destTier  = 'any-kw group';
+  const orphanRoute = orphanRouteMap.get(Number(rec.id));
+  if (orphanRoute) {
+    // Orphan rec: route directly to its built structure room; skip tier resolution.
+    placement = { ad_group_id: orphanRoute.ad_group_id, campaign_id: orphanRoute.campaign_id };
+    const roomName = agNameMap.get(orphanRoute.ad_group_id) ?? orphanRoute.ad_group_id;
+    destTier = `structure room '${roomName}'`;
+    console.log(`destination: structure room '${roomName}'`);
+    console.log('');
+  } else {
+    // Standard tier resolution (exact-kw group → any-kw group → skip)
+    const placements = Array.isArray(evidence?.placements) ? evidence.placements : [];
+
+    const tierA = placements
+      .filter(p => (groupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1
+                && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+                && !autoCampaignGroupIds.has(String(p.ad_group_id)))
+      .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+    const tierB = placements
+      .filter(p => (groupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1
+                && (groupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+                && !autoCampaignGroupIds.has(String(p.ad_group_id)))
+      .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+
+    if (tierA.length > 0) {
+      placement = tierA[0];
+      destTier  = 'exact-kw group';
+    } else if (tierB.length > 0) {
+      placement = tierB[0];
+      destTier  = 'any-kw group';
+    }
   }
 
   if (!placement?.ad_group_id || !placement?.campaign_id) {
