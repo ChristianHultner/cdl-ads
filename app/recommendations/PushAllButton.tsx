@@ -3,7 +3,7 @@
 import { useState } from 'react'
 
 // ── Flip to false when Christian authorises real pushes ───────────────────────
-const DRY_RUN = true
+const DRY_RUN = false
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface ProfileMeta {
