@@ -92,15 +92,15 @@ if (!host) throw new Error(`Unknown region: ${region}`);
 const ENDPOINT   = `${host}/sp/keywords`;
 const MEDIA_TYPE = 'application/vnd.spKeyword.v3+json';
 
-// ── 2. SELECT APPROVED PROMOTE_TERM recs ─────────────────────────────────────
+// ── 2. SELECT APPROVED PROMOTE_TERM / CREATIVE_KEYWORD recs ─────────────────
 const limit = Math.floor(params.push_max_per_run ?? 20);
 
 const { rows: recs } = await pool.query(
-  `SELECT id, target_text, evidence
+  `SELECT id, rec_type, target_text, evidence
      FROM recommendations
     WHERE profile_id = $1
       AND status     = 'APPROVED'
-      AND rec_type   = 'PROMOTE_TERM'
+      AND rec_type   = ANY (ARRAY['PROMOTE_TERM'::text, 'CREATIVE_KEYWORD'::text])
     ORDER BY id
     LIMIT $2`,
   [profileId, limit],
@@ -113,7 +113,7 @@ if (recs.length === 0) {
 }
 
 console.log(
-  `Found ${recs.length} approved PROMOTE_TERM recommendation(s)` +
+  `Found ${recs.length} approved PROMOTE_TERM/CREATIVE_KEYWORD recommendation(s)` +
   ` (limit: ${limit}, region: ${region})`,
 );
 console.log('');
@@ -166,6 +166,11 @@ const adGroupIds = [
         : [],
     ),
     ...[...orphanRouteMap.values()].map(r => r.ad_group_id),
+    // CREATIVE_KEYWORD explicit destinations
+    ...parsedEvidence
+      .map(ev => ev?.destination_ad_group_id)
+      .filter(Boolean)
+      .map(String),
   ]),
 ];
 
@@ -245,16 +250,20 @@ if (adGroupIds.length > 0) {
 }
 
 // ── 4. Batch-fetch ad group names for display ─────────────────────────────────
-const agNameMap = new Map(); // ad_group_id (string) → name
+const agNameMap     = new Map(); // ad_group_id (string) → name
+const agCampaignMap = new Map(); // ad_group_id (string) → campaign_id
 if (adGroupIds.length > 0) {
   const { rows: agRows } = await pool.query(
-    `SELECT ad_group_id::text, name
+    `SELECT ad_group_id::text, name, campaign_id::text
        FROM amazon_ad_groups
       WHERE profile_id  = $1
         AND ad_group_id = ANY($2)`,
     [profileId, adGroupIds],
   );
-  for (const ag of agRows) agNameMap.set(ag.ad_group_id, ag.name);
+  for (const ag of agRows) {
+    agNameMap.set(ag.ad_group_id, ag.name);
+    agCampaignMap.set(ag.ad_group_id, ag.campaign_id);
+  }
 }
 
 // ── 5. PLAN ───────────────────────────────────────────────────────────────────
@@ -287,6 +296,15 @@ for (let i = 0; i < recs.length; i++) {
     const roomName = agNameMap.get(orphanRoute.ad_group_id) ?? orphanRoute.ad_group_id;
     destTier = `structure room '${roomName}'`;
     console.log(`destination: structure room '${roomName}'`);
+    console.log('');
+  } else if (rec.rec_type === 'CREATIVE_KEYWORD' && evidence?.destination_ad_group_id) {
+    // Creative rec: explicit destination from generator evidence — bypass tier resolution.
+    const destAgId   = String(evidence.destination_ad_group_id);
+    const destCampId = agCampaignMap.get(destAgId) ?? null;
+    const roomName   = agNameMap.get(destAgId) ?? evidence?.destination_ad_group_name ?? destAgId;
+    placement = { ad_group_id: destAgId, campaign_id: destCampId };
+    destTier  = `creative explicit '${roomName}'`;
+    console.log(`destination: creative explicit '${roomName}'`);
     console.log('');
   } else {
     // Standard tier resolution (exact-kw group → any-kw group → skip)
