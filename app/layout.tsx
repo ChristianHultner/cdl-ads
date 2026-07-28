@@ -29,7 +29,7 @@ export default function RootLayout({
     <html lang="en" className={`${fraunces.variable} ${nunitoSans.variable}`}>
       <body>
         <NavBar />
-        <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '2rem 2.5rem' }}>
+        <div style={{ padding: '2rem 2.5rem' }}>
           {children}
         </div>
       </body>
