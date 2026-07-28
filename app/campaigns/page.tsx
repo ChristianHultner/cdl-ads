@@ -261,7 +261,16 @@ export default async function CampaignsPage({
             ) : (
               <div className="table-card">
                 <div className="table-scroll">
-                  <table className="data-table">
+                  <table className="data-table" style={{ tableLayout: 'fixed', width: '100%' }}>
+                    <colgroup>
+                      <col />
+                      <col style={{ width: '90px' }} />
+                      <col style={{ width: '130px' }} />
+                      <col style={{ width: '130px' }} />
+                      <col style={{ width: '130px' }} />
+                      <col style={{ width: '110px' }} />
+                      <col style={{ width: '70px' }} />
+                    </colgroup>
                     <thead>
                       <tr>
                         <th>Campaign</th>
@@ -270,7 +279,7 @@ export default async function CampaignsPage({
                         <th>Budget</th>
                         <th>Sales 30d</th>
                         <th>ACOS 30d</th>
-                        <th>Recs</th>
+                        <th style={{ textAlign: 'center' }}>Recs</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -283,10 +292,11 @@ export default async function CampaignsPage({
                         const recCount = recMap.get(`${m.profile_id}:${c.campaign_id}`) ?? 0
                         return (
                           <tr key={c.campaign_id}>
-                            <td>
+                            <td style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               <a
                                 href={`/campaigns/${m.profile_id}/${encodeURIComponent(c.campaign_id)}`}
-                                style={{ color: 'var(--cdl-blue)' }}
+                                style={{ color: 'var(--cdl-blue)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                title={c.campaign_name}
                               >
                                 {c.campaign_name}
                               </a>
@@ -312,7 +322,7 @@ export default async function CampaignsPage({
                                 ? <span className={acosBadge}>{acosStr}%</span>
                                 : '—'}
                             </td>
-                            <td className="num">
+                            <td style={{ textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>
                               {recCount > 0
                                 ? <a
                                     href={`/campaigns/${m.profile_id}/${encodeURIComponent(c.campaign_id)}#recs`}
