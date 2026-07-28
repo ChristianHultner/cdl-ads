@@ -313,8 +313,9 @@ for (let i = 0; i < recs.length; i++) {
     // Plan-time product-room validation: destination must be a non-AUTO campaign
     // group with >= 1 ENABLED target (resolved_asin IS NOT NULL).
     const destGroupInfo  = groupTargetMap.get(destAgId);
-    const passesRoomTest = !autoCampaignGroupIds.has(destAgId)
-      && (destGroupInfo?.asinTargets ?? 0) >= 1;
+    const passesRoomTest = routedDest != null
+      || (!autoCampaignGroupIds.has(destAgId)
+      && (destGroupInfo?.asinTargets ?? 0) >= 1);
     if (!passesRoomTest) {
       console.log(`  skipped (destination is keyword-room — awaiting structure)`);
       console.log('');
