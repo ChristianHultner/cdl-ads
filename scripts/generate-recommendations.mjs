@@ -337,7 +337,7 @@ for (const row of termRows) {
 let written         = 0;
 let skippedExisting = 0;
 let skippedRejected = 0;
-const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0 };
+const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0, BUDGET_ADJUST: 0, PAUSE_CAMPAIGN: 0 };
 
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
@@ -1051,9 +1051,113 @@ if (orphans.length === 0) {
   }
 }
 
+// ── 7. BUDGET_ADJUST + PAUSE_CAMPAIGN PHASE ─────────────────────────────────
+// Sources: amazon_campaigns (budget_amount, state) + amazon_campaign_daily (30d).
+// target_acos already resolved per-profile in params.
+console.log('\n── Phase 7: BUDGET_ADJUST / PAUSE_CAMPAIGN ──────────────────────');
+
+// Fetch ENABLED campaigns with a known budget + their 30d aggregates.
+const { rows: budgetCampRows } = await pool.query(
+  `SELECT
+     c.campaign_id,
+     c.name,
+     c.budget_amount::float                        AS budget_amount,
+     c.budget_type,
+     coalesce(sum(d.cost),          0)::float      AS spend_30d,
+     coalesce(sum(d.sales_14d),     0)::float      AS sales_30d,
+     coalesce(sum(d.purchases_14d), 0)::float      AS orders_30d
+   FROM amazon_campaigns c
+   LEFT JOIN amazon_campaign_daily d
+     ON  d.campaign_id = c.campaign_id
+     AND d.profile_id  = c.profile_id
+     AND d.date >= CURRENT_DATE - INTERVAL '30 days'
+   WHERE c.profile_id    = $1
+     AND c.state         = 'ENABLED'
+     AND c.budget_amount IS NOT NULL
+   GROUP BY c.campaign_id, c.name, c.budget_amount, c.budget_type`,
+  [profileId],
+);
+console.log(`  ${budgetCampRows.length} ENABLED campaign(s) with a known budget.`);
+
+// Idempotency: open BUDGET_ADJUST recs keyed on target_text = campaign_id.
+const { rows: openBudgetRows } = await pool.query(
+  `SELECT target_text
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'BUDGET_ADJUST'
+      AND status     = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+);
+const openBudgetSet = new Set(openBudgetRows.map(r => r.target_text));
+
+for (const row of budgetCampRows) {
+  const budgetAmount  = row.budget_amount;
+  const avgDailySpend = row.spend_30d / 30.0;
+  const pctOfBudget   = budgetAmount > 0 ? (avgDailySpend / budgetAmount) * 100 : 0;
+  const acos30d       = row.sales_30d > 0 ? row.spend_30d / row.sales_30d : null;
+  const orders30d     = Math.round(row.orders_30d);
+
+  // BUDGET_ADJUST: state=ENABLED (filtered), avg_daily_spend >= budget*0.85,
+  // acos_30d < target_acos, orders_30d >= 5.
+  if (
+    avgDailySpend   < budgetAmount * 0.85 ||
+    acos30d === null                       ||
+    acos30d         >= params.target_acos  ||
+    orders30d       < 5
+  ) continue;
+
+  // proposed_budget = round(budget * 1.5, 2) capped at budget + 20.
+  const proposed150    = Math.round(budgetAmount * 1.5 * 100) / 100;
+  const proposedBudget = Math.min(proposed150, Math.round((budgetAmount + 20) * 100) / 100);
+  if (proposedBudget <= budgetAmount) continue; // no meaningful raise
+
+  // Idempotency.
+  if (openBudgetSet.has(row.campaign_id)) {
+    console.log(`  skipped (open rec exists): [BUDGET_ADJUST] ${row.campaign_id}`);
+    skippedExisting++;
+    continue;
+  }
+
+  const acosPct = (acos30d * 100).toFixed(1);
+  const pctFmt  = pctOfBudget.toFixed(0);
+  const curFmt  = `${currSym}${budgetAmount.toFixed(2)}`;
+  const propFmt = `${currSym}${proposedBudget.toFixed(2)}`;
+
+  const proposal =
+    `Raise daily budget for '${row.name}' from ${curFmt} to ${propFmt}: ` +
+    `spending ${pctFmt}% of its cap at ${acosPct}% ACoS (${orders30d} orders/30d) ` +
+    `\u2014 the cap is starving a profitable campaign.`;
+
+  const evidence = {
+    campaign_id:     row.campaign_id,
+    budget_amount:   budgetAmount,
+    proposed_budget: proposedBudget,
+    avg_daily_spend: avgDailySpend,
+    pct_of_budget:   pctOfBudget,
+    acos_30d:        acos30d,
+    orders_30d:      orders30d,
+    sales_30d:       row.sales_30d,
+  };
+
+  await pool.query(
+    `INSERT INTO recommendations
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    ['BUDGET_ADJUST', profileId, row.campaign_id, row.campaign_id, proposal, JSON.stringify(evidence)],
+  );
+  countsByType['BUDGET_ADJUST']++;
+  written++;
+  console.log(`  [BUDGET_ADJUST] '${row.name}': ${curFmt} \u2192 ${propFmt} (${pctFmt}% of cap, ${acosPct}% ACoS)`);
+}
+
+// PAUSE_CAMPAIGN — spec not received (frame 2 message truncated after BUDGET_ADJUST evidence).
+// Constraint registered in migration 015; logic ships in next frame once spec is confirmed.
+console.log('\n  PAUSE_CAMPAIGN: awaiting spec \u2014 skipped this run.');
+console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
 await pool.end();
 
-// ── 7. SUMMARY ───────────────────────────────────────────────────────────────
+// ── 8. SUMMARY ───────────────────────────────────────────────────────────────
 console.log('\n── Summary ──────────────────────────────────────────────────────');
 for (const [type, count] of Object.entries(countsByType)) {
   if (count > 0) console.log(`  ${type}: ${count} candidate(s)`);
