@@ -261,9 +261,9 @@ export default async function CampaignsPage({
             ) : (
               <div className="table-card">
                 <div className="table-scroll">
-                  <table className="data-table" style={{ tableLayout: 'fixed', width: '100%' }}>
+                  <table className="data-table" style={{ tableLayout: 'fixed' }}>
                     <colgroup>
-                      <col />
+                      <col style={{ width: '400px' }} />
                       <col style={{ width: '90px' }} />
                       <col style={{ width: '130px' }} />
                       <col style={{ width: '130px' }} />
