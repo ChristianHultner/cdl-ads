@@ -21,6 +21,7 @@ const SCRIPTS = [
   'push-keywords',
   'push-new-targets',
   'push-structure',
+  'push-budget-adjustments',
 ] as const
 
 type ScriptName = (typeof SCRIPTS)[number]

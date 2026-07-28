@@ -1150,9 +1150,84 @@ for (const row of budgetCampRows) {
   console.log(`  [BUDGET_ADJUST] '${row.name}': ${curFmt} \u2192 ${propFmt} (${pctFmt}% of cap, ${acosPct}% ACoS)`);
 }
 
-// PAUSE_CAMPAIGN — spec not received (frame 2 message truncated after BUDGET_ADJUST evidence).
-// Constraint registered in migration 015; logic ships in next frame once spec is confirmed.
-console.log('\n  PAUSE_CAMPAIGN: awaiting spec \u2014 skipped this run.');
+// ── PAUSE_CAMPAIGN ─────────────────────────────────────────────────────────
+// Criteria: state='ENABLED', spend_30d >= 30, acos_30d >= 1.0 (100%+).
+// Separate query — does NOT require budget_amount IS NOT NULL.
+console.log('\n── Phase 7b: PAUSE_CAMPAIGN ──────────────────────────────────────');
+
+const { rows: pauseCandRows } = await pool.query(
+  `SELECT
+     c.campaign_id,
+     c.name,
+     c.budget_amount::float                        AS budget_amount,
+     coalesce(sum(d.cost),          0)::float      AS spend_30d,
+     coalesce(sum(d.sales_14d),     0)::float      AS sales_30d,
+     coalesce(sum(d.purchases_14d), 0)::float      AS orders_30d
+   FROM amazon_campaigns c
+   LEFT JOIN amazon_campaign_daily d
+     ON  d.campaign_id = c.campaign_id
+     AND d.profile_id  = c.profile_id
+     AND d.date >= CURRENT_DATE - INTERVAL '30 days'
+   WHERE c.profile_id = $1
+     AND c.state      = 'ENABLED'
+   GROUP BY c.campaign_id, c.name, c.budget_amount
+   HAVING coalesce(sum(d.cost), 0) >= 30`,
+  [profileId],
+);
+console.log(`  ${pauseCandRows.length} ENABLED campaign(s) with spend_30d >= 30.`);
+
+// Idempotency: open PAUSE_CAMPAIGN recs keyed on target_text = campaign_id.
+const { rows: openPauseRows } = await pool.query(
+  `SELECT target_text
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'PAUSE_CAMPAIGN'
+      AND status     = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+);
+const openPauseSet = new Set(openPauseRows.map(r => r.target_text));
+
+for (const row of pauseCandRows) {
+  const spend30d  = row.spend_30d;
+  const sales30d  = row.sales_30d;
+  // acos_30d >= 1.0 requires sales > 0 (otherwise ratio undefined; spec: losing money on every sale).
+  if (sales30d <= 0) continue;
+  const acos30d = spend30d / sales30d;
+  if (acos30d < 1.0) continue;
+
+  // Idempotency.
+  if (openPauseSet.has(row.campaign_id)) {
+    console.log(`  skipped (open rec exists): [PAUSE_CAMPAIGN] ${row.campaign_id}`);
+    skippedExisting++;
+    continue;
+  }
+
+  const acosPct  = (acos30d * 100).toFixed(1);
+  const spendFmt = `${currSym}${spend30d.toFixed(2)}`;
+  const salesFmt = `${currSym}${sales30d.toFixed(2)}`;
+
+  const proposal =
+    `Pause '${row.name}': ${spendFmt} spend bought ${salesFmt} sales in 30d ` +
+    `(${acosPct}% ACoS) \u2014 losing money on every sale.`;
+
+  const evidence = {
+    campaign_id:   row.campaign_id,
+    spend_30d:     spend30d,
+    sales_30d:     sales30d,
+    acos_30d:      acos30d,
+    budget_amount: row.budget_amount,
+  };
+
+  await pool.query(
+    `INSERT INTO recommendations
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    ['PAUSE_CAMPAIGN', profileId, row.campaign_id, row.campaign_id, proposal, JSON.stringify(evidence)],
+  );
+  countsByType['PAUSE_CAMPAIGN']++;
+  written++;
+  console.log(`  [PAUSE_CAMPAIGN] '${row.name}': ${spendFmt} spend, ${acosPct}% ACoS`);
+}
 console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
 
 await pool.end();
