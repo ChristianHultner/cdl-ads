@@ -41,12 +41,18 @@ interface BidAdjStateRow {
   state: string
 }
 
+interface CampDraftCount {
+  profile_id: string
+  resolved_campaign_id: string
+  draft_count: string
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────
 export default async function RecommendationsPage() {
   const sql = neon(process.env.DATABASE_URL!)
 
   // ── Main queries ───────────────────────────────────────────────────────
-  const [rows, allCampaigns, dailyAgg, allAdGroups] = (await Promise.all([
+  const [rows, allCampaigns, dailyAgg, allAdGroups, campDraftCounts] = (await Promise.all([
     sql`
       SELECT
         r.id,
@@ -79,7 +85,43 @@ export default async function RecommendationsPage() {
       GROUP BY profile_id, campaign_id
     `,
     sql`SELECT profile_id::text, ad_group_id, name FROM amazon_ad_groups`,
-  ])) as unknown as [RecRow[], CampaignInfo[], DailyAgg[], AdGroupInfo[]]
+    // Per-campaign DRAFT counts with full scoping (for scoreboard badges).
+    // Priority: campaign_id col → evidence.campaign_id → resolved_destination.campaign_id
+    //           → destination_ad_group_id resolved through amazon_ad_groups
+    sql`
+      SELECT
+        r.profile_id::text,
+        COALESCE(
+          r.campaign_id::text,
+          r.evidence->>'campaign_id',
+          r.evidence->'resolved_destination'->>'campaign_id',
+          ag.campaign_id::text
+        ) AS resolved_campaign_id,
+        count(*)::text AS draft_count
+      FROM recommendations r
+      LEFT JOIN amazon_ad_groups ag
+        ON  (r.evidence->>'destination_ad_group_id')::text = ag.ad_group_id::text
+        AND r.campaign_id IS NULL
+        AND r.evidence->>'campaign_id' IS NULL
+        AND r.evidence->'resolved_destination'->>'campaign_id' IS NULL
+      WHERE r.status = 'DRAFT'
+      GROUP BY
+        r.profile_id,
+        COALESCE(
+          r.campaign_id::text,
+          r.evidence->>'campaign_id',
+          r.evidence->'resolved_destination'->>'campaign_id',
+          ag.campaign_id::text
+        )
+      HAVING COALESCE(
+        r.campaign_id::text,
+        r.evidence->>'campaign_id',
+        r.evidence->'resolved_destination'->>'campaign_id',
+        ag.campaign_id::text
+      ) IS NOT NULL
+      ORDER BY count(*) DESC
+    `,
+  ])) as unknown as [RecRow[], CampaignInfo[], DailyAgg[], AdGroupInfo[], CampDraftCount[]]
 
   // ── Primary lookup maps ────────────────────────────────────────────────
   const campMap = new Map<string, { name: string; state: string }>()
@@ -92,7 +134,7 @@ export default async function RecommendationsPage() {
     adGroupMap.set(`${ag.profile_id}:${ag.ad_group_id}`, ag.name)
   }
 
-  // ── Collect IDs for supplemental queries ───────────────────────────────
+  // ── Collect IDs for supplemental queries (RecCard ctx for ruled section) ─
   const promoteAsinRecs = rows.filter(r => r.rec_type === 'PROMOTE_ASIN')
   const bidAdjRecs      = rows.filter(r => r.rec_type === 'BID_ADJUST')
 
@@ -114,9 +156,9 @@ export default async function RecommendationsPage() {
   const bidAdjProfileIds = [...new Set(bidAdjRecs.map(r => r.profile_id))]
 
   // ── Supplemental queries ───────────────────────────────────────────────
-  let destTargetRows:   DestTargetRow[]   = []
-  let targetAcosRows:   TargetAcosRow[]   = []
-  let bidAdjStateRows:  BidAdjStateRow[]  = []
+  let destTargetRows:  DestTargetRow[]  = []
+  let targetAcosRows:  TargetAcosRow[]  = []
+  let bidAdjStateRows: BidAdjStateRow[] = []
 
   if (destAgIds.length > 0) {
     ;[destTargetRows, targetAcosRows] = (await Promise.all([
@@ -155,7 +197,7 @@ export default async function RecommendationsPage() {
     bidAdjStateRows = (await sql`
       SELECT target_id, state
       FROM amazon_targets
-      WHERE target_id    = ANY(${bidAdjTargetIds})
+      WHERE target_id      = ANY(${bidAdjTargetIds})
         AND profile_id::text = ANY(${bidAdjProfileIds})
     `) as unknown as BidAdjStateRow[]
   }
@@ -168,7 +210,7 @@ export default async function RecommendationsPage() {
     destTargetsMap.get(key)!.push(t)
   }
 
-  // targetAcosMap built for future use
+  // targetAcosMap retained for future use
   const _targetAcosMap = new Map<string, { spend: string; orders: string; sales: string }>()
   for (const row of targetAcosRows) {
     _targetAcosMap.set(
@@ -182,28 +224,19 @@ export default async function RecommendationsPage() {
     bidAdjStateMap.set(row.target_id, row.state)
   }
 
-  // ── RecCard context ────────────────────────────────────────────────────
+  // ── RecCard context (for ruled section) ───────────────────────────────
   const ctx: RecCardContext = { adGroupMap, campMap, bidAdjStateMap, destTargetsMap }
 
-  // ── Group DRAFTs ───────────────────────────────────────────────────────
+  // ── Partition rows ─────────────────────────────────────────────────────
   const draftRows    = rows.filter(r => r.status === 'DRAFT')
   const nonDraftRows = rows.filter(r => r.status !== 'DRAFT')
-
-  const draftByType = new Map<string, RecRow[]>()
-  for (const row of draftRows) {
-    if (!draftByType.has(row.rec_type)) draftByType.set(row.rec_type, [])
-    draftByType.get(row.rec_type)!.push(row)
-  }
-  for (const group of draftByType.values()) {
-    group.sort((a, b) => (b.evidence.spend ?? 0) - (a.evidence.spend ?? 0))
-  }
 
   const nonDraftCounts = new Map<string, number>()
   for (const row of nonDraftRows) {
     nonDraftCounts.set(row.status, (nonDraftCounts.get(row.status) ?? 0) + 1)
   }
 
-  // ── Push-all: approved count + per-profile metadata ───────────────────
+  // ── PushAllButton data ─────────────────────────────────────────────────
   const approvedRows   = nonDraftRows.filter(r => r.status === 'APPROVED')
   const totalApproved  = approvedRows.length
   const profileApprMap = new Map<string, { count: number; country: string }>()
@@ -216,7 +249,47 @@ export default async function RecommendationsPage() {
     ([profileId, { count, country }]) => ({ profileId, label: country, count }),
   )
 
-  // Suppress unused-variable warning — dailyAgg retained for future use
+  // ── Scoreboard derived data ────────────────────────────────────────────
+  const draftByProfile = new Map<string, number>()
+  for (const r of draftRows) {
+    draftByProfile.set(r.profile_id, (draftByProfile.get(r.profile_id) ?? 0) + 1)
+  }
+
+  const approvedByProfile = new Map<string, number>()
+  for (const r of approvedRows) {
+    approvedByProfile.set(r.profile_id, (approvedByProfile.get(r.profile_id) ?? 0) + 1)
+  }
+
+  // Profile info (country / currency) from any row for that profile
+  const profileInfoMap = new Map<string, { country: string; currency: string }>()
+  for (const r of rows) {
+    if (!profileInfoMap.has(r.profile_id)) {
+      profileInfoMap.set(r.profile_id, { country: r.country_code, currency: r.currency_code })
+    }
+  }
+
+  // Campaign badges per profile — SQL already sorted by count DESC
+  const campBadgesMap = new Map<string, Array<{ campaignId: string; name: string; count: number }>>()
+  for (const row of campDraftCounts) {
+    const camp = campMap.get(`${row.profile_id}:${row.resolved_campaign_id}`)
+    const name = camp?.name ?? row.resolved_campaign_id
+    if (!campBadgesMap.has(row.profile_id)) campBadgesMap.set(row.profile_id, [])
+    campBadgesMap.get(row.profile_id)!.push({
+      campaignId: row.resolved_campaign_id,
+      name,
+      count: parseInt(row.draft_count, 10),
+    })
+  }
+
+  // All profiles with open (DRAFT or APPROVED) recs, sorted by draft count desc
+  const openProfileIds = [
+    ...new Set([
+      ...draftRows.map(r => r.profile_id),
+      ...approvedRows.map(r => r.profile_id),
+    ]),
+  ].sort((a, b) => (draftByProfile.get(b) ?? 0) - (draftByProfile.get(a) ?? 0))
+
+  // Suppress unused-variable warnings
   void dailyAgg
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -224,56 +297,111 @@ export default async function RecommendationsPage() {
     <div>
       <h1>Recommendations</h1>
 
+      {/* ── Push button (top, unchanged) ── */}
       <PushAllButton totalApproved={totalApproved} profiles={approvedProfiles} />
 
-      {rows.length === 0 ? (
-        <p style={{ color: 'var(--cdl-muted)' }}>No recommendations yet.</p>
+      {/* ── Empty state ── */}
+      {openProfileIds.length === 0 ? (
+        <p style={{ color: 'var(--cdl-muted)', marginBottom: '1.5rem' }}>
+          No open recommendations — the queue is clear.
+        </p>
       ) : (
-        <>
-          {/* ── DRAFT groups ── */}
-          {draftRows.length === 0 ? (
-            <p style={{ color: 'var(--cdl-muted)', marginBottom: '1.5rem' }}>
-              No DRAFT recommendations.
-            </p>
-          ) : (
-            Array.from(draftByType.entries()).map(([recType, typeRows]) => (
-              <div key={recType} style={{ marginBottom: '2.5rem' }}>
-                <h2>
-                  {recType}{' '}
-                  <span style={{
-                    color: 'var(--cdl-muted)', fontWeight: 400,
-                    fontFamily: 'inherit', fontSize: '0.9rem',
-                  }}>
-                    — {typeRows.length} draft{typeRows.length !== 1 ? 's' : ''}
-                  </span>
-                </h2>
-                {typeRows.map(r => <RecCard key={r.id} rec={r} ctx={ctx} />)}
-              </div>
-            ))
-          )}
+        /* ── Scoreboard ── */
+        <div className="table-card" style={{ marginBottom: '2rem' }}>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Market</th>
+                  <th>Draft</th>
+                  <th>Approved</th>
+                  <th>Campaigns with drafts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {openProfileIds.map(pid => {
+                  const info     = profileInfoMap.get(pid) ?? { country: '??', currency: '??' }
+                  const draft    = draftByProfile.get(pid)    ?? 0
+                  const approved = approvedByProfile.get(pid) ?? 0
+                  const badges   = campBadgesMap.get(pid)     ?? []
+                  const visible  = badges.slice(0, 6)
+                  const overflow = badges.length > 6 ? badges.length - 6 : 0
+                  return (
+                    <tr key={pid}>
+                      <td>{info.country} ({info.currency})</td>
+                      <td className="num">
+                        {draft > 0
+                          ? <span className="badge badge-blue">{draft}</span>
+                          : '—'}
+                      </td>
+                      <td className="num">
+                        {approved > 0
+                          ? <span className="badge badge-ok">{approved}</span>
+                          : '—'}
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
+                          {visible.map(b => {
+                            const dn = b.name.length > 24 ? b.name.slice(0, 24) : b.name
+                            return (
+                              <a
+                                key={b.campaignId}
+                                href={`/campaigns/${pid}/${encodeURIComponent(b.campaignId)}#recs`}
+                                style={{ textDecoration: 'none' }}
+                              >
+                                <span className="badge badge-blue">{dn} ({b.count})</span>
+                              </a>
+                            )
+                          })}
+                          {overflow > 0 && (
+                            <a href="/campaigns" style={{ textDecoration: 'none' }}>
+                              <span className="badge badge-muted">+{overflow} more</span>
+                            </a>
+                          )}
+                          {badges.length === 0 && draft > 0 && (
+                            <span style={{ fontSize: '0.82rem', color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+                              unattributed
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
-          {/* ── Ruled section — collapsed ── */}
-          {nonDraftRows.length > 0 && (
-            <details style={{ marginTop: '0.5rem' }}>
-              <summary style={{
-                cursor: 'pointer',
-                fontFamily: 'var(--font-fraunces, Fraunces, Georgia, serif)',
-                fontSize: '1.1rem', fontWeight: 700, color: 'var(--cdl-muted)',
-                padding: '0.5rem 0',
-              }}>
-                Ruled ({nonDraftRows.length}){' '}
-                <span style={{ fontWeight: 400, fontSize: '0.82rem' }}>
-                  — {(['APPROVED', 'REJECTED', 'PUSHED'] as const)
-                    .map(s => `${s} ${nonDraftCounts.get(s) ?? 0}`)
-                    .join(' · ')}
-                </span>
-              </summary>
-              <div style={{ marginTop: '0.75rem' }}>
-                {nonDraftRows.map(r => <RecCard key={r.id} rec={r} ctx={ctx} />)}
-              </div>
-            </details>
-          )}
-        </>
+      {/* ── Ruled section — collapsed if present, else lifetime tally ── */}
+      {nonDraftRows.length > 0 ? (
+        <details style={{ marginTop: '0.5rem' }}>
+          <summary style={{
+            cursor: 'pointer',
+            fontFamily: 'var(--font-fraunces, Fraunces, Georgia, serif)',
+            fontSize: '1.1rem', fontWeight: 700, color: 'var(--cdl-muted)',
+            padding: '0.5rem 0',
+          }}>
+            Ruled ({nonDraftRows.length}){' '}
+            <span style={{ fontWeight: 400, fontSize: '0.82rem' }}>
+              — {(['APPROVED', 'REJECTED', 'PUSHED'] as const)
+                .map(s => `${s} ${nonDraftCounts.get(s) ?? 0}`)
+                .join(' · ')}
+            </span>
+          </summary>
+          <div style={{ marginTop: '0.75rem' }}>
+            {nonDraftRows.map(r => <RecCard key={r.id} rec={r} ctx={ctx} />)}
+          </div>
+        </details>
+      ) : (
+        <p style={{ color: 'var(--cdl-muted)', fontSize: '0.85rem', marginTop: '1rem' }}>
+          Ruled all-time: {nonDraftRows.length}{' '}
+          (PUSHED {nonDraftCounts.get('PUSHED') ?? 0}{' '}
+          · REJECTED {nonDraftCounts.get('REJECTED') ?? 0}{' '}
+          · SKIPPED {nonDraftCounts.get('SKIPPED') ?? 0}{' '}
+          · HELD {nonDraftCounts.get('HELD') ?? 0})
+        </p>
       )}
     </div>
   )
