@@ -130,6 +130,7 @@ export default async function CampaignsPage({
         FROM recommendations r
         LEFT JOIN amazon_ad_groups ag
           ON  (r.evidence->>'destination_ad_group_id')::text = ag.ad_group_id::text
+          AND ag.profile_id = r.profile_id
           AND r.campaign_id IS NULL
           AND r.evidence->>'campaign_id' IS NULL
           AND r.evidence->'resolved_destination'->>'campaign_id' IS NULL

@@ -4,6 +4,7 @@ import { neon } from '@neondatabase/serverless'
 import { PushAllButton } from './PushAllButton'
 import type { ProfileMeta } from './PushAllButton'
 import { RecCard, type RecCardContext, type RecRow, type DestTargetRow } from '@/app/components/RecCard'
+import { evidenceCampaignId } from '@/app/lib/rec-scope'
 
 // ── Local interfaces (page-query shapes only) ─────────────────────────────
 interface CampaignInfo {
@@ -231,6 +232,14 @@ export default async function RecommendationsPage() {
   const draftRows    = rows.filter(r => r.status === 'DRAFT')
   const nonDraftRows = rows.filter(r => r.status !== 'DRAFT')
 
+  // Unattributed DRAFT recs: no campaign from any TypeScript-visible leg (1–3)
+  // AND no destination_ad_group_id (leg 4 resolves via amazon_ad_groups in SQL).
+  // CREATE_STRUCTURE, bare NEGATE_TERMs, etc. surface here for approve/reject.
+  const unattributedDraftRows = draftRows.filter(r =>
+    evidenceCampaignId(null, r.evidence) === null &&
+    r.evidence.destination_ad_group_id == null,
+  )
+
   const nonDraftCounts = new Map<string, number>()
   for (const row of nonDraftRows) {
     nonDraftCounts.set(row.status, (nonDraftCounts.get(row.status) ?? 0) + 1)
@@ -374,7 +383,25 @@ export default async function RecommendationsPage() {
         </div>
       )}
 
-      {/* ── Ruled section — collapsed if present, else lifetime tally ── */}
+      {/* ── Needs review (unattributed) ── */}
+      {unattributedDraftRows.length > 0 && (
+        <div style={{ marginBottom: '2rem' }}>
+          <h2 style={{ marginBottom: '0.75rem' }}>
+            Needs review{' '}
+            <span style={{
+              color:      'var(--cdl-muted)',
+              fontWeight: 400,
+              fontFamily: 'inherit',
+              fontSize:   '0.9rem',
+            }}>
+              — unattributed ({unattributedDraftRows.length})
+            </span>
+          </h2>
+          {unattributedDraftRows.map(r => <RecCard key={r.id} rec={r} ctx={ctx} />)}
+        </div>
+      )}
+
+            {/* ── Ruled section — collapsed if present, else lifetime tally ── */}
       {nonDraftRows.length > 0 ? (
         <details style={{ marginTop: '0.5rem' }}>
           <summary style={{

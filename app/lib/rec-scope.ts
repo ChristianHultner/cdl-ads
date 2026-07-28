@@ -40,3 +40,26 @@ export const CAMPAIGN_LEVEL_TYPES = new Set(['BUDGET_ADJUST', 'PAUSE_CAMPAIGN'])
 export function isCampaignLevel(recType: string, ev: Evidence): boolean {
   return CAMPAIGN_LEVEL_TYPES.has(recType) || evidenceAdGroupId(ev) === null
 }
+
+/**
+ * Returns the attributed campaign_id for a rec (TypeScript-side legs 1–3 only).
+ * Leg 4 (destination_ad_group_id → amazon_ad_groups) requires a DB join and is
+ * NOT available client-side — a null return here does not mean unattributed when
+ * evidence.destination_ad_group_id is set.
+ *
+ * Priority mirrors the SQL COALESCE in the consuming queries:
+ *   1. recommendations.campaign_id column   (pass as recCampaignId)
+ *   2. evidence->>'campaign_id'
+ *   3. evidence->'resolved_destination'->>'campaign_id'
+ */
+export function evidenceCampaignId(
+  recCampaignId: string | null | undefined,
+  ev: Evidence,
+): string | null {
+  return (
+    recCampaignId ??
+    ev.campaign_id ??
+    ev.resolved_destination?.campaign_id ??
+    null
+  )
+}

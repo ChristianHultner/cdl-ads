@@ -27,9 +27,11 @@ const SCRIPTS = [
 type ScriptName = (typeof SCRIPTS)[number]
 
 export interface ScriptResult {
-  exit: number
-  pushed: number  // lines matching /\bPUSHED\b/i
-  tail: string[]  // last 25 lines of combined stdout+stderr
+  exit:    number
+  pushed:  number  // from 'Execute complete: N pushed'
+  partial: number  // from 'Execute complete: N pushed, M partial'
+  skipped: number  // from 'Totals: X fetched, Y skipped'
+  tail:    string[]  // last 25 lines of combined stdout+stderr
 }
 
 export interface PushProfileResponse {
@@ -68,12 +70,16 @@ function spawnScript(
     child.stderr?.on('data', collect)
 
     child.on('close', code => {
-      const pushed = lines.filter(l => /\bPUSHED\b/i.test(l)).length
-      resolve({ exit: code ?? 1, pushed, tail: lines.slice(-25) })
+      const execLine   = lines.find(l => /execute complete:/i.test(l))
+      const totalsLine = lines.find(l => /^\s*Totals:/i.test(l))
+      const pushed  = execLine   ? (Number(execLine.match(/(\d+)\s+pushed/i)?.[1])   || 0) : 0
+      const partial = execLine   ? (Number(execLine.match(/(\d+)\s+partial/i)?.[1])  || 0) : 0
+      const skipped = totalsLine ? (Number(totalsLine.match(/(\d+)\s+skipped/i)?.[1]) || 0) : 0
+      resolve({ exit: code ?? 1, pushed, partial, skipped, tail: lines.slice(-25) })
     })
 
     child.on('error', err =>
-      resolve({ exit: 1, pushed: 0, tail: [`spawn error: ${err.message}`] }),
+      resolve({ exit: 1, pushed: 0, partial: 0, skipped: 0, tail: [`spawn error: ${err.message}`] }),
     )
   })
 }
@@ -137,8 +143,10 @@ export async function POST(req: NextRequest) {
       SCRIPTS.map(name => [
         name,
         {
-          exit:   0,
-          pushed: 0,
+          exit:    0,
+          pushed:  0,
+          partial: 0,
+          skipped: 0,
           tail: [
             `[dryRun] would run: node scripts/${name}.mjs --profile ${profileId} --execute`,
             ...(missingEnv.length > 0

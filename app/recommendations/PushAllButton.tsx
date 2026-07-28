@@ -13,9 +13,11 @@ export interface ProfileMeta {
 }
 
 interface ScriptResult {
-  exit: number
-  pushed: number
-  tail: string[]
+  exit:    number
+  pushed:  number
+  partial: number
+  skipped: number
+  tail:    string[]
 }
 
 interface ProfileResult {
@@ -279,7 +281,7 @@ function ProfileResultPanel({
   const hasIssues =
     result.error != null ||
     result.missingEnv.length > 0 ||
-    Object.values(result.scripts).some(s => s.exit !== 0)
+    Object.values(result.scripts).some(s => s.exit !== 0 || s.partial > 0)
 
   const borderColor = hasIssues ? 'rgba(192,57,43,0.28)' : 'rgba(26,127,78,0.22)'
   const bgColor     = hasIssues ? 'rgba(192,57,43,0.04)' : 'rgba(26,127,78,0.04)'
@@ -361,7 +363,9 @@ function ProfileResultPanel({
 function ScriptRow({ name, result }: { name: string; result: ScriptResult }) {
   const [open, setOpen] = useState(false)
   const label = SCRIPT_LABELS[name] ?? name
-  const ok    = result.exit === 0
+  // ✓ green: exit=0 AND no partials. ~ amber: exit=0 but partials exist. ✗ red: exit≠0
+  const ok    = result.exit === 0 && result.partial === 0
+  const icon  = ok ? '✓' : (result.exit === 0 ? '~' : '✗')
 
   return (
     <div style={{ marginBottom: '0.3rem' }}>
@@ -378,7 +382,7 @@ function ScriptRow({ name, result }: { name: string; result: ScriptResult }) {
           minWidth:   '1em',
           flexShrink: 0,
         }}>
-          {ok ? '✓' : '✗'}
+          {icon}
         </span>
         <span style={{ fontWeight: 600, minWidth: '9.5rem', flexShrink: 0 }}>
           {label}
@@ -386,7 +390,15 @@ function ScriptRow({ name, result }: { name: string; result: ScriptResult }) {
         {result.pushed > 0 && (
           <span className="badge badge-ok">{result.pushed} pushed</span>
         )}
-        {!ok && (
+        {result.partial > 0 && (
+          <span className="badge badge-warn">{result.partial} partial</span>
+        )}
+        {result.skipped > 0 && (
+          <span style={{ color: 'var(--cdl-muted)', fontSize: '0.78rem' }}>
+            {result.skipped} skip{result.skipped !== 1 ? 's' : ''}
+          </span>
+        )}
+        {result.exit !== 0 && (
           <span className="badge badge-warn">exit {result.exit}</span>
         )}
         {result.tail.length > 0 && (
