@@ -59,6 +59,8 @@ interface ProfileRow {
 interface CampaignRow {
   campaign_name: string
   state: string
+  budget_amount: string | null
+  budget_type: string | null
 }
 
 interface TotalsRow {
@@ -167,7 +169,9 @@ export default async function CampaignDetailPage({
     sql`
       SELECT
         coalesce(name, ${campaignId})    AS campaign_name,
-        coalesce(state, 'UNKNOWN')       AS state
+        coalesce(state, 'UNKNOWN')       AS state,
+        budget_amount::text,
+        budget_type
       FROM amazon_campaigns
       WHERE profile_id = ${profileId}::bigint
         AND campaign_id = ${campaignId}
@@ -376,6 +380,11 @@ export default async function CampaignDetailPage({
         }}>
           <h1 style={{ marginBottom: 0 }}>{campaign.campaign_name}</h1>
           <span className={stateBadgeCls(campaign.state)}>{campaign.state}</span>
+          {campaign.budget_amount != null && (
+            <span style={{ fontSize: '0.85rem', color: 'var(--cdl-muted)' }}>
+              Budget: {parseFloat(campaign.budget_amount).toFixed(2)} {profile.currency_code}/day
+            </span>
+          )}
           <span style={{ fontSize: '0.85rem', color: 'var(--cdl-muted)' }}>
             {profile.country_code} · {profile.currency_code}
           </span>

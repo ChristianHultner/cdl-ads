@@ -19,6 +19,8 @@ interface CampaignRow {
   spend_30d: string
   sales_30d: string
   acos: string | null
+  budget_amount: string | null
+  budget_type: string | null
 }
 
 interface CampaignCount {
@@ -92,14 +94,16 @@ export default async function CampaignsPage({
           c.state,
           coalesce(sum(d.cost), 0)::text                      AS spend_30d,
           coalesce(sum(d.sales_14d), 0)::text                 AS sales_30d,
-          (sum(d.cost) / nullif(sum(d.sales_14d), 0))::text  AS acos
+          (sum(d.cost) / nullif(sum(d.sales_14d), 0))::text  AS acos,
+          c.budget_amount::text,
+          c.budget_type
         FROM amazon_campaigns c
         LEFT JOIN amazon_campaign_daily d
           ON  d.campaign_id = c.campaign_id
           AND d.profile_id  = c.profile_id
           AND d.date >= CURRENT_DATE - INTERVAL '30 days'
         WHERE c.state IN ('ENABLED', 'PAUSED')
-        GROUP BY c.profile_id, c.campaign_id, c.name, c.state
+        GROUP BY c.profile_id, c.campaign_id, c.name, c.state, c.budget_amount, c.budget_type
         ORDER BY c.profile_id, sum(d.cost) DESC NULLS LAST
       `,
       // Total campaign count per profile (all states)
@@ -236,6 +240,7 @@ export default async function CampaignsPage({
                         <th>Campaign</th>
                         <th>State</th>
                         <th>Spend 30d</th>
+                        <th>Budget</th>
                         <th>Sales 30d</th>
                         <th>ACOS 30d</th>
                         <th>Recs</th>
@@ -266,6 +271,11 @@ export default async function CampaignsPage({
                             </td>
                             <td className="num">
                               {fmt(c.spend_30d)} {m.currency_code}
+                            </td>
+                            <td className="num">
+                              {c.budget_amount != null
+                                ? `${parseFloat(c.budget_amount).toFixed(2)} ${m.currency_code}/day`
+                                : '—'}
                             </td>
                             <td className="num">
                               {fmt(c.sales_30d)} {m.currency_code}
