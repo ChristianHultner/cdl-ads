@@ -2,6 +2,8 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 import { notFound } from 'next/navigation'
+import { RecCard, type RecCardContext, type RecRow, type DestTargetRow } from '@/app/components/RecCard'
+import { evidenceAdGroupId, isCampaignLevel } from '@/app/lib/rec-scope'
 
 // ── TLD by country code ──────────────────────────────────────────────────────
 const TLD: Record<string, string> = {
@@ -121,6 +123,11 @@ interface Keyword {
   match_type: string
   state: string
   bid: string | null
+}
+
+interface RecBidAdjStateRow {
+  target_id: string
+  state: string
 }
 
 // ── Stat label helper ────────────────────────────────────────────────────────
@@ -341,6 +348,120 @@ export default async function CampaignDetailPage({
     kwsByGroup.set(kw.ad_group_id, list)
   }
 
+  // ── DRAFT recommendations for this campaign (full scoping) ───────────────
+  // Priority: campaign_id col → evidence.campaign_id → resolved_destination.campaign_id
+  //           → destination_ad_group_id resolved through amazon_ad_groups
+  const detailRecRows = (await sql`
+    SELECT
+      r.id,
+      r.rec_type,
+      r.target_text,
+      r.proposal,
+      r.status,
+      r.created_at::text,
+      p.country_code,
+      p.profile_id::text,
+      p.currency_code,
+      r.evidence
+    FROM recommendations r
+    JOIN amazon_profiles p USING (profile_id)
+    LEFT JOIN amazon_ad_groups ag_fb
+      ON  (r.evidence->>'destination_ad_group_id')::text = ag_fb.ad_group_id::text
+      AND r.campaign_id IS NULL
+      AND r.evidence->>'campaign_id' IS NULL
+      AND r.evidence->'resolved_destination'->>'campaign_id' IS NULL
+    WHERE r.status = 'DRAFT'
+      AND p.profile_id = ${profileId}::bigint
+      AND COALESCE(
+            r.campaign_id::text,
+            r.evidence->>'campaign_id',
+            r.evidence->'resolved_destination'->>'campaign_id',
+            ag_fb.campaign_id::text
+          ) = ${campaignId}::text
+    ORDER BY r.rec_type, r.id
+  `) as unknown as RecRow[]
+
+  // ── Supplemental queries for RecCard context ────────────────────────────
+  const bidAdjTargetIdsForRecs = [
+    ...new Set(
+      detailRecRows
+        .filter(r => r.rec_type === 'BID_ADJUST')
+        .map(r => r.evidence.chosen_target?.target_id)
+        .filter((x): x is string => x != null),
+    ),
+  ]
+  const destAgIdsForRecs = [
+    ...new Set(
+      detailRecRows
+        .filter(r => r.rec_type === 'PROMOTE_ASIN')
+        .map(r => r.evidence.primary_placement?.ad_group_id)
+        .filter((x): x is string => x != null),
+    ),
+  ]
+
+  const [recBidAdjStateRows, recDestTargetRows] = await Promise.all([
+    bidAdjTargetIdsForRecs.length > 0
+      ? (sql`
+          SELECT target_id, state
+          FROM amazon_targets
+          WHERE target_id = ANY(${bidAdjTargetIdsForRecs})
+            AND profile_id = ${profileId}::bigint
+        `) as unknown as Promise<RecBidAdjStateRow[]>
+      : Promise.resolve([] as RecBidAdjStateRow[]),
+    destAgIdsForRecs.length > 0
+      ? (sql`
+          SELECT
+            target_id,
+            ad_group_id,
+            profile_id::text AS profile_id,
+            state,
+            expression_type,
+            resolved_asin,
+            bid::text
+          FROM amazon_targets
+          WHERE profile_id = ${profileId}::bigint
+            AND ad_group_id = ANY(${destAgIdsForRecs})
+          ORDER BY ad_group_id, resolved_asin NULLS LAST
+        `) as unknown as Promise<DestTargetRow[]>
+      : Promise.resolve([] as DestTargetRow[]),
+  ])
+
+  // ── Build RecCard context ────────────────────────────────────────────────
+  // adGroupMap: all ad groups for this campaign (names only; evidence panels
+  // that reference other campaigns' groups fall back to showing the raw id)
+  const recAdGroupMap = new Map<string, string>()
+  for (const ag of adGroups) {
+    recAdGroupMap.set(`${profileId}:${ag.ad_group_id}`, ag.name)
+  }
+
+  const recCampMap = new Map<string, { name: string; state: string }>()
+  recCampMap.set(`${profileId}:${campaignId}`, {
+    name:  campaign.campaign_name,
+    state: campaign.state,
+  })
+
+  const recBidAdjStateMap = new Map<string, string>()
+  for (const row of recBidAdjStateRows) {
+    recBidAdjStateMap.set(row.target_id, row.state)
+  }
+
+  const recDestTargetsMap = new Map<string, DestTargetRow[]>()
+  for (const t of recDestTargetRows) {
+    const key = `${t.profile_id}:${t.ad_group_id}`
+    if (!recDestTargetsMap.has(key)) recDestTargetsMap.set(key, [])
+    recDestTargetsMap.get(key)!.push(t)
+  }
+
+  const recCtx: RecCardContext = {
+    adGroupMap:    recAdGroupMap,
+    campMap:       recCampMap,
+    bidAdjStateMap: recBidAdjStateMap,
+    destTargetsMap: recDestTargetsMap,
+  }
+
+  // ── Partition recs: campaign-level vs per-ad-group ───────────────────────
+  const campLevelRecs = detailRecRows.filter(r => isCampaignLevel(r.rec_type, r.evidence))
+
   function stPerfFor(adGroupId: string, resolvedAsin: string): StRow | undefined {
     return (stByGroup.get(adGroupId) ?? []).find(
       r => r.search_term === resolvedAsin.toLowerCase()
@@ -424,6 +545,29 @@ export default async function CampaignDetailPage({
         </div>
       </div>
 
+      {/* ── Recommendations (campaign-level + anchor for badge links) ── */}
+      {detailRecRows.length > 0 && (
+        <section id="recs" style={{ marginBottom: '2.5rem' }}>
+          <h2>
+            Recommendations{' '}
+            <span style={{
+              color: 'var(--cdl-muted)', fontWeight: 400,
+              fontFamily: 'inherit', fontSize: '0.9rem',
+            }}>
+              — {detailRecRows.length} draft{detailRecRows.length !== 1 ? 's' : ''}
+            </span>
+          </h2>
+          {campLevelRecs.length > 0
+            ? campLevelRecs.map(r => <RecCard key={r.id} rec={r} ctx={recCtx} />)
+            : (
+              <p style={{ color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
+                All recommendations are attributed to individual ad groups — see below.
+              </p>
+            )
+          }
+        </section>
+      )}
+
       {/* ── Ad Groups ── */}
       <h2>Ad Groups</h2>
 
@@ -434,12 +578,18 @@ export default async function CampaignDetailPage({
       )}
 
       {adGroups.map(ag => {
-        const pads      = padsByGroup.get(ag.ad_group_id)     ?? []
-        const tgts      = targetsByGroup.get(ag.ad_group_id)  ?? []
-        const topTerms  = top8(ag.ad_group_id)
-        const kws       = kwsByGroup.get(ag.ad_group_id)      ?? []
+        const pads     = padsByGroup.get(ag.ad_group_id)    ?? []
+        const tgts     = targetsByGroup.get(ag.ad_group_id) ?? []
+        const topTerms = top8(ag.ad_group_id)
+        const kws      = kwsByGroup.get(ag.ad_group_id)     ?? []
         const hasStPerf = tgts.some(t => t.resolved_asin && stPerfFor(ag.ad_group_id, t.resolved_asin))
         const hasKwPerf = kws.some(kw => !!stPerfFor(ag.ad_group_id, kw.keyword_text))
+
+        // Recs attributed to this specific ad group
+        const agRecs = detailRecRows.filter(r =>
+          !isCampaignLevel(r.rec_type, r.evidence) &&
+          evidenceAdGroupId(r.evidence) === ag.ad_group_id
+        )
 
         return (
           <section
@@ -473,6 +623,22 @@ export default async function CampaignDetailPage({
             </div>
 
             <div style={{ padding: '1rem' }}>
+
+              {/* ── Recommendations for this ad group ── */}
+              {agRecs.length > 0 && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>
+                    Recommendations{' '}
+                    <span style={{
+                      color: 'var(--cdl-muted)', fontWeight: 400,
+                      fontFamily: 'inherit', fontSize: '0.9rem',
+                    }}>
+                      — {agRecs.length} draft{agRecs.length !== 1 ? 's' : ''}
+                    </span>
+                  </h4>
+                  {agRecs.map(r => <RecCard key={r.id} rec={r} ctx={recCtx} />)}
+                </div>
+              )}
 
               {/* ── b. Advertised Products ── */}
               <h4 style={{ marginBottom: '0.5rem' }}>Advertised Products</h4>
@@ -681,7 +847,7 @@ export default async function CampaignDetailPage({
                 </div>
               )}
 
-              {/* ── d. Top Search Terms ── */}
+              {/* ── e. Top Search Terms ── */}
               <h4 style={{ marginBottom: '0.5rem' }}>
                 Top Search Terms{' '}
                 <span style={{ fontSize: '0.8em', fontWeight: 400, color: 'var(--cdl-muted)' }}>

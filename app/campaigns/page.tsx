@@ -30,7 +30,7 @@ interface CampaignCount {
 
 interface RecCount {
   profile_id: string
-  campaign_id: string
+  resolved_campaign_id: string
   rec_count: string
 }
 
@@ -112,15 +112,42 @@ export default async function CampaignsPage({
         FROM amazon_campaigns
         GROUP BY profile_id
       `,
-      // DRAFT recs with a campaign_id
+      // DRAFT rec counts — full campaign scoping:
+      //   1. recommendations.campaign_id::text
+      //   2. evidence->>'campaign_id'
+      //   3. evidence->'resolved_destination'->>'campaign_id'
+      //   4. evidence->>'destination_ad_group_id' → amazon_ad_groups.campaign_id
       sql`
         SELECT
-          profile_id::text,
-          campaign_id,
+          r.profile_id::text,
+          COALESCE(
+            r.campaign_id::text,
+            r.evidence->>'campaign_id',
+            r.evidence->'resolved_destination'->>'campaign_id',
+            ag.campaign_id::text
+          ) AS resolved_campaign_id,
           count(*)::text AS rec_count
-        FROM recommendations
-        WHERE status = 'DRAFT' AND campaign_id IS NOT NULL
-        GROUP BY profile_id, campaign_id
+        FROM recommendations r
+        LEFT JOIN amazon_ad_groups ag
+          ON  (r.evidence->>'destination_ad_group_id')::text = ag.ad_group_id::text
+          AND r.campaign_id IS NULL
+          AND r.evidence->>'campaign_id' IS NULL
+          AND r.evidence->'resolved_destination'->>'campaign_id' IS NULL
+        WHERE r.status = 'DRAFT'
+        GROUP BY
+          r.profile_id,
+          COALESCE(
+            r.campaign_id::text,
+            r.evidence->>'campaign_id',
+            r.evidence->'resolved_destination'->>'campaign_id',
+            ag.campaign_id::text
+          )
+        HAVING COALESCE(
+          r.campaign_id::text,
+          r.evidence->>'campaign_id',
+          r.evidence->'resolved_destination'->>'campaign_id',
+          ag.campaign_id::text
+        ) IS NOT NULL
       `,
       // target_acos params
       sql`
@@ -151,9 +178,9 @@ export default async function CampaignsPage({
 
   const countMap = new Map(campaignCounts.map(c => [c.profile_id, c.total]))
   const recMap   = new Map(
-    draftRecs.map(r => [`${r.profile_id}:${r.campaign_id}`, parseInt(r.rec_count, 10)])
+    draftRecs.map(r => [`${r.profile_id}:${r.resolved_campaign_id}`, parseInt(r.rec_count, 10)])
   )
-  const acosMap     = new Map(acosParams.map(p => [p.scope, parseFloat(p.value)]))
+  const acosMap      = new Map(acosParams.map(p => [p.scope, parseFloat(p.value)]))
   const globalTarget = acosMap.get('GLOBAL') ?? 0.30
 
   function resolveTarget(pid: string): number {
@@ -287,7 +314,12 @@ export default async function CampaignsPage({
                             </td>
                             <td className="num">
                               {recCount > 0
-                                ? <span className="badge badge-blue">{recCount}</span>
+                                ? <a
+                                    href={`/campaigns/${m.profile_id}/${encodeURIComponent(c.campaign_id)}#recs`}
+                                    style={{ textDecoration: 'none' }}
+                                  >
+                                    <span className="badge badge-blue">{recCount}</span>
+                                  </a>
                                 : '—'}
                             </td>
                           </tr>
