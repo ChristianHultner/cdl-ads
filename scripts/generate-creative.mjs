@@ -97,6 +97,12 @@ for (let i = 0; i < allAsins.length && catalogTitles.length < TITLE_CAP; i += BO
         headers: {
           'X-Api-Key': CDL_BOOKS_API_KEY,
           Accept:      'application/json',
+          ...(process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET
+            ? {
+                'CF-Access-Client-Id':     process.env.CF_ACCESS_CLIENT_ID,
+                'CF-Access-Client-Secret': process.env.CF_ACCESS_CLIENT_SECRET,
+              }
+            : {}),
         },
       },
     );
