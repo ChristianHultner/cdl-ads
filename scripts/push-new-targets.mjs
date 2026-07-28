@@ -127,15 +127,46 @@ const parsedEvidence = recs.map(r =>
   typeof r.evidence === 'string' ? JSON.parse(r.evidence) : r.evidence,
 );
 
+// ── 3a-pre. CREATIVE_TARGET route map (8b87a4a homecoming pattern) ────────────
+// CREATIVE_TARGET recs whose id appears in a PUSHED CREATE_STRUCTURE's
+// evidence.orphan_rec_ids route to that structure's created_ad_group_id/campaign,
+// overriding stale destination_ad_group_id.
+const ctRouteMap = new Map(); // rec.id (string) → { ad_group_id, campaign_id }
+{
+  const { rows: pushedStrRows } = await pool.query(
+    `SELECT id, evidence
+       FROM recommendations
+      WHERE profile_id = $1
+        AND rec_type   = 'CREATE_STRUCTURE'
+        AND status     = 'PUSHED'`,
+    [profileId],
+  );
+  for (const sr of pushedStrRows) {
+    const sEv = typeof sr.evidence === 'string' ? JSON.parse(sr.evidence) : (sr.evidence ?? {});
+    const orphanIds     = Array.isArray(sEv.orphan_rec_ids)  ? sEv.orphan_rec_ids  : [];
+    const createdAgId   = sEv.created_ad_group_id  ? String(sEv.created_ad_group_id)  : null;
+    const createdCampId = sEv.created_campaign_id  ? String(sEv.created_campaign_id)  : null;
+    if (!createdAgId || !createdCampId) continue;
+    for (const orphanId of orphanIds) {
+      ctRouteMap.set(String(orphanId), { ad_group_id: createdAgId, campaign_id: createdCampId });
+    }
+  }
+}
+if (ctRouteMap.size > 0) {
+  console.log(`Route map: ${ctRouteMap.size} CREATIVE_TARGET rec(s) remapped via PUSHED CREATE_STRUCTUREs.`);
+  console.log('');
+}
+
 // ── 3a. Collect ALL ad_group_ids: PROMOTE_ASIN placements + CREATIVE_TARGET
-//         explicit destinations ──────────────────────────────────────────────
+//         explicit destinations (including routed) ────────────────────────────
 const creativeTargetDestIds = [
-  ...new Set(
-    parsedEvidence
+  ...new Set([
+    ...parsedEvidence
       .filter((_, i) => recs[i].rec_type === 'CREATIVE_TARGET')
       .map(ev => ev?.destination_ad_group_id)
       .filter((id) => typeof id === 'string' && id.length > 0),
-  ),
+    ...[...ctRouteMap.values()].map(r => r.ad_group_id),
+  ]),
 ];
 
 const adGroupIds = [
@@ -249,14 +280,18 @@ for (let i = 0; i < recs.length; i++) {
 
   // ── CREATIVE_TARGET: explicit destination from evidence ────────────────────
   if (rec.rec_type === 'CREATIVE_TARGET') {
-    const asin     = evidence?.asin ? String(evidence.asin).toUpperCase() : null;
-    const destAgId = evidence?.destination_ad_group_id
-      ? String(evidence.destination_ad_group_id) : null;
+    const asin = evidence?.asin ? String(evidence.asin).toUpperCase() : null;
+
+    // Route map overrides stale destination (8b87a4a homecoming pattern).
+    const routedDest = ctRouteMap.get(String(rec.id));
+    const destAgId   = routedDest?.ad_group_id
+      ?? (evidence?.destination_ad_group_id ? String(evidence.destination_ad_group_id) : null);
 
     console.log('─'.repeat(60));
     console.log(`Rec id      : ${rec.id}`);
     console.log(`Type        : CREATIVE_TARGET`);
     console.log(`Target      : ${rec.target_text}`);
+    if (routedDest) console.log(`Routed via  : CREATE_STRUCTURE ad_group=${routedDest.ad_group_id}`);
 
     if (!asin) {
       console.log('  skipped (evidence.asin is null — verify on Amazon and re-approve with ASIN)');
@@ -265,9 +300,23 @@ for (let i = 0; i < recs.length; i++) {
       continue;
     }
 
-    const destCampId = destAgId ? agCampaignMap.get(destAgId) : null;
+    // For routed destinations, campaign comes from the route map; for non-routed,
+    // fall back to agCampaignMap (populated from creativeTargetDestIds in step 3d).
+    const destCampId = routedDest?.campaign_id ?? (destAgId ? agCampaignMap.get(destAgId) : null);
     if (!destAgId || !destCampId) {
       console.log(`  skipped (destination_ad_group_id "${destAgId ?? '(none)'}" not resolved to a campaign)`);
+      console.log('');
+      skipped++;
+      continue;
+    }
+
+    // Plan-time product-room validation: destination must be a non-AUTO campaign
+    // group with >= 1 ENABLED target (resolved_asin IS NOT NULL).
+    const destGroupInfo  = groupTargetMap.get(destAgId);
+    const passesRoomTest = !autoCampaignGroupIds.has(destAgId)
+      && (destGroupInfo?.asinTargets ?? 0) >= 1;
+    if (!passesRoomTest) {
+      console.log(`  skipped (destination is keyword-room — awaiting structure)`);
       console.log('');
       skipped++;
       continue;

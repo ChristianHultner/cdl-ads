@@ -950,25 +950,24 @@ for (const row of openPromoteRows) {
 }
 console.log(`  Orphans (no HOME — auto, keyword-less, or target-less): ${orphans.length}`);
 
+// 6d. Language split helper — shared by keyword-room and ASIN-room proposals.
+const detectLang = (term) => {
+  const s = (' ' + term + ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return (
+    s.includes(' en ')    ||
+    s.includes(' para ')  ||
+    s.includes('espanol') ||
+    s.includes('libro')   ||
+    s.includes('cuento')  ||
+    s.includes('ninos')   ||
+    s.includes('bebes')   ||
+    s.includes('infantil')
+  ) ? 'ES' : 'EN';
+};
+
 if (orphans.length === 0) {
   console.log('  No orphans — skipping CREATE_STRUCTURE drafts.');
 } else {
-  // 6d. Language split — pad with spaces first to honour the word-boundary tokens
-  //     (' en ', ' para ') from the spec; strip diacritics for accent-insensitive match.
-  const detectLang = (term) => {
-    const s = (' ' + term + ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    return (
-      s.includes(' en ')    ||
-      s.includes(' para ')  ||
-      s.includes('espanol') ||
-      s.includes('libro')   ||
-      s.includes('cuento')  ||
-      s.includes('ninos')   ||
-      s.includes('bebes')   ||
-      s.includes('infantil')
-    ) ? 'ES' : 'EN';
-  };
-
   const orphansByLang = { ES: [], EN: [] };
   for (const o of orphans) orphansByLang[detectLang(o.target_text)].push(o);
   console.log(`  Language split → ES: ${orphansByLang.ES.length}  EN: ${orphansByLang.EN.length}`);
@@ -1048,6 +1047,148 @@ if (orphans.length === 0) {
     countsByType['CREATE_STRUCTURE']++;
     written++;
     console.log(`  [CREATE_STRUCTURE] '${targetText}' drafted — ${M} orphan(s), ${N} seed ASIN(s).`);
+  }
+}
+
+// ── 6b. CREATIVE_TARGET orphan rooms ─────────────────────────────────────────
+// Collect CREATIVE_TARGET (DRAFT/APPROVED) whose destination_ad_group_id is null
+// OR whose destination fails the product-room test (non-AUTO campaign, ENABLED
+// target with resolved_asin IS NOT NULL). Propose 'ASINs Competencia <CC> (<LANG>)'
+// rooms; language split and seed-ASIN derivation mirror Phase 6a.
+console.log('\n── Phase 6b: CREATIVE_TARGET orphan rooms ────────────────────────────────');
+
+const { rows: openCtRows } = await pool.query(
+  `SELECT id, rec_type, target_text, evidence
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'CREATIVE_TARGET'
+      AND status     = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED']],
+);
+console.log(`  Fetched ${openCtRows.length} open CREATIVE_TARGET rec(s).`);
+
+if (openCtRows.length > 0) {
+  // Collect non-null destination_ad_group_ids for product-room validation.
+  const ctDestAgIds = [
+    ...new Set(
+      openCtRows
+        .map(r => {
+          const ev = typeof r.evidence === 'string' ? JSON.parse(r.evidence) : (r.evidence ?? {});
+          return ev.destination_ad_group_id ?? null;
+        })
+        .filter(id => id !== null && id !== ''),
+    ),
+  ];
+
+  // Product-room set: non-AUTO campaigns with >= 1 ENABLED target (resolved_asin IS NOT NULL).
+  const ctProductRoomSet = new Set();
+  if (ctDestAgIds.length > 0) {
+    const { rows: ctPrRows } = await pool.query(
+      `SELECT DISTINCT ag.ad_group_id::text
+         FROM amazon_ad_groups ag
+         JOIN amazon_campaigns c ON c.campaign_id = ag.campaign_id
+                                 AND c.profile_id  = ag.profile_id
+        WHERE ag.profile_id  = $1
+          AND ag.ad_group_id = ANY($2)
+          AND c.targeting_type != 'AUTO'
+          AND EXISTS (
+                SELECT 1
+                  FROM amazon_targets t
+                 WHERE t.profile_id    = $1
+                   AND t.ad_group_id   = ag.ad_group_id
+                   AND t.state         = 'ENABLED'
+                   AND t.resolved_asin IS NOT NULL
+              )`,
+      [profileId, ctDestAgIds],
+    );
+    for (const r of ctPrRows) ctProductRoomSet.add(r.ad_group_id);
+  }
+
+  // Orphan: null destination OR destination not in product-room set.
+  const ctOrphans = [];
+  for (const row of openCtRows) {
+    const ev       = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : (row.evidence ?? {});
+    const destAgId = ev.destination_ad_group_id ? String(ev.destination_ad_group_id) : null;
+    if (destAgId === null || !ctProductRoomSet.has(destAgId)) {
+      ctOrphans.push({ id: row.id, target_text: row.target_text, evidence: ev, destAgId });
+    }
+  }
+  console.log(`  CREATIVE_TARGET orphans (null dest or not product-room): ${ctOrphans.length}`);
+
+  if (ctOrphans.length > 0) {
+    const ctOrphansByLang = { ES: [], EN: [] };
+    for (const o of ctOrphans) ctOrphansByLang[detectLang(o.target_text)].push(o);
+    console.log(`  Language split → ES: ${ctOrphansByLang.ES.length}  EN: ${ctOrphansByLang.EN.length}`);
+
+    for (const [lang, langOrphans] of Object.entries(ctOrphansByLang)) {
+      if (langOrphans.length === 0) continue;
+
+      const targetText = `ASINs Competencia ${countryCode} (${lang})`;
+
+      // Idempotency.
+      const { rows: ctExistOpen } = await pool.query(
+        `SELECT id FROM recommendations
+          WHERE profile_id  = $1
+            AND rec_type    = 'CREATE_STRUCTURE'
+            AND target_text = $2
+            AND status      = ANY($3)`,
+        [profileId, targetText, ['DRAFT', 'APPROVED', 'PUSHED']],
+      );
+      if (ctExistOpen.length > 0) {
+        console.log(`  [CREATE_STRUCTURE] '${targetText}' already open (id ${ctExistOpen[0].id}) — skipping.`);
+        continue;
+      }
+
+      // Seed ASINs: use each orphan's destAgId (if not null) as the ad-group anchor.
+      const ctTopAgMap = new Map();
+      for (const o of langOrphans) {
+        if (o.destAgId) ctTopAgMap.set(o.destAgId, (ctTopAgMap.get(o.destAgId) ?? 0) + 1);
+      }
+
+      const ctAsinCount = new Map();
+      if (ctTopAgMap.size > 0) {
+        const { rows: ctAsinRows } = await pool.query(
+          `SELECT DISTINCT asin, ad_group_id
+             FROM amazon_product_ads
+            WHERE profile_id  = $1
+              AND ad_group_id = ANY($2)
+              AND state       = 'ENABLED'`,
+          [profileId, [...ctTopAgMap.keys()]],
+        );
+        for (const r of ctAsinRows) {
+          const w = ctTopAgMap.get(r.ad_group_id) ?? 0;
+          ctAsinCount.set(r.asin, (ctAsinCount.get(r.asin) ?? 0) + w);
+        }
+      }
+
+      const ctSeedAsins = [...ctAsinCount.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 20)
+        .map(([asin, orphan_count]) => ({ asin, orphan_count }));
+
+      const N = ctSeedAsins.length;
+      const M = langOrphans.length;
+      const proposal =
+        `Create manual campaign + ad group '${targetText}' seeded with ${N} advertised books ` +
+        `(default bid $0.35) to house ${M} CREATIVE_TARGET rec(s) with no eligible product-targeting destination.`;
+      const ctEvidence = {
+        orphan_rec_ids:       langOrphans.map(o => o.id),
+        orphan_terms:         langOrphans.map(o => o.target_text),
+        seed_asins:           ctSeedAsins,
+        proposed_default_bid: 0.35,
+        language:             lang,
+      };
+
+      await pool.query(
+        `INSERT INTO recommendations
+           (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+         VALUES ($1, $2, NULL, $3, $4, $5)`,
+        ['CREATE_STRUCTURE', profileId, targetText, proposal, JSON.stringify(ctEvidence)],
+      );
+      countsByType['CREATE_STRUCTURE']++;
+      written++;
+      console.log(`  [CREATE_STRUCTURE] '${targetText}' drafted — ${M} orphan(s), ${N} seed ASIN(s).`);
+    }
   }
 }
 

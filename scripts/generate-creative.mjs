@@ -537,15 +537,20 @@ if (runMode === 'keywords') {
         AND EXISTS (
               SELECT 1
                 FROM amazon_targets t
-               WHERE t.profile_id  = $1
-                 AND t.ad_group_id = ag.ad_group_id
-                 AND t.state       = 'ENABLED'
+               WHERE t.profile_id    = $1
+                 AND t.ad_group_id   = ag.ad_group_id
+                 AND t.state         = 'ENABLED'
+                 AND t.resolved_asin IS NOT NULL
             )
       ORDER BY ag.name`,
     [profileId],
   );
-  const roomMap = new Map(roomRows.map(r => [r.ad_group_id, r]));
-  console.log(`Eligible rooms (target-holding MANUAL, ENABLED): ${roomRows.length}`);
+  const roomMap        = new Map(roomRows.map(r => [r.ad_group_id, r]));
+  const noEligibleRoom = roomRows.length === 0;
+  console.log(`Eligible rooms (product-targeting MANUAL, ENABLED, resolved_asin): ${roomRows.length}`);
+  if (noEligibleRoom) {
+    console.log('  NOTE: no product-targeting room — will orphan for CREATE_STRUCTURE');
+  }
 
   // ── 2e-t. TOP 15 SEARCH TERMS (60d) ──────────────────────────────────────────
   const cutoffDate = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
@@ -583,7 +588,7 @@ if (runMode === 'keywords') {
     ? roomRows
         .map(r => `  - ad_group_id: ${r.ad_group_id} | name: ${r.ad_group_name} | campaign_id: ${r.campaign_id}`)
         .join('\n')
-    : '  (none — no eligible target-holding MANUAL ad groups)';
+    : '  (none — no product-targeting room available; all proposals will be orphaned for CREATE_STRUCTURE)';
 
   const perfLines = perfRows.length
     ? perfRows
@@ -716,10 +721,13 @@ if (runMode === 'keywords') {
       continue;
     }
 
-    const destRoom = roomMap.get(item.destination_ad_group_id);
-    if (!destRoom) {
-      rejected.push({ item: title, reason: `destination_ad_group_id "${item.destination_ad_group_id}" not in eligible rooms` });
-      continue;
+    let destRoom = null;
+    if (!noEligibleRoom) {
+      destRoom = roomMap.get(item.destination_ad_group_id);
+      if (!destRoom) {
+        rejected.push({ item: title, reason: `destination_ad_group_id "${item.destination_ad_group_id}" not in eligible rooms` });
+        continue;
+      }
     }
 
     if (!['high', 'medium'].includes(item.confidence)) {
@@ -739,8 +747,8 @@ if (runMode === 'keywords') {
       author,
       rationale,
       suggested_bid:             bid,
-      destination_ad_group_id:   item.destination_ad_group_id,
-      destination_ad_group_name: destRoom.ad_group_name,
+      destination_ad_group_id:   noEligibleRoom ? null : item.destination_ad_group_id,
+      destination_ad_group_name: noEligibleRoom ? null : (destRoom?.ad_group_name ?? null),
       confidence:                item.confidence,
     });
   }
@@ -751,7 +759,11 @@ if (runMode === 'keywords') {
   } else {
     for (const v of validated) {
       console.log(`  ✓ "${v.title}" — ${v.author}`);
-      console.log(`    → ${v.destination_ad_group_name} (${v.destination_ad_group_id})`);
+      if (v.destination_ad_group_id) {
+        console.log(`    → ${v.destination_ad_group_name} (${v.destination_ad_group_id})`);
+      } else {
+        console.log(`    → (no product-targeting room — will orphan for CREATE_STRUCTURE)`);
+      }
       console.log(`    → bid=$${v.suggested_bid.toFixed(2)}, conf=${v.confidence}`);
       console.log(`    → rationale: ${v.rationale}`);
     }
