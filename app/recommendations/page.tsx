@@ -39,6 +39,13 @@ interface ExistingTarget {
   bid: number | null
 }
 
+interface ResolvedDestination {
+  ad_group_id: string
+  ad_group_name: string
+  campaign_id: string
+  tier: 'exact-kw' | 'kw-holding' | null
+}
+
 interface Evidence {
   spend?: number
   clicks?: number
@@ -59,6 +66,7 @@ interface Evidence {
   approved_bid?: number
   pushed_keyword_ids?: string[]
   pushed_target_ids?: string[]
+  resolved_destination?: ResolvedDestination | null
 }
 
 interface RecRow {
@@ -504,6 +512,49 @@ export default async function RecommendationsPage() {
     )
   }
 
+  // ── 3c. PROMOTE_TERM “Will be added as EXACT to” destination panel ────────
+  // HONESTY NOTE: push-time resolution remains authoritative; if structure changed
+  // between generation and push, the push script’s choice wins — the panel is the
+  // generation-time prediction.
+  // Older drafts without evidence.resolved_destination fall back to nothing (no crash).
+  function PromoteTermDestPanel({ ev, profileId }: {
+    ev: Evidence; profileId: string
+  }) {
+    const rd = ev.resolved_destination
+    if (rd === undefined) return null
+    return (
+      <div style={{
+        border: '1px solid #c8dfe9', borderRadius: '6px',
+        padding: '0.65rem 0.9rem', marginBottom: '0.85rem', background: '#f7fbfd',
+      }}>
+        <div style={{
+          fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase' as const,
+          letterSpacing: '0.05em', color: 'var(--cdl-muted)', marginBottom: '0.35rem',
+        }}>
+          Destination
+        </div>
+        {rd === null ? (
+          <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+            No eligible destination — will await a structure room.
+          </p>
+        ) : (
+          <>
+            <div style={{ fontSize: '0.88rem', color: 'var(--cdl-ink)', marginBottom: '0.25rem' }}>
+              Will be added as EXACT to:{' '}
+              <a
+                href={`/campaigns/${profileId}/${encodeURIComponent(rd.campaign_id)}#ag-${rd.ad_group_id}`}
+                style={{ color: 'var(--cdl-blue)', fontWeight: 600 }}
+              >{adGroupMap.get(`${profileId}:${rd.ad_group_id}`) ?? rd.ad_group_name}</a>
+            </div>
+            <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+              (chosen from this term&apos;s placements — holds exact keywords, highest spend)
+            </p>
+          </>
+        )}
+      </div>
+    )
+  }
+
   function ExistingTargetsLine({ ev, profileId, currency }: {
     ev: Evidence; profileId: string; currency: string
   }) {
@@ -633,6 +684,9 @@ export default async function RecommendationsPage() {
         )}
         {r.rec_type === 'PROMOTE_ASIN' && (
           <PromoteAsinDestPanel ev={r.evidence} profileId={r.profile_id} currency={r.currency_code} />
+        )}
+        {r.rec_type === 'PROMOTE_TERM' && (
+          <PromoteTermDestPanel ev={r.evidence} profileId={r.profile_id} />
         )}
         {/* Existing targets note for PROMOTE_ASIN */}
         {r.rec_type === 'PROMOTE_ASIN' && (

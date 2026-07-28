@@ -413,6 +413,75 @@ if (candidates.length > 0) {
     for (const row of harvestedRows) alreadyTargetedAsinSet.add(row.asin);
   }
 
+  // ── PROMOTE_TERM destination resolution (generation-time tier prediction) ───
+  // Replicates the push-keywords.mjs tier predicate exactly (b31952e + 94ce867
+  // lineage): campaign targeting_type filter is authoritative for AUTO exclusion.
+  // HONESTY NOTE: push-time resolution remains authoritative; if structure changed
+  // between generation and push, the push script's choice wins — the panel is the
+  // generation-time prediction.
+  const ptCandidates = candidates.filter(c => c.recType === 'PROMOTE_TERM');
+  const ptAgIds = [...new Set(
+    ptCandidates.flatMap(c => c.placements.map(p => String(p.ad_group_id)).filter(Boolean)),
+  )];
+
+  const ptGroupKwMap       = new Map(); // ad_group_id → { exactKws, anyKws, hasAuto }
+  const ptAutoCampGroupIds = new Set(); // ad_group_ids whose campaign.targeting_type = 'AUTO'
+
+  if (ptAgIds.length > 0) {
+    const { rows: ptKwRows } = await pool.query(
+      `SELECT ad_group_id::text,
+              count(*) FILTER (WHERE match_type = 'EXACT') AS exact_kws,
+              count(*) AS any_kws
+         FROM amazon_keywords
+        WHERE profile_id  = $1
+          AND ad_group_id = ANY($2)
+          AND state       = 'ENABLED'
+        GROUP BY ad_group_id`,
+      [profileId, ptAgIds],
+    );
+    for (const row of ptKwRows) {
+      ptGroupKwMap.set(row.ad_group_id, { exactKws: Number(row.exact_kws), anyKws: Number(row.any_kws), hasAuto: 0 });
+    }
+    const { rows: ptAutoTgtRows } = await pool.query(
+      `SELECT ad_group_id::text,
+              count(*) FILTER (WHERE expression_type = 'AUTO') AS has_auto
+         FROM amazon_targets
+        WHERE profile_id  = $1
+          AND ad_group_id = ANY($2)
+          AND state       = 'ENABLED'
+        GROUP BY ad_group_id`,
+      [profileId, ptAgIds],
+    );
+    for (const row of ptAutoTgtRows) {
+      const entry = ptGroupKwMap.get(row.ad_group_id);
+      if (entry) entry.hasAuto = Number(row.has_auto);
+      else ptGroupKwMap.set(row.ad_group_id, { exactKws: 0, anyKws: 0, hasAuto: Number(row.has_auto) });
+    }
+    const { rows: ptAutoCampRows } = await pool.query(
+      `SELECT ag.ad_group_id::text
+         FROM amazon_ad_groups ag
+         JOIN amazon_campaigns  c ON c.campaign_id = ag.campaign_id
+                                  AND c.profile_id  = ag.profile_id
+        WHERE ag.profile_id  = $1
+          AND ag.ad_group_id = ANY($2)
+          AND c.targeting_type = 'AUTO'`,
+      [profileId, ptAgIds],
+    );
+    for (const row of ptAutoCampRows) ptAutoCampGroupIds.add(row.ad_group_id);
+  }
+
+  const ptAgNameMap = new Map(); // ad_group_id → name
+  if (ptAgIds.length > 0) {
+    const { rows: ptAgRows } = await pool.query(
+      `SELECT ad_group_id::text, name
+         FROM amazon_ad_groups
+        WHERE profile_id  = $1
+          AND ad_group_id = ANY($2)`,
+      [profileId, ptAgIds],
+    );
+    for (const r of ptAgRows) ptAgNameMap.set(r.ad_group_id, r.name);
+  }
+
   for (const c of candidates) {
     const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
     const win      = `${windowStart} – ${windowEnd}`;
@@ -492,19 +561,59 @@ if (candidates.length > 0) {
         (max, p) => (p.spend > max.spend ? p : max),
         c.placements[0],
       );
+
+      // ── Generation-time destination resolution (mirrors push-keywords.mjs tier predicate) ──
+      // Tier-a: non-AUTO campaign, no AUTO target, exactKws >= 1, highest spend wins.
+      // Tier-b: non-AUTO campaign, no AUTO target, anyKws   >= 1, highest spend wins.
+      // HONESTY NOTE: push-time resolution remains authoritative; if structure changed
+      // between generation and push, the push script's choice wins — the panel is the
+      // generation-time prediction.
+      const ptTierA = c.placements
+        .filter(p => (ptGroupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1
+                  && (ptGroupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+                  && !ptAutoCampGroupIds.has(String(p.ad_group_id)))
+        .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+      const ptTierB = c.placements
+        .filter(p => (ptGroupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1
+                  && (ptGroupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+                  && !ptAutoCampGroupIds.has(String(p.ad_group_id)))
+        .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+
+      let resolvedDestination = null;
+      if (ptTierA.length > 0) {
+        const dest = ptTierA[0];
+        const agId = String(dest.ad_group_id);
+        resolvedDestination = {
+          ad_group_id:   agId,
+          ad_group_name: ptAgNameMap.get(agId) ?? agId,
+          campaign_id:   String(dest.campaign_id),
+          tier:          'exact-kw',
+        };
+      } else if (ptTierB.length > 0) {
+        const dest = ptTierB[0];
+        const agId = String(dest.ad_group_id);
+        resolvedDestination = {
+          ad_group_id:   agId,
+          ad_group_name: ptAgNameMap.get(agId) ?? agId,
+          campaign_id:   String(dest.campaign_id),
+          tier:          'kw-holding',
+        };
+      }
+
       evidence = {
-        window_start:      windowStart,
-        window_end:        windowEnd,
-        spend:             c.spend,
-        clicks:            c.clicks,
-        orders:            c.orders,
-        sales:             c.sales,
-        acos:              c.acos,
-        placements:        c.placements,
-        primary_placement: primaryPlacement,
+        window_start:         windowStart,
+        window_end:           windowEnd,
+        spend:                c.spend,
+        clicks:               c.clicks,
+        orders:               c.orders,
+        sales:                c.sales,
+        acos:                 c.acos,
+        placements:           c.placements,
+        primary_placement:    primaryPlacement,
         ...(observedCpc != null ? { observed_cpc: observedCpc } : {}),
         ...(proposedBid  != null ? { proposed_bid:  proposedBid  } : {}),
-        params_used:       params,
+        resolved_destination: resolvedDestination,
+        params_used:          params,
       };
     } else {
       // PROMOTE_ASIN — UNHARVESTED (new target, destination = highest-spend placement).
