@@ -410,10 +410,10 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
                   <th>Ad Group</th>
                   <th>Campaign</th>
                   <th>State</th>
-                  <th>Spend</th>
-                  <th>Clicks</th>
-                  <th>Orders</th>
-                  <th>Sales</th>
+                  <th className="num">Spend</th>
+                  <th className="num">Clicks</th>
+                  <th className="num">Orders</th>
+                  <th className="num">Sales</th>
                 </tr>
               </thead>
               <tbody>

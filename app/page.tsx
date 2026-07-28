@@ -157,11 +157,11 @@ export default async function HomePage() {
             <thead>
               <tr>
                 <th>Market</th>
-                <th>Spend 7d / 30d</th>
-                <th>Sales 30d</th>
-                <th>ACOS 30d</th>
-                <th>Campaigns</th>
-                <th>Recs D/A/P</th>
+                <th className="num">Spend 7d / 30d</th>
+                <th className="num">Sales 30d</th>
+                <th className="num">ACOS 30d</th>
+                <th className="num">Campaigns</th>
+                <th className="num">Recs D/A/P</th>
                 <th>Last Data</th>
               </tr>
             </thead>

@@ -654,10 +654,10 @@ export default async function CampaignDetailPage({
                         <tr>
                           <th>ASIN</th>
                           <th>State</th>
-                          <th>Spend 60d</th>
-                          <th>Orders 60d</th>
-                          <th>Sales 60d</th>
-                          <th>ACoS 60d</th>
+                          <th className="num">Spend 60d</th>
+                          <th className="num">Orders 60d</th>
+                          <th className="num">Sales 60d</th>
+                          <th className="num">ACoS 60d</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -716,10 +716,10 @@ export default async function CampaignDetailPage({
                           <th>Keyword</th>
                           <th>Match</th>
                           <th>State</th>
-                          <th>Bid</th>
-                          <th>Spend 60d</th>
-                          <th>Orders 60d</th>
-                          <th>ACOS 60d</th>
+                          <th className="num">Bid</th>
+                          <th className="num">Spend 60d</th>
+                          <th className="num">Orders 60d</th>
+                          <th className="num">ACOS 60d</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -771,10 +771,10 @@ export default async function CampaignDetailPage({
                         <tr>
                           <th>Target</th>
                           <th>State</th>
-                          <th>Bid</th>
-                          <th>Spend 60d</th>
-                          <th>Orders 60d</th>
-                          <th>ACOS 60d</th>
+                          <th className="num">Bid</th>
+                          <th className="num">Spend 60d</th>
+                          <th className="num">Orders 60d</th>
+                          <th className="num">ACOS 60d</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -865,9 +865,9 @@ export default async function CampaignDetailPage({
                       <thead>
                         <tr>
                           <th>Search Term</th>
-                          <th>Spend</th>
-                          <th>Orders</th>
-                          <th>ACOS</th>
+                          <th className="num">Spend</th>
+                          <th className="num">Orders</th>
+                          <th className="num">ACOS</th>
                         </tr>
                       </thead>
                       <tbody>

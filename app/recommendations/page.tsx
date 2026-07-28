@@ -313,8 +313,8 @@ export default async function RecommendationsPage() {
               <thead>
                 <tr>
                   <th>Market</th>
-                  <th>Draft</th>
-                  <th>Approved</th>
+                  <th className="num">Draft</th>
+                  <th className="num">Approved</th>
                   <th>Campaigns with drafts</th>
                 </tr>
               </thead>

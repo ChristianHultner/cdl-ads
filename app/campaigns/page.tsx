@@ -275,10 +275,10 @@ export default async function CampaignsPage({
                       <tr>
                         <th>Campaign</th>
                         <th>State</th>
-                        <th>Spend 30d</th>
-                        <th>Budget</th>
-                        <th>Sales 30d</th>
-                        <th>ACOS 30d</th>
+                        <th className="num">Spend 30d</th>
+                        <th className="num">Budget</th>
+                        <th className="num">Sales 30d</th>
+                        <th className="num">ACOS 30d</th>
                         <th style={{ textAlign: 'center' }}>Recs</th>
                       </tr>
                     </thead>

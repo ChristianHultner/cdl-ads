@@ -135,11 +135,11 @@ export default async function SpendPage() {
                 <tr>
                   <th>Country</th>
                   <th>Date</th>
-                  <th>Cost</th>
-                  <th>Clicks</th>
-                  <th>Impressions</th>
-                  <th>Sales</th>
-                  <th>ACOS</th>
+                  <th className="num">Cost</th>
+                  <th className="num">Clicks</th>
+                  <th className="num">Impressions</th>
+                  <th className="num">Sales</th>
+                  <th className="num">ACOS</th>
                 </tr>
               </thead>
               <tbody>
@@ -182,10 +182,10 @@ export default async function SpendPage() {
                 <tr>
                   <th>Campaign</th>
                   <th>Country</th>
-                  <th>Cost</th>
-                  <th>Clicks</th>
-                  <th>Sales</th>
-                  <th>ACOS</th>
+                  <th className="num">Cost</th>
+                  <th className="num">Clicks</th>
+                  <th className="num">Sales</th>
+                  <th className="num">ACOS</th>
                 </tr>
               </thead>
               <tbody>
