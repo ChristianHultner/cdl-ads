@@ -64,6 +64,9 @@ if (recIds.length > 0) {
 const now = Date.now();
 
 // ── 3. Stamp due horizons ────────────────────────────────────────────────────
+let recsWithDue  = 0;
+let stampsWritten = 0;
+
 for (const rec of recs) {
   const ev        = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence;
   const pushedAt  = new Date(ev.pushed_at);
@@ -76,6 +79,7 @@ for (const rec of recs) {
 
   if (dueHorizons.length === 0) continue;
 
+  recsWithDue++;
   const stamped = [];
 
   for (const horizon of dueHorizons) {
@@ -234,6 +238,7 @@ for (const rec of recs) {
     );
 
     stamped.push(horizon.key);
+    stampsWritten++;
   }
 
   if (stamped.length > 0) {
@@ -242,4 +247,4 @@ for (const rec of recs) {
 }
 
 await pool.end();
-console.log('stamp-outcomes complete');
+console.log(`profile ${profileId}: ${recsWithDue} rec(s) with due horizons, ${stampsWritten} stamp(s) written`);
