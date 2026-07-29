@@ -1526,6 +1526,64 @@ for (const row of reviveCandRows) {
     `lifetime ${salesFmt} sales prove demand, but current bids (${minFmt}\u2013${maxFmt}) ` +
     `sit below the market floor (${floorFmt}).`;
 
+  // v2: per-entity bids from amazon_bid_recommendations (fresh within 7 days).
+  // Fall back to v1 uniform median-floor when no rows exist.
+  const { rows: bidRecRows } = await pool.query(
+    `SELECT br.entity_kind, br.entity_id,
+            br.suggested::float, br.range_start::float, br.range_end::float
+       FROM amazon_bid_recommendations br
+      WHERE br.profile_id = $1
+        AND br.fetched_at >= now() - INTERVAL '7 days'
+        AND br.entity_id = ANY(
+          SELECT target_id::text FROM amazon_targets
+           WHERE profile_id = $1 AND campaign_id::text = $2 AND state = 'ENABLED'
+          UNION ALL
+          SELECT keyword_id::text FROM amazon_keywords
+           WHERE profile_id = $1 AND campaign_id::text = $2 AND state = 'ENABLED'
+        )`,
+    [profileId, campId],
+  );
+
+  let perEntity = null;
+  let bidSource = 'median_floor';
+
+  if (bidRecRows.length > 0) {
+    bidSource     = 'amazon_bid_rec';
+    const promCap = params.raise_bid_max ?? 0.75;
+    const clampLo = viabilityFloor * 0.5;
+    const clampHi = promCap * 1.5;
+
+    // Fetch current bids to build per_entity current field.
+    const { rows: entityRows } = await pool.query(
+      `SELECT target_id::text AS entity_id, expression_type, bid::float AS current_bid
+         FROM amazon_targets
+        WHERE profile_id = $1 AND campaign_id::text = $2 AND state = 'ENABLED' AND bid IS NOT NULL
+       UNION ALL
+       SELECT keyword_id::text AS entity_id, 'KEYWORD' AS expression_type, bid::float AS current_bid
+         FROM amazon_keywords
+        WHERE profile_id = $1 AND campaign_id::text = $2 AND state = 'ENABLED' AND bid IS NOT NULL`,
+      [profileId, campId],
+    );
+    const entityBidMap = new Map(entityRows.map(r => [
+      r.entity_id,
+      { kind: r.expression_type === 'AUTO' ? 'AUTO_STRATEGY' : r.expression_type, currentBid: r.current_bid },
+    ]));
+
+    perEntity = bidRecRows.map(br => {
+      const info     = entityBidMap.get(br.entity_id);
+      const kind     = br.entity_kind;
+      const sugg     = Number(br.suggested);
+      const proposed = Math.round(Math.max(clampLo, Math.min(clampHi, sugg)) * 100) / 100;
+      return {
+        entity_id: br.entity_id,
+        kind,
+        current:   info ? Math.round(Number(info.currentBid) * 100) / 100 : null,
+        suggested: Math.round(sugg * 100) / 100,
+        proposed,
+      };
+    });
+  }
+
   const evidence = {
     kind:            'REVIVE',
     campaign_id:     campId,
@@ -1536,6 +1594,8 @@ for (const row of reviveCandRows) {
     lifetime_sales:  lifeSales,
     lifetime_orders: lifeOrders,
     spend_30d:       spend30d,
+    source:          bidSource,
+    ...(perEntity ? { per_entity: perEntity } : {}),
   };
 
   await pool.query(

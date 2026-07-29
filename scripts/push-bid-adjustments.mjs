@@ -240,15 +240,26 @@ for (const rec of recs) {
     const bidMin = allBids.length ? Math.min(...allBids) : null;
     const bidMax = allBids.length ? Math.max(...allBids) : null;
 
+    // v2: per-entity bids from evidence.per_entity when present; else uniform proposedBid.
+    const perEntityArr = Array.isArray(evidence?.per_entity) ? evidence.per_entity : [];
+    const perEntityMap = perEntityArr.length > 0
+      ? new Map(perEntityArr.map(pe => [pe.entity_id, Number(pe.proposed)]))
+      : null;
+    const getEntityBid = (entityId) => perEntityMap?.get(entityId) ?? proposedBid;
+    const bidSource    = evidence?.source ?? 'median_floor';
+
     console.log(
       `Bid range     : ${bidMin != null ? bidMin.toFixed(2) : '—'}` +
-      `–${bidMax != null ? bidMax.toFixed(2) : '—'} → ${proposedBid.toFixed(2)}`,
+      `–${bidMax != null ? bidMax.toFixed(2) : '—'} → ` +
+      (perEntityMap
+        ? `per-entity (${perEntityArr.length} bids, source=${bidSource})`
+        : proposedBid.toFixed(2)),
     );
 
-    // First batch body only (keywords first if present, else targets).
+    // First batch body only (keywords first if present, else targets); per-entity bids when available.
     const firstBatchBody = nKeywords > 0
-      ? { keywords: reviveKeywordRows.map(r => ({ keywordId: r.entity_id, bid: proposedBid })) }
-      : { targetingClauses: reviveTargetRows.map(r => ({ targetId: r.entity_id, bid: proposedBid })) };
+      ? { keywords: reviveKeywordRows.map(r => ({ keywordId: r.entity_id, bid: getEntityBid(r.entity_id) })) }
+      : { targetingClauses: reviveTargetRows.map(r => ({ targetId: r.entity_id, bid: getEntityBid(r.entity_id) })) };
     console.log('First batch:');
     console.log(
       JSON.stringify(firstBatchBody, null, 2)
@@ -259,13 +270,14 @@ for (const rec of recs) {
     console.log('');
 
     planned.push({
-      isRevive: true,
+      isRevive:     true,
       rec,
       reviveCampId,
       campName,
       proposedBid,
-      targets:  reviveTargetRows,
-      keywords: reviveKeywordRows,
+      perEntityMap,
+      targets:      reviveTargetRows,
+      keywords:     reviveKeywordRows,
       bidMin,
       bidMax,
     });
@@ -486,11 +498,13 @@ const putReviveBatch = async (batchEndpoint, batchMedia, body, label) => {
 for (const item of planned) {
   // ── REVIVE execute path ────────────────────────────────────────────────────
   if (item.isRevive) {
-    const { rec, reviveCampId, campName, proposedBid, targets, keywords } = item;
+    const { rec, reviveCampId, campName, proposedBid, perEntityMap, targets, keywords } = item;
+    const getEntityBid = (entityId) => perEntityMap?.get(entityId) ?? proposedBid;
     console.log('─'.repeat(60));
     console.log(
       `Executing [REVIVE] rec id=${rec.id}  campaign="${campName}"` +
-      `  targets=${targets.length}  keywords=${keywords.length}  bid→${proposedBid.toFixed(2)}…`,
+      `  targets=${targets.length}  keywords=${keywords.length}` +
+      `  bid→${perEntityMap ? 'per-entity' : proposedBid.toFixed(2)}…`,
     );
 
     let reviveKeywordsPushed = 0;
@@ -499,7 +513,7 @@ for (const item of planned) {
 
     // Batch keywords first.
     if (keywords.length > 0) {
-      const body   = { keywords: keywords.map(r => ({ keywordId: r.entity_id, bid: proposedBid })) };
+      const body   = { keywords: keywords.map(r => ({ keywordId: r.entity_id, bid: getEntityBid(r.entity_id) })) };
       const result = await putReviveBatch(
         KEYWORDS_ENDPOINT, KEYWORDS_MEDIA, body, `KEYWORD batch rec ${rec.id}`,
       );
@@ -510,7 +524,7 @@ for (const item of planned) {
     // Batch targets (short inter-batch delay when both kinds present).
     if (targets.length > 0) {
       if (keywords.length > 0) await new Promise(r => setTimeout(r, 1_000));
-      const body   = { targetingClauses: targets.map(r => ({ targetId: r.entity_id, bid: proposedBid })) };
+      const body   = { targetingClauses: targets.map(r => ({ targetId: r.entity_id, bid: getEntityBid(r.entity_id) })) };
       const result = await putReviveBatch(
         TARGETS_ENDPOINT, TARGETS_MEDIA, body, `TARGET batch rec ${rec.id}`,
       );
