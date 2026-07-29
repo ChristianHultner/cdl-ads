@@ -1383,6 +1383,173 @@ for (const row of pauseCandRows) {
 }
 console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
 
+// ── 7c. REVIVE ─────────────────────────────────────────────────────────────
+// Criteria: state='ENABLED', spend_30d < 2, lifetime sales > 0 OR orders > 0,
+//   >= 1 ENABLED target/keyword, max enabled bid < viability_floor.
+// viability_floor = median bid of ENABLED targets+keywords belonging to
+//   campaigns with spend_30d >= 10; fallback 0.30.
+// rec_type = 'BID_ADJUST', evidence.kind = 'REVIVE', target_text = campaign_id.
+console.log('\n\u2500\u2500 Phase 7c: REVIVE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
+// Step 1: viability_floor — median bid across ENABLED targets+keywords in
+//         campaigns that spent >= 10 in the last 30 days.
+const { rows: floorRows } = await pool.query(
+  `WITH active_camps AS (
+     SELECT campaign_id
+       FROM amazon_campaign_daily
+      WHERE profile_id = $1
+        AND date >= CURRENT_DATE - INTERVAL '30 days'
+      GROUP BY campaign_id
+     HAVING COALESCE(SUM(cost), 0) >= 10
+   ),
+   all_bids AS (
+     SELECT bid::float AS bid
+       FROM amazon_targets
+      WHERE profile_id = $1
+        AND state      = 'ENABLED'
+        AND bid        IS NOT NULL
+        AND campaign_id = ANY(SELECT campaign_id FROM active_camps)
+     UNION ALL
+     SELECT bid::float AS bid
+       FROM amazon_keywords
+      WHERE profile_id = $1
+        AND state      = 'ENABLED'
+        AND bid        IS NOT NULL
+        AND campaign_id = ANY(SELECT campaign_id FROM active_camps)
+   )
+   SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY bid) AS median_bid,
+          COUNT(*) AS n_bids
+     FROM all_bids`,
+  [profileId],
+);
+const _floorRow      = floorRows[0];
+const viabilityFloor = (_floorRow && Number(_floorRow.n_bids) > 0 && _floorRow.median_bid != null)
+  ? Math.round(Number(_floorRow.median_bid) * 100) / 100
+  : 0.30;
+console.log(`  viability_floor: ${currSym}${viabilityFloor.toFixed(2)} (from ${_floorRow?.n_bids ?? 0} ENABLED bid(s) in active campaigns)`);
+
+// Step 2: candidate campaigns.
+const { rows: reviveCandRows } = await pool.query(
+  `WITH spend30 AS (
+     SELECT campaign_id,
+            COALESCE(SUM(cost), 0)::float AS spend_30d
+       FROM amazon_campaign_daily
+      WHERE profile_id = $1
+        AND date >= CURRENT_DATE - INTERVAL '30 days'
+      GROUP BY campaign_id
+   ),
+   lifetime AS (
+     SELECT campaign_id,
+            COALESCE(SUM(sales_14d),     0)::float AS lifetime_sales,
+            COALESCE(SUM(purchases_14d), 0)::float AS lifetime_orders
+       FROM amazon_campaign_daily
+      WHERE profile_id = $1
+      GROUP BY campaign_id
+   ),
+   enabled_bids AS (
+     SELECT campaign_id::text AS campaign_id,
+            COUNT(*)          AS n_entities,
+            MIN(bid::float)   AS min_bid,
+            MAX(bid::float)   AS max_bid
+       FROM (
+         SELECT campaign_id, bid
+           FROM amazon_targets
+          WHERE profile_id = $1 AND state = 'ENABLED' AND bid IS NOT NULL
+         UNION ALL
+         SELECT campaign_id, bid
+           FROM amazon_keywords
+          WHERE profile_id = $1 AND state = 'ENABLED' AND bid IS NOT NULL
+       ) eb
+      GROUP BY campaign_id
+     HAVING COUNT(*) >= 1
+   )
+   SELECT c.campaign_id::text AS campaign_id,
+          c.name,
+          COALESCE(s.spend_30d,        0)::float AS spend_30d,
+          COALESCE(lt.lifetime_sales,  0)::float AS lifetime_sales,
+          COALESCE(lt.lifetime_orders, 0)::float AS lifetime_orders,
+          eb.n_entities::int,
+          eb.min_bid::float,
+          eb.max_bid::float
+     FROM amazon_campaigns c
+     JOIN enabled_bids eb ON eb.campaign_id = c.campaign_id::text
+LEFT JOIN spend30 s       ON s.campaign_id  = c.campaign_id
+LEFT JOIN lifetime lt      ON lt.campaign_id = c.campaign_id
+    WHERE c.profile_id = $1
+      AND c.state      = 'ENABLED'
+      AND COALESCE(s.spend_30d, 0) < 2
+      AND (COALESCE(lt.lifetime_sales, 0) > 0 OR COALESCE(lt.lifetime_orders, 0) > 0)
+      AND eb.max_bid < $2`,
+  [profileId, viabilityFloor],
+);
+console.log(`  ${reviveCandRows.length} candidate(s) (spend_30d < 2, lifetime activity, max bid < floor).`);
+
+// Step 3: idempotency — skip campaign if ANY open BID_ADJUST exists
+//         where target_text = campaign_id OR evidence.campaign_id = campaign_id.
+const { rows: openReviveRows } = await pool.query(
+  `SELECT target_text, evidence->>'campaign_id' AS ev_campaign_id
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'BID_ADJUST'
+      AND status     = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+);
+const openReviveCampSet = new Set();
+for (const r of openReviveRows) {
+  if (r.target_text)    openReviveCampSet.add(r.target_text);
+  if (r.ev_campaign_id) openReviveCampSet.add(r.ev_campaign_id);
+}
+
+// Step 4: emit recs.
+for (const row of reviveCandRows) {
+  const campId     = row.campaign_id;
+  const spend30d   = row.spend_30d;
+  const lifeSales  = row.lifetime_sales;
+  const lifeOrders = row.lifetime_orders;
+  const nEntities  = row.n_entities;
+  const currentMin = Math.round(Number(row.min_bid) * 100) / 100;
+  const currentMax = Math.round(Number(row.max_bid) * 100) / 100;
+
+  if (openReviveCampSet.has(campId)) {
+    console.log(`  skipped (open rec exists): [REVIVE] ${campId}`);
+    skippedExisting++;
+    continue;
+  }
+
+  const floorFmt = `${currSym}${viabilityFloor.toFixed(2)}`;
+  const minFmt   = `${currSym}${currentMin.toFixed(2)}`;
+  const maxFmt   = `${currSym}${currentMax.toFixed(2)}`;
+  const salesFmt = `${currSym}${lifeSales.toFixed(2)}`;
+
+  const proposal =
+    `Revive '${row.name}': raise all ${nEntities} enabled bids to ${floorFmt} \u2014 ` +
+    `lifetime ${salesFmt} sales prove demand, but current bids (${minFmt}\u2013${maxFmt}) ` +
+    `sit below the market floor (${floorFmt}).`;
+
+  const evidence = {
+    kind:            'REVIVE',
+    campaign_id:     campId,
+    n_entities:      nEntities,
+    current_min:     currentMin,
+    current_max:     currentMax,
+    proposed_bid:    viabilityFloor,
+    lifetime_sales:  lifeSales,
+    lifetime_orders: lifeOrders,
+    spend_30d:       spend30d,
+  };
+
+  await pool.query(
+    `INSERT INTO recommendations
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    ['BID_ADJUST', profileId, campId, campId, proposal, JSON.stringify(evidence)],
+  );
+  countsByType['BID_ADJUST']++;
+  written++;
+  console.log(`  [REVIVE] '${row.name}': ${nEntities} bid(s), max ${currSym}${currentMax.toFixed(2)} \u2192 ${floorFmt}`);
+}
+console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
 await pool.end();
 
 // ── 8. SUMMARY ───────────────────────────────────────────────────────────────
