@@ -2,22 +2,23 @@
 // Usage: node --env-file=.env.local scripts/fetch-bid-recommendations.mjs \
 //          --profile <id> [--campaign <id>]
 //
-// Fetches Amazon's per-entity suggested bid + range from the SP v3 bid-recommendation
-// endpoints and upserts results into amazon_bid_recommendations.
+// Fetches Amazon's per-entity theme-based bid + range (CONVERSION_OPPORTUNITIES theme)
+// and upserts into amazon_bid_recommendations.
 //
-// API NOTE — SP v3 target bid recommendations:
-//   POST /sp/targets/bid/recommendations
-//   Content-Type / Accept: application/vnd.spTargetBidRecommendations.v3+json
-//   Body: { "targetingClauses": [ { "targetId": "<id>" } ] }   batch ≤ 100
-//   AUTO targets (expression_type='AUTO') use the same endpoint with their target_id.
-//   If the API returns 4xx for AUTO targets, that is a finding — paste verbatim, STOP.
-//
-// API NOTE — SP v3 keyword bid recommendations:
-//   POST /sp/keywords/bid/recommendations
-//   Content-Type / Accept: application/vnd.spKeywordBidRecommendations.v3+json
-//   Body: { "keywords": [ { "keywordId": "<id>" } ] }           batch ≤ 100
-//
-// 4xx on any shape = reported finding — NEVER improvised around.
+// VERIFIED CONTRACT:
+//   POST {host}/sp/targets/bid/recommendations
+//   Content-Type AND Accept: application/vnd.spthemebasedbidrecommendation.v4+json
+//   Request (per ad group):
+//     { campaignId: <str>, adGroupId: <str>,
+//       recommendationType: 'BIDS_FOR_EXISTING_AD_GROUP',
+//       targetingExpressions: [...] }   max 100 expressions/request
+//   AUTO levers:  { type: 'CLOSE_MATCH'|'LOOSE_MATCH'|'SUBSTITUTES'|'COMPLEMENTS' }
+//   Keywords:     { type: 'KEYWORD_EXACT_MATCH'|'KEYWORD_BROAD_MATCH'|
+//                          'KEYWORD_PHRASE_MATCH', value: '<text>' }
+//   Response theme to use: CONVERSION_OPPORTUNITIES.
+//   If response shape differs from expectation, paste raw verbatim and adapt
+//   parsing only — NEVER change the media type or endpoint.
+//   4xx = finding pasted verbatim; never improvise around it.
 
 import { parseArgs } from 'node:util';
 import { Pool, neonConfig } from '@neondatabase/serverless';
@@ -64,29 +65,53 @@ const REGION_HOST = {
 const host = REGION_HOST[region];
 if (!host) throw new Error(`Unknown region: ${region}`);
 
-const TARGETS_BID_REC_ENDPOINT  = `${host}/sp/targets/bid/recommendations`;
-const TARGETS_BID_REC_MEDIA     = 'application/vnd.spTargetBidRecommendations.v3+json';
-const KEYWORDS_BID_REC_ENDPOINT = `${host}/sp/keywords/bid/recommendations`;
-const KEYWORDS_BID_REC_MEDIA    = 'application/vnd.spKeywordBidRecommendations.v3+json';
+const BID_REC_ENDPOINT = `${host}/sp/targets/bid/recommendations`;
+const BID_REC_MEDIA    = 'application/vnd.spthemebasedbidrecommendation.v4+json';
+const BATCH_SIZE       = 100;
 
-const BATCH_SIZE = 100;
+// ── Expression type maps ──────────────────────────────────────────────────────
+// DB AUTO target expression type → API targetingExpression type
+const AUTO_THEME_MAP = {
+  QUERY_HIGH_REL_MATCHES:  'CLOSE_MATCH',
+  QUERY_BROAD_REL_MATCHES: 'LOOSE_MATCH',
+  ASIN_SUBSTITUTE_RELATED: 'SUBSTITUTES',
+  ASIN_ACCESSORY_RELATED:  'COMPLEMENTS',
+};
+// DB keyword match_type → API targetingExpression type
+const KW_MATCH_MAP = {
+  EXACT:  'KEYWORD_EXACT_MATCH',
+  BROAD:  'KEYWORD_BROAD_MATCH',
+  PHRASE: 'KEYWORD_PHRASE_MATCH',
+};
 
 // ── Entities to look up ───────────────────────────────────────────────────────
 const campFilter = campaignId ? 'AND campaign_id::text = $2' : '';
 const campParams = campaignId ? [profileId, campaignId] : [profileId];
 
-const { rows: targetRows } = await pool.query(
-  `SELECT target_id::text AS entity_id, ad_group_id::text, expression_type
+// AUTO targets only (theme-based contract covers AUTO + keywords)
+const { rows: autoTargetRows } = await pool.query(
+  `SELECT target_id::text   AS entity_id,
+          ad_group_id::text  AS ad_group_id,
+          campaign_id::text  AS campaign_id,
+          bid::float,
+          expression
      FROM amazon_targets
-    WHERE profile_id = $1
-      AND state      = 'ENABLED'
-      AND bid        IS NOT NULL
+    WHERE profile_id      = $1
+      AND state           = 'ENABLED'
+      AND bid             IS NOT NULL
+      AND expression_type = 'AUTO'
       ${campFilter}`,
   campParams,
 );
 
+// Keywords
 const { rows: keywordRows } = await pool.query(
-  `SELECT keyword_id::text AS entity_id, ad_group_id::text
+  `SELECT keyword_id::text  AS entity_id,
+          ad_group_id::text  AS ad_group_id,
+          campaign_id::text  AS campaign_id,
+          bid::float,
+          keyword_text,
+          match_type
      FROM amazon_keywords
     WHERE profile_id = $1
       AND state      = 'ENABLED'
@@ -99,11 +124,11 @@ console.log(
   `Profile ${profileIdStr}  region=${region}` +
   (campaignId ? `  campaign=${campaignId}` : ''),
 );
-console.log(`  Targets  to look up: ${targetRows.length}`);
-console.log(`  Keywords to look up: ${keywordRows.length}`);
+console.log(`  AUTO targets : ${autoTargetRows.length}`);
+console.log(`  Keywords     : ${keywordRows.length}`);
 console.log('');
 
-if (targetRows.length === 0 && keywordRows.length === 0) {
+if (autoTargetRows.length === 0 && keywordRows.length === 0) {
   await pool.end();
   console.log('Nothing to fetch.');
   process.exit(0);
@@ -169,19 +194,34 @@ function chunk(arr, size) {
   return out;
 }
 
-// POST one bid-rec batch.  isFirstBatch=true → print raw response verbatim.
-// Non-2xx → print full response, STOP (first-contact rule: never improvise around 4xx).
-async function fetchBidRecBatch(endpoint, mediaType, body, label, isFirstBatch) {
+// Extract AUTO expression type from JSONB array, object, or string.
+function getAutoExprType(expression) {
+  if (!expression) return null;
+  if (Array.isArray(expression)) return expression[0]?.type ?? null;
+  if (typeof expression === 'object') return expression.type ?? null;
+  const s = String(expression).trim();
+  if (s.startsWith('[') || s.startsWith('{')) {
+    try {
+      const p = JSON.parse(s);
+      return Array.isArray(p) ? (p[0]?.type ?? null) : (p.type ?? null);
+    } catch { return null; }
+  }
+  return s || null;
+}
+
+// POST one bid-rec request. isFirstBatch=true → always print raw response.
+// 4xx → paste verbatim and stop (first-contact rule: never improvise).
+async function postBidRec(body, label, isFirstBatch) {
   const res = await fetchWithTimeout(
-    endpoint,
+    BID_REC_ENDPOINT,
     {
       method:  'POST',
       headers: {
         'Authorization':                    `Bearer ${accessToken}`,
         'Amazon-Advertising-API-ClientId':   LWA_CLIENT_ID,
         'Amazon-Advertising-API-Scope':      profileIdStr,
-        'Content-Type':                      mediaType,
-        'Accept':                            mediaType,
+        'Content-Type':                      BID_REC_MEDIA,
+        'Accept':                            BID_REC_MEDIA,
       },
       body: JSON.stringify(body),
     },
@@ -197,9 +237,8 @@ async function fetchBidRecBatch(endpoint, mediaType, body, label, isFirstBatch) 
   }
 
   if (!res.ok) {
-    // First-contact rule: paste verbatim and stop; never improvise around 4xx.
     if (!isFirstBatch) {
-      console.error(`ERROR ${res.status} on ${label}:`);
+      console.error(`ERROR HTTP ${res.status} on ${label}:`);
       console.error(responseText);
     }
     console.error(`HTTP ${res.status} on ${label} — stopping. Shape becomes next frame's input.`);
@@ -219,6 +258,27 @@ async function fetchBidRecBatch(endpoint, mediaType, body, label, isFirstBatch) 
   return responseData;
 }
 
+// Extract CONVERSION_OPPORTUNITIES bid from a response expression item.
+// Tries multiple field-name variants; returns null if not found.
+function extractConvOppBid(item) {
+  const themes =
+    item.bidRecommendationsForThemes ??
+    item.themes ??
+    item.themeBasedBidRecommendations ??
+    null;
+  if (!Array.isArray(themes)) return null;
+  const convOpp = themes.find(
+    t => t.theme === 'CONVERSION_OPPORTUNITIES' || t.themeName === 'CONVERSION_OPPORTUNITIES',
+  );
+  if (!convOpp) return null;
+  const bidObj = convOpp.bid ?? convOpp.suggestedBid ?? convOpp.bidRecommendation ?? null;
+  if (!bidObj) return null;
+  const suggested  = bidObj.suggested  != null ? Number(bidObj.suggested)  : null;
+  const rangeStart = bidObj.rangeStart != null ? Number(bidObj.rangeStart) : null;
+  const rangeEnd   = bidObj.rangeEnd   != null ? Number(bidObj.rangeEnd)   : null;
+  return suggested != null ? { suggested, rangeStart, rangeEnd } : null;
+}
+
 // Upsert one entity's bid rec.
 async function upsertBidRec(entityKind, entityId, adGroupId, suggested, rangeStart, rangeEnd) {
   await pool.query(
@@ -236,85 +296,115 @@ async function upsertBidRec(entityKind, entityId, adGroupId, suggested, rangeSta
   );
 }
 
-// ── TARGETS ───────────────────────────────────────────────────────────────────
-let totalUpserted = 0;
-let batchCount    = 0;
-let isFirstBatch  = true;
+// ── Group entities by (campaign_id, ad_group_id) ─────────────────────────────
+const groups = new Map(); // key: `${campId}::${agId}`
 
-if (targetRows.length > 0) {
-  console.log(`Fetching bid recs for ${targetRows.length} target(s) (incl. AUTO)…`);
-  for (const batch of chunk(targetRows, BATCH_SIZE)) {
-    batchCount++;
-    const body  = { targetingClauses: batch.map(r => ({ targetId: r.entity_id })) };
-    const label = `target batch ${batchCount}`;
-    const data  = await fetchBidRecBatch(
-      TARGETS_BID_REC_ENDPOINT, TARGETS_BID_REC_MEDIA, body, label, isFirstBatch,
-    );
-    isFirstBatch = false;
-
-    // Normalise response: SP v3 may return object-shape {success:[...],error:[...]}
-    // or flat array; handle both.
-    const tc = data?.targetingClauses;
-    const items = Array.isArray(tc)
-      ? tc
-      : Array.isArray(tc?.success) ? tc.success : [];
-
-    const batchMap = new Map(batch.map(r => [r.entity_id, r]));
-    for (const item of items) {
-      const entityId = String(item.targetId ?? '');
-      if (!entityId) continue;
-      const code = String(item.code ?? item.status ?? '').toUpperCase();
-      if (code && code !== 'SUCCESS' && code !== '200' && code !== '') continue;
-      const s   = item.suggestedBid ?? null;
-      const sug = s?.suggested != null ? Number(s.suggested) : null;
-      if (sug == null) continue;
-      const rs  = s.rangeStart != null ? Number(s.rangeStart) : null;
-      const re  = s.rangeEnd   != null ? Number(s.rangeEnd)   : null;
-      const row  = batchMap.get(entityId);
-      const kind = row?.expression_type === 'AUTO' ? 'AUTO_STRATEGY' : 'TARGET';
-      await upsertBidRec(kind, entityId, row?.ad_group_id ?? null, sug, rs, re);
-      totalUpserted++;
-    }
-    if (targetRows.length > BATCH_SIZE) await new Promise(r => setTimeout(r, 500));
-  }
+function getGroup(cid, agid) {
+  const key = `${cid}::${agid}`;
+  if (!groups.has(key)) groups.set(key, { campaignId: cid, adGroupId: agid, autoTargets: [], keywords: [] });
+  return groups.get(key);
 }
 
-// ── KEYWORDS ──────────────────────────────────────────────────────────────────
-if (keywordRows.length > 0) {
-  console.log(`Fetching bid recs for ${keywordRows.length} keyword(s)…`);
-  for (const batch of chunk(keywordRows, BATCH_SIZE)) {
-    batchCount++;
-    const body  = { keywords: batch.map(r => ({ keywordId: r.entity_id })) };
-    const label = `keyword batch ${batchCount}`;
-    const data  = await fetchBidRecBatch(
-      KEYWORDS_BID_REC_ENDPOINT, KEYWORDS_BID_REC_MEDIA, body, label, isFirstBatch,
-    );
+for (const row of autoTargetRows) getGroup(row.campaign_id, row.ad_group_id).autoTargets.push(row);
+for (const row of keywordRows)    getGroup(row.campaign_id, row.ad_group_id).keywords.push(row);
+
+console.log(`Grouped into ${groups.size} ad-group request(s).`);
+console.log('');
+
+// ── Issue requests per ad group ───────────────────────────────────────────────
+let totalUpserted = 0;
+let reqCount      = 0;
+let isFirstBatch  = true;
+
+for (const { campaignId: campId, adGroupId, autoTargets, keywords } of groups.values()) {
+  // Build targetingExpressions + reverse-lookup.
+  // AUTO key: apiType string  (e.g. 'CLOSE_MATCH').
+  // KW key  : `${apiType}::${text.toLowerCase()}`.
+  const targetingExpressions = [];
+  const exprKeyToEntity      = new Map(); // key → { entityId, kind }
+
+  for (const row of autoTargets) {
+    const dbType  = getAutoExprType(row.expression);
+    const apiType = dbType ? AUTO_THEME_MAP[dbType] : null;
+    if (!apiType) {
+      console.log(`  skip AUTO target ${row.entity_id}: unmapped expression '${dbType}'`);
+      continue;
+    }
+    targetingExpressions.push({ type: apiType });
+    exprKeyToEntity.set(apiType, { entityId: row.entity_id, kind: 'AUTO_STRATEGY', adGroupId });
+  }
+
+  for (const row of keywords) {
+    const apiType = KW_MATCH_MAP[(row.match_type ?? '').toUpperCase()] ?? null;
+    if (!apiType) {
+      console.log(`  skip keyword ${row.entity_id}: unmapped match_type '${row.match_type}'`);
+      continue;
+    }
+    const text    = (row.keyword_text ?? '').toLowerCase();
+    const exprKey = `${apiType}::${text}`;
+    targetingExpressions.push({ type: apiType, value: text });
+    exprKeyToEntity.set(exprKey, { entityId: row.entity_id, kind: 'KEYWORD', adGroupId });
+  }
+
+  if (targetingExpressions.length === 0) {
+    console.log(`  skip ad group ${adGroupId}: no mappable expressions`);
+    continue;
+  }
+
+  // Batch into chunks of BATCH_SIZE expressions.
+  for (const batch of chunk(targetingExpressions, BATCH_SIZE)) {
+    reqCount++;
+    const body = {
+      campaignId:           campId,
+      adGroupId,
+      recommendationType:   'BIDS_FOR_EXISTING_AD_GROUP',
+      targetingExpressions: batch,
+    };
+    const label = `ad-group ${adGroupId} req ${reqCount}`;
+    console.log(`  → POST ${BID_REC_ENDPOINT}`);
+    console.log(`    campaignId=${campId}  adGroupId=${adGroupId}  exprs=${batch.length}`);
+    const data = await postBidRec(body, label, isFirstBatch);
     isFirstBatch = false;
 
-    const kw = data?.keywords;
-    const items = Array.isArray(kw)
-      ? kw
-      : Array.isArray(kw?.success) ? kw.success : [];
+    // Parse response. Expected shape:
+    //   { targetingExpressions: [ { expression: {type[,value]}, <themes-field>: [...] }, ... ] }
+    // Both flat-type and expression-object variants handled.
+    const items = Array.isArray(data?.targetingExpressions) ? data.targetingExpressions : [];
+    console.log(`    response items: ${items.length}`);
 
-    const batchMap = new Map(batch.map(r => [r.entity_id, r]));
     for (const item of items) {
-      const entityId = String(item.keywordId ?? '');
-      if (!entityId) continue;
-      const code = String(item.code ?? item.status ?? '').toUpperCase();
-      if (code && code !== 'SUCCESS' && code !== '200' && code !== '') continue;
-      const s   = item.suggestedBid ?? null;
-      const sug = s?.suggested != null ? Number(s.suggested) : null;
-      if (sug == null) continue;
-      const rs  = s.rangeStart != null ? Number(s.rangeStart) : null;
-      const re  = s.rangeEnd   != null ? Number(s.rangeEnd)   : null;
-      const row  = batchMap.get(entityId);
-      await upsertBidRec('KEYWORD', entityId, row?.ad_group_id ?? null, sug, rs, re);
+      // Resolve expression type from item.
+      const exprObj  = item.expression ?? item;
+      const apiType  = exprObj.type  ?? '';
+      const apiValue = (exprObj.value ?? '').toLowerCase();
+
+      const bidInfo = extractConvOppBid(item);
+      if (!bidInfo) continue;
+
+      const match =
+        exprKeyToEntity.get(apiType) ??
+        exprKeyToEntity.get(`${apiType}::${apiValue}`) ??
+        null;
+
+      if (!match) {
+        console.log(`    no entity match for type='${apiType}' value='${apiValue}'`);
+        continue;
+      }
+
+      await upsertBidRec(
+        match.kind, match.entityId, match.adGroupId,
+        bidInfo.suggested, bidInfo.rangeStart, bidInfo.rangeEnd,
+      );
+      console.log(`    upserted ${match.kind} ${match.entityId}: suggested=${bidInfo.suggested}`);
       totalUpserted++;
     }
-    if (keywordRows.length > BATCH_SIZE) await new Promise(r => setTimeout(r, 500));
+
+    if (batch.length < targetingExpressions.length) await new Promise(r => setTimeout(r, 500));
   }
+
+  if (groups.size > 1) await new Promise(r => setTimeout(r, 500));
 }
 
 await pool.end();
-console.log(`Done. ${totalUpserted} bid recommendation(s) upserted.`);
+console.log(`\nDone. ${reqCount} request(s), ${totalUpserted} bid recommendation(s) upserted.`);
 process.exit(0);
