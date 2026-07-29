@@ -172,6 +172,106 @@ for (const rec of recs) {
       ? Number(evidence.proposed_bid)
       : null;
 
+  // ── REVIVE: one rec → all ENABLED targets+keywords in campaign ─────────────
+  if (evidence?.kind === 'REVIVE') {
+    const reviveCampId = String(evidence.campaign_id ?? rec.target_text);
+    const proposedBid  = evidence?.approved_bid != null
+      ? Number(evidence.approved_bid)
+      : evidence?.proposed_bid != null
+        ? Number(evidence.proposed_bid)
+        : null;
+
+    // Fetch campaign name.
+    const { rows: campNameRows } = await pool.query(
+      `SELECT name FROM amazon_campaigns
+        WHERE profile_id = $1 AND campaign_id::text = $2`,
+      [profileId, reviveCampId],
+    );
+    const campName = campNameRows[0]?.name ?? reviveCampId;
+
+    console.log('─'.repeat(60));
+    console.log(`Rec id        : ${rec.id}  [REVIVE]`);
+    console.log(`Campaign      : "${campName}" (${reviveCampId})`);
+
+    if (proposedBid == null) {
+      console.log('  skipped [REVIVE] (no proposed_bid in evidence)');
+      console.log('');
+      skipped++;
+      continue;
+    }
+
+    // Fetch ALL ENABLED targets + keywords in this campaign.
+    const { rows: reviveTargetRows } = await pool.query(
+      `SELECT target_id::text AS entity_id, bid::float AS current_bid
+         FROM amazon_targets
+        WHERE profile_id       = $1
+          AND campaign_id::text = $2
+          AND state            = 'ENABLED'
+          AND bid              IS NOT NULL`,
+      [profileId, reviveCampId],
+    );
+    const { rows: reviveKeywordRows } = await pool.query(
+      `SELECT keyword_id::text AS entity_id, bid::float AS current_bid
+         FROM amazon_keywords
+        WHERE profile_id       = $1
+          AND campaign_id::text = $2
+          AND state            = 'ENABLED'
+          AND bid              IS NOT NULL`,
+      [profileId, reviveCampId],
+    );
+
+    const nTargets  = reviveTargetRows.length;
+    const nKeywords = reviveKeywordRows.length;
+    const nTotal    = nTargets + nKeywords;
+
+    console.log(`Entities      : ${nTargets} target(s), ${nKeywords} keyword(s)`);
+
+    if (nTotal === 0) {
+      console.log('  skipped [REVIVE] (no ENABLED targets or keywords in campaign)');
+      console.log('');
+      skipped++;
+      continue;
+    }
+
+    const allBids = [
+      ...reviveTargetRows.map(r  => r.current_bid),
+      ...reviveKeywordRows.map(r => r.current_bid),
+    ].filter(b => b != null).map(Number);
+    const bidMin = allBids.length ? Math.min(...allBids) : null;
+    const bidMax = allBids.length ? Math.max(...allBids) : null;
+
+    console.log(
+      `Bid range     : ${bidMin != null ? bidMin.toFixed(2) : '—'}` +
+      `–${bidMax != null ? bidMax.toFixed(2) : '—'} → ${proposedBid.toFixed(2)}`,
+    );
+
+    // First batch body only (keywords first if present, else targets).
+    const firstBatchBody = nKeywords > 0
+      ? { keywords: reviveKeywordRows.map(r => ({ keywordId: r.entity_id, bid: proposedBid })) }
+      : { targetingClauses: reviveTargetRows.map(r => ({ targetId: r.entity_id, bid: proposedBid })) };
+    console.log('First batch:');
+    console.log(
+      JSON.stringify(firstBatchBody, null, 2)
+        .split('\n')
+        .map(l => '  ' + l)
+        .join('\n'),
+    );
+    console.log('');
+
+    planned.push({
+      isRevive: true,
+      rec,
+      reviveCampId,
+      campName,
+      proposedBid,
+      targets:  reviveTargetRows,
+      keywords: reviveKeywordRows,
+      bidMin,
+      bidMax,
+    });
+    continue;
+  }
+
   console.log('─'.repeat(60));
   console.log(`Rec id      : ${rec.id}`);
   console.log(`Entity kind : ${entityKind}`);
@@ -322,7 +422,136 @@ console.log('');
 let pushed   = 0;
 let partials = 0;
 
-for (const { rec, entityKind, entityId, bidToSend, endpoint, mediaType, requestBody } of planned) {
+// Helper: PUT one REVIVE batch; aborts on non-2xx (same pattern as the main execute loop).
+const putReviveBatch = async (batchEndpoint, batchMedia, body, label) => {
+  const res = await fetchWithTimeout(
+    batchEndpoint,
+    {
+      method:  'PUT',
+      headers: {
+        'Authorization':                    `Bearer ${accessToken}`,
+        'Amazon-Advertising-API-ClientId':   LWA_CLIENT_ID,
+        'Amazon-Advertising-API-Scope':      profileIdStr,
+        'Content-Type':                      batchMedia,
+        'Accept':                            batchMedia,
+      },
+      body: JSON.stringify(body),
+    },
+    label,
+  );
+  const responseText = await res.text();
+  console.log(`Response HTTP ${res.status} (${label}):`);
+  console.log(responseText);
+  console.log('');
+  if (!res.ok) {
+    console.error(`ERROR ${res.status} on ${label} — stopping run. Remaining recs stay APPROVED.`);
+    await pool.end();
+    process.exit(1);
+  }
+  let responseData;
+  try { responseData = JSON.parse(responseText); } catch {
+    console.error('ERROR: could not parse response JSON — stopping.');
+    await pool.end();
+    process.exit(1);
+  }
+  const responseKey = label.startsWith('KEYWORD') ? 'keywords' : 'targetingClauses';
+  const tc          = responseData?.[responseKey];
+  let successItems  = [];
+  let errorItems    = [];
+  if (tc && !Array.isArray(tc) && typeof tc === 'object') {
+    successItems = Array.isArray(tc.success) ? tc.success : [];
+    errorItems   = Array.isArray(tc.error)   ? tc.error   : [];
+  } else if (Array.isArray(tc)) {
+    for (const itm of tc) {
+      const code = String(itm.code ?? '').toUpperCase();
+      if (code === 'SUCCESS' || code === '200' || code === '') successItems.push(itm);
+      else errorItems.push(itm);
+    }
+  } else {
+    console.error(`ERROR: unrecognised response shape (expected ${responseKey}) — stopping.`);
+    console.error('Full response:', responseText);
+    await pool.end();
+    process.exit(1);
+  }
+  if (errorItems.length > 0) {
+    console.log(
+      `PARTIAL on ${label} — ${successItems.length}/` +
+      `${successItems.length + errorItems.length} succeeded.`,
+    );
+    console.log('Failing items:', JSON.stringify(errorItems, null, 2));
+  }
+  return { successItems, errorItems, ok: errorItems.length === 0 };
+};
+
+for (const item of planned) {
+  // ── REVIVE execute path ────────────────────────────────────────────────────
+  if (item.isRevive) {
+    const { rec, reviveCampId, campName, proposedBid, targets, keywords } = item;
+    console.log('─'.repeat(60));
+    console.log(
+      `Executing [REVIVE] rec id=${rec.id}  campaign="${campName}"` +
+      `  targets=${targets.length}  keywords=${keywords.length}  bid→${proposedBid.toFixed(2)}…`,
+    );
+
+    let reviveKeywordsPushed = 0;
+    let reviveTargetsPushed  = 0;
+    let revivePartial        = false;
+
+    // Batch keywords first.
+    if (keywords.length > 0) {
+      const body   = { keywords: keywords.map(r => ({ keywordId: r.entity_id, bid: proposedBid })) };
+      const result = await putReviveBatch(
+        KEYWORDS_ENDPOINT, KEYWORDS_MEDIA, body, `KEYWORD batch rec ${rec.id}`,
+      );
+      if (result.ok) reviveKeywordsPushed = keywords.length;
+      else           revivePartial        = true;
+    }
+
+    // Batch targets (short inter-batch delay when both kinds present).
+    if (targets.length > 0) {
+      if (keywords.length > 0) await new Promise(r => setTimeout(r, 1_000));
+      const body   = { targetingClauses: targets.map(r => ({ targetId: r.entity_id, bid: proposedBid })) };
+      const result = await putReviveBatch(
+        TARGETS_ENDPOINT, TARGETS_MEDIA, body, `TARGET batch rec ${rec.id}`,
+      );
+      if (result.ok) reviveTargetsPushed = targets.length;
+      else           revivePartial       = true;
+    }
+
+    if (revivePartial) {
+      console.log(
+        `PARTIAL [REVIVE] rec id=${rec.id} — left APPROVED ` +
+        `(keywords: ${reviveKeywordsPushed}/${keywords.length}, targets: ${reviveTargetsPushed}/${targets.length}).`,
+      );
+      partials++;
+    } else {
+      await pool.query(
+        `UPDATE recommendations
+            SET status    = 'PUSHED',
+                pushed_at = now(),
+                evidence  = evidence || $1::jsonb
+          WHERE id        = $2
+            AND status    = 'APPROVED'`,
+        [
+          JSON.stringify({
+            pushed_at:        new Date().toISOString(),
+            entities_updated: { keywords: reviveKeywordsPushed, targets: reviveTargetsPushed },
+          }),
+          rec.id,
+        ],
+      );
+      console.log(
+        `PUSHED [REVIVE] rec id=${rec.id} — entities_updated: ` +
+        `keywords=${reviveKeywordsPushed}, targets=${reviveTargetsPushed}`,
+      );
+      pushed++;
+    }
+    console.log('');
+    continue;
+  }
+
+  // ── Normal single-entity path ───────────────────────────────────────────────
+  const { rec, entityKind, entityId, bidToSend, endpoint, mediaType, requestBody } = item;
   console.log('─'.repeat(60));
   console.log(
     `Executing rec id=${rec.id}  term="${rec.target_text}"` +
