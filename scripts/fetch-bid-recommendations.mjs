@@ -258,26 +258,7 @@ async function postBidRec(body, label, isFirstBatch) {
   return responseData;
 }
 
-// Extract CONVERSION_OPPORTUNITIES bid from a response expression item.
-// Tries multiple field-name variants; returns null if not found.
-function extractConvOppBid(item) {
-  const themes =
-    item.bidRecommendationsForThemes ??
-    item.themes ??
-    item.themeBasedBidRecommendations ??
-    null;
-  if (!Array.isArray(themes)) return null;
-  const convOpp = themes.find(
-    t => t.theme === 'CONVERSION_OPPORTUNITIES' || t.themeName === 'CONVERSION_OPPORTUNITIES',
-  );
-  if (!convOpp) return null;
-  const bidObj = convOpp.bid ?? convOpp.suggestedBid ?? convOpp.bidRecommendation ?? null;
-  if (!bidObj) return null;
-  const suggested  = bidObj.suggested  != null ? Number(bidObj.suggested)  : null;
-  const rangeStart = bidObj.rangeStart != null ? Number(bidObj.rangeStart) : null;
-  const rangeEnd   = bidObj.rangeEnd   != null ? Number(bidObj.rangeEnd)   : null;
-  return suggested != null ? { suggested, rangeStart, rangeEnd } : null;
-}
+// (extractConvOppBid removed — confirmed shape uses bidRecommendations[] outer, not themes[] inner)
 
 // Upsert one entity's bid rec.
 async function upsertBidRec(entityKind, entityId, adGroupId, suggested, rangeStart, rangeEnd) {
@@ -366,20 +347,27 @@ for (const { campaignId: campId, adGroupId, autoTargets, keywords } of groups.va
     const data = await postBidRec(body, label, isFirstBatch);
     isFirstBatch = false;
 
-    // Parse response. Expected shape:
-    //   { targetingExpressions: [ { expression: {type[,value]}, <themes-field>: [...] }, ... ] }
-    // Both flat-type and expression-object variants handled.
-    const items = Array.isArray(data?.targetingExpressions) ? data.targetingExpressions : [];
-    console.log(`    response items: ${items.length}`);
+    // Confirmed shape:
+    //   data.bidRecommendations[{theme, bidRecommendationsForTargetingExpressions[]}]
+    //   Find theme='CONVERSION_OPPORTUNITIES'; each expr entry has:
+    //     targetingExpression{type,value} + bidValues[3]:
+    //       [0].suggestedBid = rangeStart, [1].suggestedBid = suggested, [2].suggestedBid = rangeEnd
+    const convOppEntry = (data?.bidRecommendations ?? []).find(
+      r => r.theme === 'CONVERSION_OPPORTUNITIES',
+    );
+    const items = convOppEntry?.bidRecommendationsForTargetingExpressions ?? [];
+    console.log(`    CONVERSION_OPPORTUNITIES items: ${items.length}`);
 
     for (const item of items) {
-      // Resolve expression type from item.
-      const exprObj  = item.expression ?? item;
-      const apiType  = exprObj.type  ?? '';
-      const apiValue = (exprObj.value ?? '').toLowerCase();
+      const apiType  = item.targetingExpression?.type  ?? '';
+      const apiValue = (item.targetingExpression?.value ?? '').toLowerCase();
 
-      const bidInfo = extractConvOppBid(item);
-      if (!bidInfo) continue;
+      const bv = item.bidValues ?? [];
+      if (bv.length < 2) continue;
+      const rangeStart = bv[0]?.suggestedBid != null ? Number(bv[0].suggestedBid) : null;
+      const suggested  = bv[1]?.suggestedBid != null ? Number(bv[1].suggestedBid) : null;
+      const rangeEnd   = bv[2]?.suggestedBid != null ? Number(bv[2].suggestedBid) : null;
+      if (suggested == null) continue;
 
       const match =
         exprKeyToEntity.get(apiType) ??
@@ -393,9 +381,9 @@ for (const { campaignId: campId, adGroupId, autoTargets, keywords } of groups.va
 
       await upsertBidRec(
         match.kind, match.entityId, match.adGroupId,
-        bidInfo.suggested, bidInfo.rangeStart, bidInfo.rangeEnd,
+        suggested, rangeStart, rangeEnd,
       );
-      console.log(`    upserted ${match.kind} ${match.entityId}: suggested=${bidInfo.suggested}`);
+      console.log(`    upserted ${match.kind} ${match.entityId}: suggested=${suggested}`);
       totalUpserted++;
     }
 
