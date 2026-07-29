@@ -371,7 +371,7 @@ export default async function RecommendationsPage() {
                             return (
                               <a
                                 key={b.campaignId}
-                                href={`/campaigns/${pid}/${encodeURIComponent(b.campaignId)}#recs`}
+                                href={`/amazon/campaigns/${pid}/${encodeURIComponent(b.campaignId)}#recs`}
                                 style={{ textDecoration: 'none' }}
                               >
                                 <span className="badge badge-blue">{dn} ({b.count})</span>
@@ -379,7 +379,7 @@ export default async function RecommendationsPage() {
                             )
                           })}
                           {overflow > 0 && (
-                            <a href="/campaigns" style={{ textDecoration: 'none' }}>
+                            <a href="/amazon/campaigns" style={{ textDecoration: 'none' }}>
                               <span className="badge badge-muted">+{overflow} more</span>
                             </a>
                           )}

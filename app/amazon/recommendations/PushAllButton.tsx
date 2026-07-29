@@ -58,7 +58,7 @@ export function PushAllButton({ totalApproved, profiles }: Props) {
     for (const { profileId } of profiles) {
       setCurrent(profileId)
       try {
-        const res = await fetch('/api/push-approved', {
+        const res = await fetch('/api/amazon/push-approved', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ profileId, dryRun: DRY_RUN }),
@@ -164,7 +164,7 @@ export function PushAllButton({ totalApproved, profiles }: Props) {
               }}>
                 ⚠️ Dry-run — no Amazon API calls will be made.
                 Flip <code>DRY_RUN</code> in{' '}
-                <code>app/recommendations/PushAllButton.tsx</code> to enable live pushes.
+                <code>app/amazon/recommendations/PushAllButton.tsx</code> to enable live pushes.
               </p>
             )}
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>

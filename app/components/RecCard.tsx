@@ -1,7 +1,7 @@
 // Server-compatible: no 'use client'. Safe to render from any RSC or page.
 
-import { approveRecommendation, rejectRecommendation } from '@/app/recommendations/actions'
-import { CreativeTargetApproveForm } from '@/app/recommendations/CreativeTargetApproveForm'
+import { approveRecommendation, rejectRecommendation } from '@/app/amazon/recommendations/actions'
+import { CreativeTargetApproveForm } from '@/app/amazon/recommendations/CreativeTargetApproveForm'
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const CURRENCY_SYMBOL: Record<string, string> = {
@@ -290,7 +290,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
         <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: '1rem', alignItems: 'baseline', fontSize: '0.88rem' }}>
           <div style={{ fontWeight: 600 }}>
             <a
-              href={`/campaigns/${profileId}/${encodeURIComponent(ct.campaign_id)}#ag-${ct.ad_group_id}`}
+              href={`/amazon/campaigns/${profileId}/${encodeURIComponent(ct.campaign_id)}#ag-${ct.ad_group_id}`}
               style={{ color: 'var(--cdl-blue)' }}
             >{agName}</a>
           </div>
@@ -341,7 +341,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
           · bids {bidMin}–{bidMax}{' '}
           ·{' '}
           <a
-            href={`/campaigns/${profileId}/${encodeURIComponent(pp.campaign_id)}#ag-${pp.ad_group_id}`}
+            href={`/amazon/campaigns/${profileId}/${encodeURIComponent(pp.campaign_id)}#ag-${pp.ad_group_id}`}
             style={{ color: 'var(--cdl-blue)' }}
           >{agName}</a>
         </div>
@@ -379,7 +379,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
             <div style={{ fontSize: '0.88rem', color: 'var(--cdl-ink)', marginBottom: '0.25rem' }}>
               Will be added as EXACT to:{' '}
               <a
-                href={`/campaigns/${profileId}/${encodeURIComponent(rd.campaign_id)}#ag-${rd.ad_group_id}`}
+                href={`/amazon/campaigns/${profileId}/${encodeURIComponent(rd.campaign_id)}#ag-${rd.ad_group_id}`}
                 style={{ color: 'var(--cdl-blue)', fontWeight: 600 }}
               >{adGroupMap.get(`${profileId}:${rd.ad_group_id}`) ?? rd.ad_group_name}</a>
             </div>
@@ -453,7 +453,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
                       <td>
                         {agName
                           ? <a
-                              href={`/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}#ag-${p.ad_group_id}`}
+                              href={`/amazon/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}#ag-${p.ad_group_id}`}
                               style={{ color: 'var(--cdl-blue)' }}
                             >{agName}</a>
                           : <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
@@ -463,7 +463,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
                       <td style={{ maxWidth: '16em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {camp
                           ? <a
-                              href={`/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}`}
+                              href={`/amazon/campaigns/${profileId}/${encodeURIComponent(p.campaign_id)}`}
                               style={{ color: 'var(--cdl-blue)' }}
                               title={camp.name}
                             >

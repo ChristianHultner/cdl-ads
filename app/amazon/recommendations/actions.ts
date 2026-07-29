@@ -46,7 +46,7 @@ export async function approveRecommendation(formData: FormData) {
     `
   }
 
-  redirect('/recommendations')
+  redirect('/amazon/recommendations')
 }
 
 export async function rejectRecommendation(formData: FormData) {
@@ -60,5 +60,5 @@ export async function rejectRecommendation(formData: FormData) {
      WHERE id     = ${id}
        AND status  = 'DRAFT'
   `
-  redirect('/recommendations')
+  redirect('/amazon/recommendations')
 }

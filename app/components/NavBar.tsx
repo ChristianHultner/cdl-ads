@@ -3,11 +3,11 @@
 import { usePathname } from 'next/navigation'
 
 const NAV = [
-  { href: '/',                label: 'Overview' },
-  { href: '/accounts',        label: 'Accounts' },
-  { href: '/campaigns',       label: 'Campaigns' },
-  { href: '/spend',           label: 'Spend' },
-  { href: '/recommendations', label: 'Recommendations' },
+  { href: '/',                        label: 'Overview' },
+  { href: '/amazon/accounts',         label: 'Accounts' },
+  { href: '/amazon/campaigns',        label: 'Campaigns' },
+  { href: '/amazon/spend',            label: 'Spend' },
+  { href: '/amazon/recommendations',  label: 'Recommendations' },
 ]
 
 export default function NavBar() {

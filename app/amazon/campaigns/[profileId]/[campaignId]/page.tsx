@@ -487,7 +487,7 @@ export default async function CampaignDetailPage({
     <div>
       {/* ── Back ── */}
       <div style={{ marginBottom: '1rem' }}>
-        <a href="/campaigns" style={{ color: 'var(--cdl-blue)', fontSize: '0.85rem' }}>
+        <a href="/amazon/campaigns" style={{ color: 'var(--cdl-blue)', fontSize: '0.85rem' }}>
           ← Campaigns
         </a>
       </div>

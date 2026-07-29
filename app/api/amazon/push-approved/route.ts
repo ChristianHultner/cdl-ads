@@ -84,7 +84,7 @@ function spawnScript(
   })
 }
 
-// ── POST /api/push-approved ───────────────────────────────────────────────────
+// ── POST /api/amazon/push-approved ───────────────────────────────────────────
 // Body: { profileId: string, dryRun?: boolean }
 // dryRun defaults to true (safe).
 // One profile per invocation; client loops profiles sequentially.
@@ -96,7 +96,7 @@ export async function POST(req: NextRequest) {
 
   const { profileId, dryRun = true } = body
   if (typeof profileId !== 'string' || !profileId.trim()) {
-    return NextResponse.json({ error: 'profileId (string) required' }, { status: 400 })
+    return NextResponse.json({ error: 'profileId (string) required' }, { status: 400 }) 
   }
 
   // ── Check static env vars ──────────────────────────────────────────────────

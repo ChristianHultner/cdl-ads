@@ -295,7 +295,7 @@ export default async function CampaignsPage({
                           <tr key={c.campaign_id}>
                             <td style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               <a
-                                href={`/campaigns/${m.profile_id}/${encodeURIComponent(c.campaign_id)}`}
+                                href={`/amazon/campaigns/${m.profile_id}/${encodeURIComponent(c.campaign_id)}`}
                                 style={{ color: 'var(--cdl-blue)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                                 title={c.campaign_name}
                               >
@@ -326,7 +326,7 @@ export default async function CampaignsPage({
                             <td style={{ textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>
                               {recCount > 0
                                 ? <a
-                                    href={`/campaigns/${m.profile_id}/${encodeURIComponent(c.campaign_id)}#recs`}
+                                    href={`/amazon/campaigns/${m.profile_id}/${encodeURIComponent(c.campaign_id)}#recs`}
                                     style={{ textDecoration: 'none' }}
                                   >
                                     <span className="badge badge-blue">{recCount}</span>
