@@ -458,6 +458,7 @@ export default async function CampaignDetailPage({
     campMap:       recCampMap,
     bidAdjStateMap: recBidAdjStateMap,
     destTargetsMap: recDestTargetsMap,
+    outcomesMap:   new Map(),
   }
 
   // ── Partition recs: campaign-level vs per-ad-group ───────────────────────

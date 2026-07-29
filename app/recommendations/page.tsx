@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import { neon } from '@neondatabase/serverless'
 import { PushAllButton } from './PushAllButton'
 import type { ProfileMeta } from './PushAllButton'
-import { RecCard, type RecCardContext, type RecRow, type DestTargetRow } from '@/app/components/RecCard'
+import { RecCard, type RecCardContext, type RecRow, type DestTargetRow, type RecOutcomeRow } from '@/app/components/RecCard'
 import { evidenceCampaignId } from '@/app/lib/rec-scope'
 
 // ── Local interfaces (page-query shapes only) ─────────────────────────────
@@ -225,8 +225,24 @@ export default async function RecommendationsPage() {
     bidAdjStateMap.set(row.target_id, row.state)
   }
 
+  // ── rec_outcomes — one IN query for all PUSHED recs (no N+1) ─────────
+  const pushedIds = rows.filter(r => r.status === 'PUSHED').map(r => r.id)
+  let outcomeRows: RecOutcomeRow[] = []
+  if (pushedIds.length > 0) {
+    outcomeRows = (await sql`
+      SELECT rec_id::text, horizon, captured_at::text, metrics
+      FROM rec_outcomes
+      WHERE rec_id = ANY(${pushedIds})
+    `) as unknown as RecOutcomeRow[]
+  }
+  const outcomesMap = new Map<string, RecOutcomeRow[]>()
+  for (const o of outcomeRows) {
+    if (!outcomesMap.has(o.rec_id)) outcomesMap.set(o.rec_id, [])
+    outcomesMap.get(o.rec_id)!.push(o)
+  }
+
   // ── RecCard context (for ruled section) ───────────────────────────────
-  const ctx: RecCardContext = { adGroupMap, campMap, bidAdjStateMap, destTargetsMap }
+  const ctx: RecCardContext = { adGroupMap, campMap, bidAdjStateMap, destTargetsMap, outcomesMap }
 
   // ── Partition rows ─────────────────────────────────────────────────────
   const draftRows    = rows.filter(r => r.status === 'DRAFT')

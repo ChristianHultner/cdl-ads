@@ -71,6 +71,8 @@ export interface Evidence {
   pushed_keyword_ids?: string[]
   pushed_target_ids?: string[]
   resolved_destination?: ResolvedDestination | null
+  pushed_at?: string
+  pushed_at_backdated?: boolean
 }
 
 export interface RecRow {
@@ -96,12 +98,38 @@ export interface DestTargetRow {
   bid: string | null
 }
 
+export interface RecOutcomeMetrics {
+  window_days:         number
+  rows_found:          number
+  clicks?:             number
+  cost?:               number
+  purchases_14d?:      number
+  sales_14d?:          number
+  purchases?:          number
+  sales?:              number
+  impressions?:        number
+  before_cost?:        number
+  before_sales_14d?:   number
+  before_clicks?:      number
+  before_impressions?: number
+  before_rows_found?:  number
+  capture_error?:      string
+}
+
+export interface RecOutcomeRow {
+  rec_id:      string
+  horizon:     string
+  captured_at: string
+  metrics:     RecOutcomeMetrics
+}
+
 /** Lookup maps resolved by the host page and passed into each card. */
 export interface RecCardContext {
-  adGroupMap: Map<string, string>
-  campMap: Map<string, { name: string; state: string }>
+  adGroupMap:     Map<string, string>
+  campMap:        Map<string, { name: string; state: string }>
   bidAdjStateMap: Map<string, string>
   destTargetsMap: Map<string, DestTargetRow[]>
+  outcomesMap:    Map<string, RecOutcomeRow[]>
 }
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
@@ -479,6 +507,75 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
     )
   }
 
+  function OutcomesBlock({ rec }: { rec: RecRow }) {
+    const outcomes = ctx.outcomesMap.get(String(rec.id)) ?? []
+    if (outcomes.length === 0) return null
+
+    const isBackdated = !!rec.evidence.pushed_at_backdated
+    const sym = CURRENCY_SYMBOL[rec.currency_code] ?? `${rec.currency_code} `
+
+    const HORIZON_ORDER: Record<string, number> = { t7: 0, t14: 1, t30: 2 }
+    const sorted = [...outcomes].sort(
+      (a, b) => (HORIZON_ORDER[a.horizon] ?? 9) - (HORIZON_ORDER[b.horizon] ?? 9),
+    )
+
+    function lbl(h: string): string {
+      return isBackdated ? `~${h}` : h
+    }
+
+    function fmt(v: number | undefined): string {
+      if (v == null) return '—'
+      return `${sym}${v.toFixed(2)}`
+    }
+
+    function metricLine(o: RecOutcomeRow): string {
+      const m = o.metrics
+      const l = lbl(o.horizon)
+
+      if (rec.rec_type === 'NEGATE_TERM') {
+        const clicks = m.clicks ?? 0
+        const cost   = m.cost   ?? 0
+        const win    = clicks === 0 && cost === 0
+        return `${l} · term clicks ${clicks}, cost ${fmt(cost)} since negation${win ? ' ✓' : ''}`
+      }
+      if (rec.rec_type === 'PROMOTE_TERM' || rec.rec_type === 'CREATIVE_KEYWORD') {
+        if (m.rows_found === 0) return `${l} · no data yet`
+        return `${l} · clicks ${m.clicks ?? 0} · ${fmt(m.cost)} · ${m.purchases_14d ?? 0} orders · ${fmt(m.sales_14d)}`
+      }
+      if (rec.rec_type === 'PROMOTE_ASIN' || rec.rec_type === 'CREATIVE_TARGET') {
+        if (m.rows_found === 0) return `${l} · no data yet`
+        return `${l} · clicks ${m.clicks ?? 0} · ${fmt(m.cost)} · ${m.purchases ?? 0} orders · ${fmt(m.sales)}`
+      }
+      // BID_ADJUST / BUDGET_ADJUST / PAUSE_CAMPAIGN / CREATE_STRUCTURE
+      if (m.rows_found === 0) return `${l} · no data yet`
+      const acos  = (m.cost        != null) && (m.sales_14d        != null) && m.sales_14d        > 0
+        ? ((m.cost        / m.sales_14d)        * 100).toFixed(1) : null
+      const bAcos = (m.before_cost != null) && (m.before_sales_14d != null) && m.before_sales_14d > 0
+        ? ((m.before_cost / m.before_sales_14d) * 100).toFixed(1) : null
+      return (
+        `${l} · spend ${fmt(m.cost)} (was ${fmt(m.before_cost)}) · ` +
+        `sales ${fmt(m.sales_14d)} (was ${fmt(m.before_sales_14d)}) · ` +
+        `ACoS ${acos  != null ? `${acos}%`  : '—'} (was ${bAcos != null ? `${bAcos}%` : '—'})`
+      )
+    }
+
+    return (
+      <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', lineHeight: 1.6 }}>
+        <div style={{
+          fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase' as const,
+          letterSpacing: '0.05em', color: 'var(--cdl-muted)', marginBottom: '0.3rem',
+        }}>
+          Outcomes
+        </div>
+        {sorted.map(o => (
+          <div key={o.horizon} style={{ color: 'var(--cdl-muted)' }}>
+            {metricLine(o)}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   function CardBody({ r: rec }: { r: RecRow }) {
     return (
       <div className="rec-card-body">
@@ -504,6 +601,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
         <EvStats ev={rec.evidence} currency={rec.currency_code} />
         <AppliesTo ev={rec.evidence} profileId={rec.profile_id} currency={rec.currency_code} />
         {rec.rec_type === 'NEGATE_TERM' && <PushReceipts ev={rec.evidence} />}
+        {rec.status === 'PUSHED' && <OutcomesBlock rec={rec} />}
       </div>
     )
   }
