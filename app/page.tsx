@@ -80,7 +80,7 @@ export default async function HomePage() {
                 </td>
               </tr>
               <tr style={{ color: 'var(--cdl-muted)' }}>
-                <td>Google</td>
+                <td><a href="/google" style={{ color: 'var(--cdl-muted)' }}>Google</a></td>
                 <td className="num">—</td>
                 <td className="num">—</td>
                 <td className="num">—</td>

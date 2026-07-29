@@ -2,12 +2,9 @@
 
 import { usePathname } from 'next/navigation'
 
-const NAV = [
-  { href: '/',                        label: 'Overview' },
-  { href: '/amazon/accounts',         label: 'Accounts' },
-  { href: '/amazon/campaigns',        label: 'Campaigns' },
-  { href: '/amazon/spend',            label: 'Spend' },
-  { href: '/amazon/recommendations',  label: 'Recommendations' },
+const CHANNELS = [
+  { href: '/amazon/campaigns', prefix: '/amazon', label: 'AMAZON' },
+  { href: '/google',           prefix: '/google',  label: 'GOOGLE' },
 ]
 
 export default function NavBar() {
@@ -23,20 +20,24 @@ export default function NavBar() {
       height: '52px',
       gap: '0',
     }}>
-      <span style={{
-        fontFamily: 'var(--font-fraunces, Fraunces, Georgia, serif)',
-        fontWeight: 700,
-        fontSize: '1.05rem',
-        color: 'var(--cdl-blue)',
-        whiteSpace: 'nowrap',
-        marginRight: '2.25rem',
-        letterSpacing: '-0.01em',
-      }}>
-        Cuento de Luz · Ads
-      </span>
+      <a
+        href="/"
+        style={{
+          fontFamily: 'var(--font-fraunces, Fraunces, Georgia, serif)',
+          fontWeight: 700,
+          fontSize: '1.05rem',
+          color: 'var(--cdl-blue)',
+          whiteSpace: 'nowrap',
+          marginRight: '2.25rem',
+          letterSpacing: '-0.01em',
+          textDecoration: 'none',
+        }}
+      >
+        CDL Ads
+      </a>
       <div style={{ display: 'flex', height: '100%', alignItems: 'stretch' }}>
-        {NAV.map(({ href, label }) => {
-          const active = pathname === href
+        {CHANNELS.map(({ href, prefix, label }) => {
+          const active = pathname.startsWith(prefix)
           return (
             <a
               key={href}
