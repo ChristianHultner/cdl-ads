@@ -1292,7 +1292,8 @@ for (const row of budgetCampRows) {
 }
 
 // ── PAUSE_CAMPAIGN ─────────────────────────────────────────────────────────
-// Criteria: state='ENABLED', spend_30d >= 30, acos_30d >= 1.0 (100%+).
+// Criteria: state='ENABLED', spend_30d >= 30, AND
+//   (acos_30d >= 1.0 OR COALESCE(sales_30d,0) = 0).
 // Separate query — does NOT require budget_amount IS NOT NULL.
 console.log('\n── Phase 7b: PAUSE_CAMPAIGN ──────────────────────────────────────');
 
@@ -1329,12 +1330,13 @@ const { rows: openPauseRows } = await pool.query(
 const openPauseSet = new Set(openPauseRows.map(r => r.target_text));
 
 for (const row of pauseCandRows) {
-  const spend30d  = row.spend_30d;
-  const sales30d  = row.sales_30d;
-  // acos_30d >= 1.0 requires sales > 0 (otherwise ratio undefined; spec: losing money on every sale).
-  if (sales30d <= 0) continue;
-  const acos30d = spend30d / sales30d;
-  if (acos30d < 1.0) continue;
+  const spend30d   = row.spend_30d;
+  const sales30d   = row.sales_30d;
+
+  // Criteria: (acos_30d >= 1.0) OR (sales_30d = 0). spend_30d >= 30 enforced by query HAVING.
+  const isZeroSales = sales30d === 0;
+  const acos30d     = sales30d > 0 ? spend30d / sales30d : null;
+  if (!isZeroSales && (acos30d === null || acos30d < 1.0)) continue;
 
   // Idempotency.
   if (openPauseSet.has(row.campaign_id)) {
@@ -1343,13 +1345,18 @@ for (const row of pauseCandRows) {
     continue;
   }
 
-  const acosPct  = (acos30d * 100).toFixed(1);
   const spendFmt = `${currSym}${spend30d.toFixed(2)}`;
-  const salesFmt = `${currSym}${sales30d.toFixed(2)}`;
 
-  const proposal =
-    `Pause '${row.name}': ${spendFmt} spend bought ${salesFmt} sales in 30d ` +
-    `(${acosPct}% ACoS) \u2014 losing money on every sale.`;
+  let proposal;
+  if (isZeroSales) {
+    proposal = `Pause '${row.name}': ${spendFmt} spend bought ZERO sales in 30d.`;
+  } else {
+    const acosPct  = (acos30d * 100).toFixed(1);
+    const salesFmt = `${currSym}${sales30d.toFixed(2)}`;
+    proposal =
+      `Pause '${row.name}': ${spendFmt} spend bought ${salesFmt} sales in 30d ` +
+      `(${acosPct}% ACoS) \u2014 losing money on every sale.`;
+  }
 
   const evidence = {
     campaign_id:   row.campaign_id,
@@ -1367,7 +1374,12 @@ for (const row of pauseCandRows) {
   );
   countsByType['PAUSE_CAMPAIGN']++;
   written++;
-  console.log(`  [PAUSE_CAMPAIGN] '${row.name}': ${spendFmt} spend, ${acosPct}% ACoS`);
+  if (isZeroSales) {
+    console.log(`  [PAUSE_CAMPAIGN] '${row.name}': ${spendFmt} spend, ZERO sales`);
+  } else {
+    const acosPct = (acos30d * 100).toFixed(1);
+    console.log(`  [PAUSE_CAMPAIGN] '${row.name}': ${spendFmt} spend, ${acosPct}% ACoS`);
+  }
 }
 console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
 
