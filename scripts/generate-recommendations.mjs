@@ -1550,6 +1550,104 @@ for (const row of reviveCandRows) {
 }
 console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
 
+// ── 7d. DORMANT-PAUSE ──────────────────────────────────────────────────────
+// Criteria: state='ENABLED', spend_30d < 2, lifetime impressions < 500,
+//   lifetime sales = 0 (full history).
+// Age guard: amazon_campaigns.raw jsonb has no creationDate/createdDate
+//   (confirmed: both fields return NULL) — age guard skipped; impressions
+//   floor and HARD EXCLUDE below serve as the newborn guard.
+// HARD EXCLUDE: campaigns whose name starts with 'CDL | SP |'.
+// rec_type = PAUSE_CAMPAIGN, target_text = campaign_id.
+console.log('\n\u2500\u2500 Phase 7d: DORMANT-PAUSE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
+// Step 1: candidate campaigns.
+const { rows: dormantCandRows } = await pool.query(
+  `WITH lifetime AS (
+     SELECT campaign_id,
+            COALESCE(SUM(impressions), 0)::bigint AS lifetime_impressions,
+            COALESCE(SUM(cost),        0)::float  AS lifetime_spend,
+            COALESCE(SUM(sales_14d),   0)::float  AS lifetime_sales
+       FROM amazon_campaign_daily
+      WHERE profile_id = $1
+      GROUP BY campaign_id
+   ),
+   spend30 AS (
+     SELECT campaign_id,
+            COALESCE(SUM(cost), 0)::float AS spend_30d
+       FROM amazon_campaign_daily
+      WHERE profile_id = $1
+        AND date >= CURRENT_DATE - INTERVAL '30 days'
+      GROUP BY campaign_id
+   )
+   SELECT c.campaign_id::text                          AS campaign_id,
+          c.name,
+          c.budget_amount::float                       AS budget_amount,
+          COALESCE(s.spend_30d,            0)::float   AS spend_30d,
+          COALESCE(lt.lifetime_impressions,0)::bigint  AS lifetime_impressions,
+          COALESCE(lt.lifetime_spend,      0)::float   AS lifetime_spend,
+          COALESCE(lt.lifetime_sales,      0)::float   AS lifetime_sales
+     FROM amazon_campaigns c
+LEFT JOIN spend30 s   ON s.campaign_id  = c.campaign_id
+LEFT JOIN lifetime lt  ON lt.campaign_id = c.campaign_id
+    WHERE c.profile_id = $1
+      AND c.state      = 'ENABLED'
+      AND c.name NOT LIKE 'CDL | SP |%'
+      AND COALESCE(s.spend_30d,            0) < 2
+      AND COALESCE(lt.lifetime_impressions, 0) < 500
+      AND COALESCE(lt.lifetime_sales,       0) = 0`,
+  [profileId],
+);
+console.log(`  ${dormantCandRows.length} DORMANT-PAUSE candidate(s).`);
+
+// Step 2: idempotency — open PAUSE_CAMPAIGN recs for this profile.
+const { rows: openDormantRows } = await pool.query(
+  `SELECT target_text
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'PAUSE_CAMPAIGN'
+      AND status     = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+);
+const openDormantSet = new Set(openDormantRows.map((r) => r.target_text));
+
+// Step 3: emit recs.
+for (const row of dormantCandRows) {
+  const campId  = row.campaign_id;
+  const impr    = Number(row.lifetime_impressions);
+  const spend3d = row.spend_30d;
+
+  if (openDormantSet.has(campId)) {
+    console.log(`  skipped (open rec exists): [DORMANT-PAUSE] ${campId}`);
+    skippedExisting++;
+    continue;
+  }
+
+  const proposal =
+    `Pause '${row.name}': lifetime ${impr.toLocaleString('en')} impressions, ` +
+    `zero sales \u2014 structure never reached the market.`;
+
+  const evidence = {
+    kind:                 'DORMANT',
+    campaign_id:          campId,
+    spend_30d:            spend3d,
+    lifetime_impressions: impr,
+    lifetime_spend:       row.lifetime_spend,
+    lifetime_sales:       row.lifetime_sales,
+    budget_amount:        row.budget_amount,
+  };
+
+  await pool.query(
+    `INSERT INTO recommendations
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    ['PAUSE_CAMPAIGN', profileId, campId, campId, proposal, JSON.stringify(evidence)],
+  );
+  countsByType['PAUSE_CAMPAIGN']++;
+  written++;
+  console.log(`  [DORMANT-PAUSE] '${row.name}': ${impr.toLocaleString('en')} impr, ${currSym}${row.lifetime_spend.toFixed(2)} lifetime spend`);
+}
+console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
 await pool.end();
 
 // ── 8. SUMMARY ───────────────────────────────────────────────────────────────
