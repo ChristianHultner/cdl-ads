@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS google_search_term_daily (
   campaign_id          bigint           NOT NULL,
   ad_group_id          bigint           NOT NULL,
   search_term          text             NOT NULL,
-  match_type           text,
+  match_type           text             NOT NULL,
   impressions          bigint           NOT NULL DEFAULT 0,
   clicks               bigint           NOT NULL DEFAULT 0,
   cost_micros          bigint           NOT NULL DEFAULT 0,
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS google_search_term_daily (
   conversions_value    double precision NOT NULL DEFAULT 0,
   first_synced_at      timestamptz      NOT NULL DEFAULT now(),
   last_synced_at       timestamptz,
-  PRIMARY KEY (customer_id, date, campaign_id, ad_group_id, search_term)
+  PRIMARY KEY (customer_id, date, campaign_id, ad_group_id, search_term, match_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_gstd_term ON google_search_term_daily (search_term);

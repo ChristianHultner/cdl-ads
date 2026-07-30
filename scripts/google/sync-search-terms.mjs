@@ -79,10 +79,14 @@ const rows = await customer.query(`
   ORDER BY segments.date
 `);
 
-// Validate enums before any output or DB write
+// Validate enums and required fields before any output or DB write
 for (const row of rows) {
   const val = row.segments?.search_term_match_type;
-  if (val != null && en(enums.SearchTermMatchType, val) === undefined) {
+  if (val == null) {
+    console.error(`MISSING MATCH TYPE date=${row.segments?.date} term=${row.search_term_view?.search_term}`);
+    process.exit(1);
+  }
+  if (en(enums.SearchTermMatchType, val) === undefined) {
     console.error(`UNMAPPED ENUM search_term_match_type ${val}`);
     process.exit(1);
   }
@@ -146,8 +150,7 @@ for (const batch of chunks) {
        (customer_id, date, campaign_id, ad_group_id, search_term, match_type,
         impressions, clicks, cost_micros, conversions, conversions_value, last_synced_at)
      VALUES ${valueClauses.join(',')}
-     ON CONFLICT (customer_id, date, campaign_id, ad_group_id, search_term) DO UPDATE SET
-       match_type=EXCLUDED.match_type,
+     ON CONFLICT (customer_id, date, campaign_id, ad_group_id, search_term, match_type) DO UPDATE SET
        impressions=EXCLUDED.impressions,
        clicks=EXCLUDED.clicks,
        cost_micros=EXCLUDED.cost_micros,
