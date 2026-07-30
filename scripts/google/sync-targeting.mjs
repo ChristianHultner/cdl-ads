@@ -109,6 +109,9 @@ for (const row of adGroupRows) {
 
 for (const row of keywordRows) {
   const c = row.ad_group_criterion;
+  if (!c.keyword?.text) { console.error(
+    `MISSING KEYWORD TEXT ad_group=${row.ad_group.id} criterion=${c.criterion_id}`);
+    process.exit(1); }
   const checks = [
     ['criterion.status',     enums.AdGroupCriterionStatus, c.status],
     ['keyword.match_type',   enums.KeywordMatchType,        c.keyword?.match_type],
@@ -175,7 +178,7 @@ for (const row of keywordRows) {
     [
       ag.id,
       c.criterion_id,
-      c.keyword?.text ?? '',
+      c.keyword.text,
       en(enums.KeywordMatchType, c.keyword?.match_type),
       en(enums.AdGroupCriterionStatus, c.status),
       c.negative ?? false,
