@@ -127,15 +127,37 @@ for (const row of keywordRows) {
 neonConfig.webSocketConstructor = WebSocket;
 const pool = new Pool({ connectionString: dbUrl });
 
-// Upsert ad groups first (FK dependency for keywords)
+// Helper: split array into fixed-size chunks
+const chunk = (arr, size) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};
+
+// Upsert ad groups first (FK dependency for keywords), batches of 100
+const agChunks = chunk(adGroupRows, 100);
 let agUpserted = 0;
-for (const row of adGroupRows) {
-  const ag  = row.ad_group;
-  const cam = row.campaign;
+for (const batch of agChunks) {
+  const params = [];
+  const valueClauses = batch.map((row, i) => {
+    const ag  = row.ad_group;
+    const cam = row.campaign;
+    const base = i * 7;
+    params.push(
+      ag.id,
+      cam.id,
+      process.env.GOOGLE_ADS_CUSTOMER_ID,
+      ag.name,
+      en(enums.AdGroupStatus, ag.status),
+      en(enums.AdGroupType, ag.type),
+      JSON.stringify(row),
+    );
+    return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},now(),$${base+7})`;
+  });
   await pool.query(
     `INSERT INTO google_ad_groups
        (ad_group_id, campaign_id, customer_id, name, status, type, last_synced_at, raw)
-     VALUES ($1,$2,$3,$4,$5,$6,now(),$7)
+     VALUES ${valueClauses.join(',')}
      ON CONFLICT (ad_group_id) DO UPDATE SET
        campaign_id=EXCLUDED.campaign_id,
        customer_id=EXCLUDED.customer_id,
@@ -144,38 +166,22 @@ for (const row of adGroupRows) {
        type=EXCLUDED.type,
        last_synced_at=now(),
        raw=EXCLUDED.raw`,
-    [
-      ag.id,
-      cam.id,
-      process.env.GOOGLE_ADS_CUSTOMER_ID,
-      ag.name,
-      en(enums.AdGroupStatus, ag.status),
-      en(enums.AdGroupType, ag.type),
-      JSON.stringify(row),
-    ]
+    params
   );
-  agUpserted++;
+  agUpserted += batch.length;
+  console.log(`BATCH ${agUpserted}/${adGroupRows.length}`);
 }
 
-// Upsert keywords second (depends on google_ad_groups)
+// Upsert keywords second (depends on google_ad_groups), batches of 500
+const kwChunks = chunk(keywordRows, 500);
 let kwUpserted = 0;
-for (const row of keywordRows) {
-  const ag = row.ad_group;
-  const c  = row.ad_group_criterion;
-  await pool.query(
-    `INSERT INTO google_keywords
-       (ad_group_id, criterion_id, text, match_type, status, negative,
-        cpc_bid_micros, last_synced_at, raw)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8)
-     ON CONFLICT (ad_group_id, criterion_id) DO UPDATE SET
-       text=EXCLUDED.text,
-       match_type=EXCLUDED.match_type,
-       status=EXCLUDED.status,
-       negative=EXCLUDED.negative,
-       cpc_bid_micros=EXCLUDED.cpc_bid_micros,
-       last_synced_at=now(),
-       raw=EXCLUDED.raw`,
-    [
+for (const batch of kwChunks) {
+  const params = [];
+  const valueClauses = batch.map((row, i) => {
+    const ag = row.ad_group;
+    const c  = row.ad_group_criterion;
+    const base = i * 8;
+    params.push(
       ag.id,
       c.criterion_id,
       c.keyword.text,
@@ -184,9 +190,26 @@ for (const row of keywordRows) {
       c.negative ?? false,
       c.cpc_bid_micros ?? null,
       JSON.stringify(row),
-    ]
+    );
+    return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},now(),$${base+8})`;
+  });
+  await pool.query(
+    `INSERT INTO google_keywords
+       (ad_group_id, criterion_id, text, match_type, status, negative,
+        cpc_bid_micros, last_synced_at, raw)
+     VALUES ${valueClauses.join(',')}
+     ON CONFLICT (ad_group_id, criterion_id) DO UPDATE SET
+       text=EXCLUDED.text,
+       match_type=EXCLUDED.match_type,
+       status=EXCLUDED.status,
+       negative=EXCLUDED.negative,
+       cpc_bid_micros=EXCLUDED.cpc_bid_micros,
+       last_synced_at=now(),
+       raw=EXCLUDED.raw`,
+    params
   );
-  kwUpserted++;
+  kwUpserted += batch.length;
+  console.log(`BATCH ${kwUpserted}/${keywordRows.length}`);
 }
 
 await pool.end();
