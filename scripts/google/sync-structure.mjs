@@ -6,7 +6,6 @@ const ENV_REQUIRED = [
   'GOOGLE_ADS_CLIENT_SECRET',
   'GOOGLE_ADS_DEVELOPER_TOKEN',
   'GOOGLE_ADS_REFRESH_TOKEN',
-  'GOOGLE_ADS_LOGIN_CUSTOMER_ID',
   'GOOGLE_ADS_CUSTOMER_ID',
   'GOOGLE_DATABASE_URL',
 ];
@@ -38,9 +37,8 @@ const api = new GoogleAdsApi({
 });
 
 const customer = api.Customer({
-  customer_id:       process.env.GOOGLE_ADS_CUSTOMER_ID,
-  login_customer_id: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID,
-  refresh_token:     process.env.GOOGLE_ADS_REFRESH_TOKEN,
+  customer_id:   process.env.GOOGLE_ADS_CUSTOMER_ID,
+  refresh_token: process.env.GOOGLE_ADS_REFRESH_TOKEN,
 });
 
 // Query 1: account
