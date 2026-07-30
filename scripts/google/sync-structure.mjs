@@ -1,4 +1,4 @@
-import { GoogleAdsApi } from 'google-ads-api';
+import { GoogleAdsApi, enums } from 'google-ads-api';
 import { Pool, neonConfig } from '@neondatabase/serverless';
 
 const ENV_REQUIRED = [
@@ -29,6 +29,8 @@ if (process.env.GOOGLE_ADS_CUSTOMER_ID !== '2199803274') {
 }
 
 const execute = process.argv.includes('--execute');
+
+const en = (table, v) => v == null ? null : (typeof v === 'number' ? table[v] : String(v));
 
 const api = new GoogleAdsApi({
   client_id:       process.env.GOOGLE_ADS_CLIENT_ID,
@@ -69,8 +71,8 @@ if (!execute) {
     const c = row.campaign;
     const b = row.campaign_budget;
     console.log(
-      `${c.id} | ${c.name} | ${c.status} | ${c.advertising_channel_type} | ` +
-      `${c.bidding_strategy_type ?? 'null'} | ${b?.amount_micros ?? 'null'}`
+      `${c.id} | ${c.name} | ${en(enums.CampaignStatus, c.status)} | ${en(enums.AdvertisingChannelType, c.advertising_channel_type)} | ` +
+      `${en(enums.BiddingStrategyType, c.bidding_strategy_type) ?? 'null'} | ${b?.amount_micros ?? 'null'}`
     );
   }
   console.log(`TOTAL ${campaignRows.length} campaigns`);
@@ -78,6 +80,23 @@ if (!execute) {
 }
 
 // --execute: upsert to database
+
+// Safety: validate enum mappings before any DB write
+for (const row of campaignRows) {
+  const c = row.campaign;
+  const checks = [
+    ['status', enums.CampaignStatus, c.status],
+    ['advertising_channel_type', enums.AdvertisingChannelType, c.advertising_channel_type],
+    ['bidding_strategy_type', enums.BiddingStrategyType, c.bidding_strategy_type],
+  ];
+  for (const [field, table, val] of checks) {
+    if (val != null && en(table, val) === undefined) {
+      console.error(`UNMAPPED ENUM ${field} ${val}`);
+      process.exit(1);
+    }
+  }
+}
+
 neonConfig.webSocketConstructor = WebSocket;
 const pool = new Pool({ connectionString: dbUrl });
 
@@ -107,8 +126,8 @@ for (const row of campaignRows) {
        budget_micros=EXCLUDED.budget_micros, start_date=EXCLUDED.start_date,
        end_date=EXCLUDED.end_date, last_synced_at=now(), raw=EXCLUDED.raw`,
     [
-      c.id, a.id, c.name, c.status, c.advertising_channel_type,
-      c.bidding_strategy_type ?? null, b?.amount_micros ?? null,
+      c.id, a.id, c.name, en(enums.CampaignStatus, c.status), en(enums.AdvertisingChannelType, c.advertising_channel_type),
+      en(enums.BiddingStrategyType, c.bidding_strategy_type), b?.amount_micros ?? null,
       (c.start_date_time ?? null) && String(c.start_date_time).slice(0, 10),
       (c.end_date_time ?? null) && String(c.end_date_time).slice(0, 10),
       JSON.stringify(row),
