@@ -52,7 +52,7 @@ const [acctRow] = await customer.query(`
 const campaignRows = await customer.query(`
   SELECT campaign.id, campaign.name, campaign.status,
          campaign.advertising_channel_type, campaign.bidding_strategy_type,
-         campaign_budget.amount_micros, campaign.start_date, campaign.end_date
+         campaign_budget.amount_micros, campaign.start_date_time, campaign.end_date_time
   FROM campaign
   ORDER BY campaign.id
 `);
@@ -109,7 +109,8 @@ for (const row of campaignRows) {
     [
       c.id, a.id, c.name, c.status, c.advertising_channel_type,
       c.bidding_strategy_type ?? null, b?.amount_micros ?? null,
-      c.start_date || null, c.end_date || null,
+      (c.start_date_time ?? null) && String(c.start_date_time).slice(0, 10),
+      (c.end_date_time ?? null) && String(c.end_date_time).slice(0, 10),
       JSON.stringify(row),
     ]
   );
