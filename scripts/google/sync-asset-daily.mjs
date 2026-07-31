@@ -106,26 +106,58 @@ const assetText = (row) => {
   return (t == null || t === '') ? null : t;
 };
 
+// Aggregate to PK grain: (date, campaign_id, ad_group_id, asset_id, field_type)
+// The view returns one row per ad; same asset in multiple RSAs in one ad group
+// produces multiple source rows per PK. Sum metrics; keep first non-null asset_text.
+const sourceRowCount = rows.length;
+const aggMap = new Map();
+for (const row of rows) {
+  const date       = row.segments?.date;
+  const campaignId = Number(row.campaign?.id);
+  const adGroupId  = Number(row.ad_group?.id);
+  const assetId    = Number(row.asset?.id);
+  const fieldType  = en(enums.AssetFieldType, row.ad_group_ad_asset_view?.field_type);
+  const key = `${date}|${campaignId}|${adGroupId}|${assetId}|${fieldType}`;
+
+  if (!aggMap.has(key)) {
+    aggMap.set(key, {
+      date, campaignId, adGroupId, assetId, fieldType,
+      assetTextVal: assetText(row),
+      impressions:  Number(row.metrics?.impressions  ?? 0),
+      clicks:       Number(row.metrics?.clicks       ?? 0),
+      costMicros:   Number(row.metrics?.cost_micros  ?? 0),
+      conversions:  Number(row.metrics?.conversions  ?? 0),
+    });
+  } else {
+    const a = aggMap.get(key);
+    if (a.assetTextVal == null) a.assetTextVal = assetText(row); // keep first non-null
+    a.impressions += Number(row.metrics?.impressions  ?? 0);
+    a.clicks      += Number(row.metrics?.clicks       ?? 0);
+    a.costMicros  += Number(row.metrics?.cost_micros  ?? 0);
+    a.conversions += Number(row.metrics?.conversions  ?? 0);
+  }
+}
+const agg = [...aggMap.values()];
+
 if (!execute) {
-  const distinctDays   = new Set(rows.map(r => r.segments?.date)).size;
-  const distinctAssets = new Set(rows.map(r => String(r.asset?.id))).size;
-  const totalClicks       = rows.reduce((s, r) => s + Number(r.metrics?.clicks     ?? 0), 0);
-  const totalCostMicros   = rows.reduce((s, r) => s + Number(r.metrics?.cost_micros ?? 0), 0);
-  const totalConversions  = rows.reduce((s, r) => s + Number(r.metrics?.conversions  ?? 0), 0);
+  const distinctDays   = new Set(agg.map(r => r.date)).size;
+  const distinctAssets = new Set(agg.map(r => String(r.assetId))).size;
+  const totalClicks      = agg.reduce((s, r) => s + r.clicks,      0);
+  const totalCostMicros  = agg.reduce((s, r) => s + r.costMicros,  0);
+  const totalConversions = agg.reduce((s, r) => s + r.conversions, 0);
 
   console.log(`DRY RUN ${fromArg} ${toArg}`);
-  console.log(`ROWS ${rows.length}`);
+  console.log(`ROWS ${agg.length}`);
+  console.log(`SOURCE ROWS ${sourceRowCount} AGGREGATED ${agg.length}`);
   console.log(`DAYS ${distinctDays}`);
   console.log(`ASSETS ${distinctAssets}`);
   console.log(`TOTAL clicks=${totalClicks} cost_micros=${totalCostMicros} conversions=${totalConversions}`);
 
-  for (const row of rows.slice(0, 10)) {
-    const ft = en(enums.AssetFieldType, row.ad_group_ad_asset_view?.field_type);
+  for (const r of agg.slice(0, 10)) {
     console.log(
-      `${row.segments?.date} | ${row.campaign?.id} | ${row.ad_group?.id} | ` +
-      `${row.asset?.id} | ${ft} | ${assetText(row) ?? 'null'} | ` +
-      `${row.metrics?.impressions ?? 0} | ${row.metrics?.clicks ?? 0} | ` +
-      `${row.metrics?.cost_micros ?? 0} | ${row.metrics?.conversions ?? 0}`
+      `${r.date} | ${r.campaignId} | ${r.adGroupId} | ` +
+      `${r.assetId} | ${r.fieldType} | ${r.assetTextVal ?? 'null'} | ` +
+      `${r.impressions} | ${r.clicks} | ${r.costMicros} | ${r.conversions}`
     );
   }
 
@@ -142,24 +174,24 @@ const chunk = (arr, size) => {
   return out;
 };
 
-const chunks = chunk(rows, 500);
+const chunks = chunk(agg, 500);
 let upserted = 0;
 for (const batch of chunks) {
   const params = [];
-  const valueClauses = batch.map((row, i) => {
+  const valueClauses = batch.map((r, i) => {
     const base = i * 11;
     params.push(
-      process.env.GOOGLE_ADS_CUSTOMER_ID,                                    // $1 customer_id
-      row.segments?.date,                                                      // $2 date
-      Number(row.campaign?.id),                                                // $3 campaign_id
-      Number(row.ad_group?.id),                                                // $4 ad_group_id
-      Number(row.asset?.id),                                                   // $5 asset_id
-      en(enums.AssetFieldType, row.ad_group_ad_asset_view?.field_type),        // $6 field_type
-      assetText(row),                                                           // $7 asset_text (null-safe)
-      Number(row.metrics?.impressions  ?? 0),                                  // $8
-      Number(row.metrics?.clicks       ?? 0),                                  // $9
-      Number(row.metrics?.cost_micros  ?? 0),                                  // $10
-      Number(row.metrics?.conversions  ?? 0),                                  // $11
+      process.env.GOOGLE_ADS_CUSTOMER_ID, // $1 customer_id
+      r.date,                              // $2 date
+      r.campaignId,                        // $3 campaign_id
+      r.adGroupId,                         // $4 ad_group_id
+      r.assetId,                           // $5 asset_id
+      r.fieldType,                         // $6 field_type
+      r.assetTextVal,                      // $7 asset_text (null-safe)
+      r.impressions,                       // $8
+      r.clicks,                            // $9
+      r.costMicros,                        // $10
+      r.conversions,                       // $11
     );
     return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},now())`;
   });
@@ -179,7 +211,7 @@ for (const batch of chunks) {
     params
   );
   upserted += batch.length;
-  console.log(`BATCH ${upserted}/${rows.length}`);
+  console.log(`BATCH ${upserted}/${agg.length}`);
 }
 
 await pool.end();
