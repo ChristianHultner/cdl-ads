@@ -237,8 +237,9 @@ const authHeaders = (contentType) => ({
   'Accept':                           contentType,
 });
 
-let pushed  = 0;
-let partial = 0;
+let pushed             = 0;
+let partial            = 0;
+let viaExistingHcCount = 0;
 
 for (const rec of recs) {
   const ev = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence;
@@ -301,8 +302,61 @@ for (const rec of recs) {
   pushResult.create_adId   = createdIds[0] ?? null;
   pushResult.create_errors = createErrors;
 
-  if (!createdIds.length) {
-    // Create failed — do NOT pause; leave rec APPROVED with partial summary.
+  // Detect duplicate: any DUPLICATE_VALUE error on our single-item request = create-satisfied.
+  const isDuplicatePath = !createdIds.length &&
+    createErrors.some((e) => {
+      const norm = String(e.code ?? '').toUpperCase().replace(/_/g, '');
+      return norm === 'DUPLICATEVALUE' || norm === 'DUPLICATEVALUEERROR';
+    });
+
+  if (isDuplicatePath) {
+    console.log(`  DUPLICATE_VALUE for ASIN ${hcIsbn10.toUpperCase()} — treating as create-satisfied.`);
+    pushResult.create = 'duplicate_existing';
+
+    // Look up the existing HC ad in our table (::text discipline).
+    const { rows: existingRows } = await pool.query(
+      `SELECT ad_id, state
+         FROM amazon_product_ads
+        WHERE campaign_id = $1::text
+          AND ad_group_id = $2::text
+          AND asin        = $3::text
+        LIMIT 1`,
+      [campaignId, adGroupId, hcIsbn10.toUpperCase()],
+    );
+
+    if (existingRows.length) {
+      const existingAd = existingRows[0];
+      if (existingAd.state === 'PAUSED') {
+        console.log(`  Existing HC ad ${existingAd.ad_id} is PAUSED — enabling…`);
+        await delay(DELAY_MS);
+        const enableBody = { productAds: [{ adId: existingAd.ad_id, state: 'ENABLED' }] };
+        const enableRes  = await fetchWithTimeout(
+          `${host}/sp/productAds`,
+          {
+            method:  'PUT',
+            headers: authHeaders('application/vnd.spProductAd.v3+json'),
+            body:    JSON.stringify(enableBody),
+          },
+          `productAds enable existing HC rec ${rec.id}`,
+        );
+        const enableText = await enableRes.text();
+        console.log(`Enable response HTTP ${enableRes.status}:`);
+        console.log(enableText);
+        console.log('');
+        pushResult.hc_enable = { adId: existingAd.ad_id, http: enableRes.status, raw: enableText };
+      } else {
+        // Already ENABLED — no action needed.
+        console.log(`  Existing HC ad ${existingAd.ad_id} already ENABLED — no-op.`);
+        pushResult.hc_enable = 'noop';
+      }
+    } else {
+      // Not in our table (sync lag); duplicate error proves it exists on Amazon.
+      console.log(`  HC ad not found in amazon_product_ads (sync lag) — hc_state_unverified.`);
+      pushResult.hc_enable           = 'unverified';
+      pushResult.hc_state_unverified = true;
+    }
+  } else if (!createdIds.length) {
+    // Create failed (non-duplicate) — do NOT pause; leave rec APPROVED with partial summary.
     pushResult.pause_attempted = false;
     pushResult.outcome         = 'CREATE_FAILED';
     await pool.query(
@@ -315,10 +369,10 @@ for (const rec of recs) {
     partial++;
     await delay(DELAY_MS);
     continue;
+  } else {
+    console.log(`HC product ad created: adId ${createdIds[0]}`);
+    console.log('');
   }
-
-  console.log(`HC product ad created: adId ${createdIds[0]}`);
-  console.log('');
 
   // ── (b) PAUSE Kindle ad ───────────────────────────────────────────────────
   // Only reached when create was accepted.
@@ -357,19 +411,20 @@ for (const rec of recs) {
   pushResult.pause_errors = pauseErrors;
 
   if (!pausedIds.length) {
-    // Pause failed after create succeeded — honest partial.
-    pushResult.outcome = 'CREATE_OK_PAUSE_FAILED';
+    // Pause failed after create satisfied — honest partial.
+    pushResult.outcome = isDuplicatePath ? 'DUPLICATE_EXISTING_PAUSE_FAILED' : 'CREATE_OK_PAUSE_FAILED';
     await pool.query(
       `UPDATE recommendations
           SET evidence = evidence || jsonb_build_object('push_result', $2::jsonb)
         WHERE id = $1`,
       [rec.id, JSON.stringify(pushResult)],
     );
-    console.log(`  PAUSE failed for rec ${rec.id} — HC ad created but Kindle ad still ENABLED. Leaving APPROVED (partial).`);
+    console.log(`  PAUSE failed for rec ${rec.id} — HC ad ${isDuplicatePath ? 'existing' : 'created'} but Kindle ad still ENABLED. Leaving APPROVED (partial).`);
     partial++;
   } else {
-    // Both succeeded.
+    // Both legs satisfied.
     pushResult.outcome = 'SUCCESS';
+    if (isDuplicatePath) pushResult.pause = { adId: kindleAdId, http: pauseRes.status };
     await pool.query(
       `UPDATE recommendations
           SET status   = 'PUSHED',
@@ -377,7 +432,12 @@ for (const rec of recs) {
         WHERE id = $1`,
       [rec.id, JSON.stringify(pushResult)],
     );
-    console.log(`  Rec ${rec.id} → PUSHED (HC created: ${createdIds[0]}, Kindle paused: ${kindleAdId})`);
+    if (isDuplicatePath) {
+      console.log(`  Rec ${rec.id} → PUSHED via existing HC (hc_enable: ${JSON.stringify(pushResult.hc_enable)}, Kindle paused: ${kindleAdId})`);
+      viaExistingHcCount++;
+    } else {
+      console.log(`  Rec ${rec.id} → PUSHED (HC created: ${createdIds[0]}, Kindle paused: ${kindleAdId})`);
+    }
     pushed++;
   }
 
@@ -388,5 +448,9 @@ await pool.end();
 
 console.log('');
 console.log(`Totals: ${recs.length} fetched, 0 skipped`);
-console.log(`Execute complete: ${pushed} pushed, ${partial} partial`);
+console.log(
+  viaExistingHcCount > 0
+    ? `Execute complete: ${pushed} pushed (${viaExistingHcCount} via existing HC), ${partial} partial`
+    : `Execute complete: ${pushed} pushed, ${partial} partial`
+);
 process.exit(0);
