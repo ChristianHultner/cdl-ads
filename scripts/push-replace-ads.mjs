@@ -304,11 +304,7 @@ for (const rec of recs) {
 
   // Detect duplicate: any DUPLICATE_VALUE error on our single-item request = create-satisfied.
   const iconst isDuplicatePath = !createdIds.length &&
-    JSON.stringify(createData?.productAds?.error ?? []).includes('DUPLICATE_VALUE');sDuplicatePath = !createdIds.length &&
-    createErrors.some((e) => {
-      const norm = String(e.code ?? '').toUpperCase().replace(/_/g, '');
-      return norm === 'DUPLICATEVALUE' || norm === 'DUPLICATEVALUEERROR';
-    });
+    JSON.stringify(createData?.productAds?.error ?? []).includes('DUPLICATE_VALUE');
 
   if (isDuplicatePath) {
     console.log(`  DUPLICATE_VALUE for ASIN ${hcIsbn10.toUpperCase()} — treating as create-satisfied.`);
