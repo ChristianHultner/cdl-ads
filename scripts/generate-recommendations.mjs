@@ -763,6 +763,34 @@ const bidEligible  = bidEntities.filter(
 );
 console.log(`  Eligible for bid review (volume filter): ${bidEligible.length}`);
 
+// Batch-fetch Amazon bid recommendations (fresh ≤14 days) for all eligible entities.
+// THE QUOTE IS CONTEXT ONLY — vpc, proposed bid, caps, and steps are unchanged.
+const bidRecEligibleIds = bidEligible.map((e) => e.entity_id);
+const bidRecMap = new Map(); // entity_id → { amazon_suggested, amazon_range_start, amazon_range_end, quote_age_days }
+if (bidRecEligibleIds.length > 0) {
+  const { rows: bidRecRows } = await pool.query(
+    `SELECT entity_id,
+            suggested::float                                              AS amazon_suggested,
+            range_start::float                                            AS amazon_range_start,
+            range_end::float                                              AS amazon_range_end,
+            FLOOR(EXTRACT(epoch FROM (now() - fetched_at)) / 86400)::int AS quote_age_days
+       FROM amazon_bid_recommendations
+      WHERE profile_id = $1
+        AND entity_id  = ANY($2)
+        AND fetched_at >= now() - INTERVAL '14 days'`,
+    [profileId, bidRecEligibleIds],
+  );
+  for (const row of bidRecRows) {
+    bidRecMap.set(row.entity_id, {
+      amazon_suggested:   row.amazon_suggested,
+      amazon_range_start: row.amazon_range_start,
+      amazon_range_end:   row.amazon_range_end,
+      quote_age_days:     row.quote_age_days,
+    });
+  }
+  console.log(`  Amazon bid-rec enrichment: ${bidRecMap.size} entity match(es) (≤14d fresh).`);
+}
+
 for (const entity of bidEligible) {
   const currentBid = entity.current_bid;
   const agName     = bidAgNameMap.get(entity.ad_group_id);
@@ -835,12 +863,19 @@ for (const entity of bidEligible) {
   const propFmt     = `${currSym}${proposedBid.toFixed(2)}`;
   const boundSuffix = boundBy !== 'none' ? ` (bounded by ${boundBy})` : '';
 
+  // Amazon bid-rec context (context only — vpc/proposed bid unchanged).
+  const amzRec = bidRecMap.get(entity.entity_id) ?? null;
+  const amzSuffix = amzRec
+    ? ` Amazon suggests ${currSym}${amzRec.amazon_suggested.toFixed(2)}` +
+      ` (${currSym}${amzRec.amazon_range_start.toFixed(2)}–${currSym}${amzRec.amazon_range_end.toFixed(2)}).`
+    : '';
+
   let proposal;
   if (isDefuse) {
     proposal =
       `Defuse dormant target ${kindPhrase}: ` +
       `${currSym}${entity.spend.toFixed(2)} spend, ${entity.clicks} clicks, 0 sales in ` +
-      `${windowStart} – ${windowEnd} — cut bid from ${curFmt} to ${propFmt}.`;
+      `${windowStart} – ${windowEnd} — cut bid from ${curFmt} to ${propFmt}.${amzSuffix}`;
   } else {
     const acosPct = (entity.acos * 100).toFixed(1);
     const cpcFmt  = entity.clicks > 0
@@ -852,7 +887,7 @@ for (const entity of bidEligible) {
       `${direction} bid on ${kindPhrase} ` +
       `from ${curFmt} to ${propFmt}: ` +
       `its clicks are worth ${vpcFmt} at your ${tgtPct}% target ` +
-      `(60d: ${entity.orders} orders, ${acosPct}% ACoS, ${cpcFmt}/click).${boundSuffix}`;
+      `(60d: ${entity.orders} orders, ${acosPct}% ACoS, ${cpcFmt}/click).${boundSuffix}${amzSuffix}`;
   }
 
   // Build evidence.
@@ -872,6 +907,12 @@ for (const entity of bidEligible) {
     performance_basis: entity.performance_basis,
     params_used:       params,
     bound_by:          boundBy,
+    ...(amzRec ? {
+      amazon_suggested:   amzRec.amazon_suggested,
+      amazon_range_start: amzRec.amazon_range_start,
+      amazon_range_end:   amzRec.amazon_range_end,
+      quote_age_days:     amzRec.quote_age_days,
+    } : {}),
   };
 
   await pool.query(

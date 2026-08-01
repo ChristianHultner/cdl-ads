@@ -73,6 +73,10 @@ export interface Evidence {
   resolved_destination?: ResolvedDestination | null
   pushed_at?: string
   pushed_at_backdated?: boolean
+  amazon_suggested?:   number
+  amazon_range_start?: number
+  amazon_range_end?:   number
+  quote_age_days?:     number
 }
 
 export interface RecRow {
@@ -576,6 +580,21 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
     )
   }
 
+  function AmazonBidLine({ ev, currency }: { ev: Evidence; currency: string }) {
+    if (ev.amazon_suggested == null) return null
+    const sym        = CURRENCY_SYMBOL[currency] ?? `${currency} `
+    const suggested  = `${sym}${ev.amazon_suggested.toFixed(2)}`
+    const rangeStart = ev.amazon_range_start != null ? `${sym}${ev.amazon_range_start.toFixed(2)}` : '\u2014'
+    const rangeEnd   = ev.amazon_range_end   != null ? `${sym}${ev.amazon_range_end.toFixed(2)}`   : '\u2014'
+    const age        = ev.quote_age_days     != null ? `${ev.quote_age_days}d old`                  : 'age unknown'
+    return (
+      <div style={{ fontSize: '0.82rem', color: 'var(--cdl-muted)', marginTop: '0.35rem' }}>
+        Amazon suggested bid:{' '}<strong>{suggested}</strong>{' '}
+        (range {rangeStart}\u2013{rangeEnd}, quote {age})
+      </div>
+    )
+  }
+
   function CardBody({ r: rec }: { r: RecRow }) {
     return (
       <div className="rec-card-body">
@@ -599,6 +618,9 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
         )}
         {/* Stats + evidence table */}
         <EvStats ev={rec.evidence} currency={rec.currency_code} />
+        {rec.rec_type === 'BID_ADJUST' && (
+          <AmazonBidLine ev={rec.evidence} currency={rec.currency_code} />
+        )}
         <AppliesTo ev={rec.evidence} profileId={rec.profile_id} currency={rec.currency_code} />
         {rec.rec_type === 'NEGATE_TERM' && <PushReceipts ev={rec.evidence} />}
         {rec.status === 'PUSHED' && <OutcomesBlock rec={rec} />}
