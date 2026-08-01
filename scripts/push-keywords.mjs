@@ -269,6 +269,7 @@ if (adGroupIds.length > 0) {
 // ── 5. PLAN ───────────────────────────────────────────────────────────────────
 const planned = []; // { rec, placement, bidToSend, requestBody }
 let skipped   = 0;
+let retired   = 0; // terminal skips self-retired (execute) / would-retire (dry-run)
 
 for (let i = 0; i < recs.length; i++) {
   const rec      = recs[i];
@@ -345,6 +346,25 @@ for (let i = 0; i < recs.length; i++) {
     console.log(`Ad group    : ${agName}`);
     console.log(`Dest. tier  : destination tier: ${destTier}`);
     console.log('  skipped (exact keyword already exists in destination ad group)');
+    // TERMINAL skip — condition cannot resolve itself; self-retire the rec.
+    if (executeMode) {
+      await pool.query(
+        `UPDATE recommendations
+            SET status   = 'SKIPPED',
+                evidence = evidence || $1::jsonb
+          WHERE id       = $2
+            AND status   = 'APPROVED'`,
+        [JSON.stringify({
+          skip_reason: 'exact keyword already exists in destination',
+          skipped_at:  new Date().toISOString(),
+          skipped_by:  'push-script',
+        }), rec.id],
+      );
+      console.log(`  retired (terminal skip): rec ${rec.id}`);
+    } else {
+      console.log(`  WOULD retire (terminal skip): rec ${rec.id}`);
+    }
+    retired++;
     console.log('');
     skipped++;
     continue;
@@ -410,7 +430,11 @@ console.log('');
 // ── DRY-RUN EXIT ──────────────────────────────────────────────────────────────
 if (!executeMode) {
   await pool.end();
-  console.log('DRY RUN complete — nothing written to DB, nothing sent to Amazon.');
+  console.log(
+    retired > 0
+      ? `DRY RUN complete — nothing written to DB, nothing sent to Amazon. Would retire: ${retired} terminal skip(s).`
+      : 'DRY RUN complete — nothing written to DB, nothing sent to Amazon.',
+  );
   process.exit(0);
 }
 
@@ -606,6 +630,6 @@ await pool.end();
 
 console.log('─'.repeat(60));
 console.log(
-  `Execute complete: ${pushed} pushed, ${partials} partial (left APPROVED).`,
+  `Execute complete: ${pushed} pushed, ${partials} partial, ${retired} retired.`,
 );
 process.exit(0);
