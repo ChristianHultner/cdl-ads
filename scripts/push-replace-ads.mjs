@@ -303,7 +303,7 @@ for (const rec of recs) {
   pushResult.create_errors = createErrors;
 
   // Detect duplicate: any DUPLICATE_VALUE error on our single-item request = create-satisfied.
-  const iconst isDuplicatePath = !createdIds.length &&
+  const isDuplicatePath = !createdIds.length &&
     JSON.stringify(createData?.productAds?.error ?? []).includes('DUPLICATE_VALUE');
 
   if (isDuplicatePath) {
