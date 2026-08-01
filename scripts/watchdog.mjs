@@ -1,10 +1,12 @@
 // watchdog.mjs — bite 1: freshness, liveness, completion
+//               bite 2: WhatsApp alert on OK→ALERT / ALERT→OK transitions
 // Writes artifacts/watchdog-status.json and upserts watchdog_status row 1.
 import { statSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Pool, neonConfig } from '@neondatabase/serverless';
+import { sendAlert } from './notify.mjs';
 
 neonConfig.webSocketConstructor = WebSocket;
 
@@ -173,11 +175,22 @@ if (details.length > 0) console.log(`[watchdog] details:    ${details.join(' | '
 console.log(`[watchdog] status written → ${STATUS_FILE}`);
 
 // ---------------------------------------------------------------------------
-// Upsert watchdog_status table (row 1)
+// Upsert watchdog_status table (row 1) + bite-2 transition alerts
 // ---------------------------------------------------------------------------
 {
   const pool = new Pool({ connectionString: DATABASE_URL });
   try {
+    // Read previous verdict BEFORE upserting (rate-limit: alert only on transitions)
+    let previousVerdict = null;
+    try {
+      const { rows } = await pool.query(
+        'SELECT verdict FROM watchdog_status WHERE id = 1',
+      );
+      if (rows.length > 0) previousVerdict = rows[0].verdict;
+    } catch (e) {
+      console.error('[watchdog] could not read previous verdict:', e.message);
+    }
+
     await pool.query(`
       INSERT INTO watchdog_status (id, checked_at, verdict, details)
       VALUES (1, $1, $2, $3)
@@ -187,6 +200,23 @@ console.log(`[watchdog] status written → ${STATUS_FILE}`);
         details    = EXCLUDED.details
     `, [now.toISOString(), verdict, JSON.stringify(details)]);
     console.log('[watchdog] watchdog_status row 1 upserted');
+
+    // Bite 2: notify on state transitions only
+    const wasAlert = previousVerdict === 'ALERT';
+    const nowAlert = verdict === 'ALERT';
+
+    if (!wasAlert && nowAlert) {
+      // OK → ALERT (or first-ever ALERT)
+      const msg = `cdl-ads watchdog ALERT: ${details.join(', ')}`;
+      console.log(`[watchdog] transition OK→ALERT — sending WhatsApp alert`);
+      await sendAlert(msg);
+    } else if (wasAlert && !nowAlert) {
+      // ALERT → OK (recovery)
+      console.log(`[watchdog] transition ALERT→OK — sending recovery notice`);
+      await sendAlert('cdl-ads watchdog: recovered — all checks OK');
+    } else {
+      console.log(`[watchdog] no transition (${previousVerdict ?? 'first-run'} → ${verdict}) — no alert sent`);
+    }
   } catch (e) {
     console.error('[watchdog] DB upsert failed:', e.message);
     process.exitCode = 1;
