@@ -482,6 +482,63 @@ if (candidates.length > 0) {
     for (const r of ptAgRows) ptAgNameMap.set(r.ad_group_id, r.name);
   }
 
+  // ── Pre-compute resolved destinations for all PROMOTE_TERM candidates ────────
+  // Needed for the batch already-exact check below; reused inside the write loop
+  // so the tier logic runs only once per candidate.
+  const ptResolvedDestMap = new Map(); // searchTerm → resolvedDestination | null
+  for (const c of ptCandidates) {
+    const tierA = c.placements
+      .filter(p => (ptGroupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1
+                && (ptGroupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+                && !ptAutoCampGroupIds.has(String(p.ad_group_id)))
+      .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+    const tierB = c.placements
+      .filter(p => (ptGroupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1
+                && (ptGroupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
+                && !ptAutoCampGroupIds.has(String(p.ad_group_id)))
+      .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
+    let rd = null;
+    if (tierA.length > 0) {
+      const dest = tierA[0];
+      const agId = String(dest.ad_group_id);
+      rd = { ad_group_id: agId, ad_group_name: ptAgNameMap.get(agId) ?? agId, campaign_id: String(dest.campaign_id), tier: 'exact-kw' };
+    } else if (tierB.length > 0) {
+      const dest = tierB[0];
+      const agId = String(dest.ad_group_id);
+      rd = { ad_group_id: agId, ad_group_name: ptAgNameMap.get(agId) ?? agId, campaign_id: String(dest.campaign_id), tier: 'kw-holding' };
+    }
+    ptResolvedDestMap.set(c.searchTerm, rd);
+  }
+
+  // ── Batch already-exact-in-destination check (PROMOTE_TERM honesty pair, bite 1) ─
+  // One query for all (lower(term), dest_ag_id) pairs — no N queries.
+  // Candidates with a null destination (orphans) are excluded here; they pass
+  // through to CREATE_STRUCTURE unchanged.
+  const ptAlreadyExactSet = new Set(); // key: `${lower(term)}|${dest_ag_id}`
+  {
+    const ptCheckPairs = ptCandidates
+      .map(c => ({ term: c.searchTerm, rd: ptResolvedDestMap.get(c.searchTerm) }))
+      .filter(({ rd }) => rd != null);
+    if (ptCheckPairs.length > 0) {
+      const kwLowerList = ptCheckPairs.map(({ term }) => term.toLowerCase());
+      const destAgList  = [...new Set(ptCheckPairs.map(({ rd }) => rd.ad_group_id))];
+      const { rows: exactRows } = await pool.query(
+        `SELECT lower(keyword_text) AS kw_lower, ad_group_id::text AS ag_id
+           FROM amazon_keywords
+          WHERE profile_id          = $1
+            AND state               = 'ENABLED'
+            AND match_type          = 'EXACT'
+            AND lower(keyword_text) = ANY($2)
+            AND ad_group_id::text   = ANY($3)`,
+        [profileId, kwLowerList, destAgList],
+      );
+      for (const row of exactRows) {
+        ptAlreadyExactSet.add(`${row.kw_lower}|${row.ag_id}`);
+      }
+    }
+    console.log(`PROMOTE_TERM destination-exact check: ${ptCheckPairs.length} candidate(s) with destination, ${ptAlreadyExactSet.size} already exact.`);
+  }
+
   for (const c of candidates) {
     const spendFmt = `${currSym}${c.spend.toFixed(2)}`;
     const win      = `${windowStart} – ${windowEnd}`;
@@ -490,6 +547,19 @@ if (candidates.length > 0) {
     if (c.recType === 'PROMOTE_ASIN' && alreadyTargetedAsinSet.has(c.searchTerm.toUpperCase())) {
       console.log(`  skipped (already targeted): [PROMOTE_ASIN] ${c.searchTerm.toUpperCase()}`);
       continue;
+    }
+
+    // ── Already-exact-in-destination skip (PROMOTE_TERM honesty pair, bite 1) ───
+    // The batch check ran above; skip any candidate whose term is already live as
+    // an ENABLED EXACT keyword in its resolved destination group. Null-destination
+    // orphans are not in ptAlreadyExactSet and are unaffected — they flow to
+    // CREATE_STRUCTURE as before.
+    if (c.recType === 'PROMOTE_TERM') {
+      const _rd = ptResolvedDestMap.get(c.searchTerm);
+      if (_rd != null && ptAlreadyExactSet.has(`${c.searchTerm.toLowerCase()}|${_rd.ad_group_id}`)) {
+        console.log(`  skipped (already exact in destination): [PROMOTE_TERM] ${c.searchTerm} → ${_rd.ad_group_name}`);
+        continue;
+      }
     }
 
     // All PROMOTE_ASIN candidates are now UNHARVESTED — BID_ADJUST comes from bidEntities (v6).
@@ -562,43 +632,11 @@ if (candidates.length > 0) {
         c.placements[0],
       );
 
-      // ── Generation-time destination resolution (mirrors push-keywords.mjs tier predicate) ──
-      // Tier-a: non-AUTO campaign, no AUTO target, exactKws >= 1, highest spend wins.
-      // Tier-b: non-AUTO campaign, no AUTO target, anyKws   >= 1, highest spend wins.
+      // ── Generation-time destination resolution (pre-computed above; mirrors push-keywords.mjs tier predicate) ──
       // HONESTY NOTE: push-time resolution remains authoritative; if structure changed
       // between generation and push, the push script's choice wins — the panel is the
       // generation-time prediction.
-      const ptTierA = c.placements
-        .filter(p => (ptGroupKwMap.get(String(p.ad_group_id))?.exactKws ?? 0) >= 1
-                  && (ptGroupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
-                  && !ptAutoCampGroupIds.has(String(p.ad_group_id)))
-        .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
-      const ptTierB = c.placements
-        .filter(p => (ptGroupKwMap.get(String(p.ad_group_id))?.anyKws   ?? 0) >= 1
-                  && (ptGroupKwMap.get(String(p.ad_group_id))?.hasAuto  ?? 0) === 0
-                  && !ptAutoCampGroupIds.has(String(p.ad_group_id)))
-        .sort((a, b) => (b.spend ?? 0) - (a.spend ?? 0));
-
-      let resolvedDestination = null;
-      if (ptTierA.length > 0) {
-        const dest = ptTierA[0];
-        const agId = String(dest.ad_group_id);
-        resolvedDestination = {
-          ad_group_id:   agId,
-          ad_group_name: ptAgNameMap.get(agId) ?? agId,
-          campaign_id:   String(dest.campaign_id),
-          tier:          'exact-kw',
-        };
-      } else if (ptTierB.length > 0) {
-        const dest = ptTierB[0];
-        const agId = String(dest.ad_group_id);
-        resolvedDestination = {
-          ad_group_id:   agId,
-          ad_group_name: ptAgNameMap.get(agId) ?? agId,
-          campaign_id:   String(dest.campaign_id),
-          tier:          'kw-holding',
-        };
-      }
+      const resolvedDestination = ptResolvedDestMap.get(c.searchTerm) ?? null;
 
       evidence = {
         window_start:         windowStart,
