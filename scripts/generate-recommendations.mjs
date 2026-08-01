@@ -2,6 +2,7 @@
 // Usage: node --env-file=.env.local scripts/generate-recommendations.mjs --profile <id>
 import { parseArgs } from 'node:util';
 import { Pool, neonConfig } from '@neondatabase/serverless';
+import { isbn13ToIsbn10 } from './lib/isbn.mjs';
 
 // Node 22+ native WebSocket
 neonConfig.webSocketConstructor = WebSocket;
@@ -337,7 +338,7 @@ for (const row of termRows) {
 let written         = 0;
 let skippedExisting = 0;
 let skippedRejected = 0;
-const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0, BUDGET_ADJUST: 0, PAUSE_CAMPAIGN: 0 };
+const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0, BUDGET_ADJUST: 0, PAUSE_CAMPAIGN: 0, REPLACE_PRODUCT_AD: 0 };
 
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
@@ -1786,6 +1787,95 @@ for (const row of dormantCandRows) {
   console.log(`  [DORMANT-PAUSE] '${row.name}': ${impr.toLocaleString('en')} impr, ${currSym}${row.lifetime_spend.toFixed(2)} lifetime spend`);
 }
 console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
+// ── 8. REPLACE_PRODUCT_AD PHASE ─────────────────────────────────────────────
+// For each ENABLED amazon_product_ads row whose asin has a CONFIRMED
+// b0_hc_candidates pair: emit one REPLACE_PRODUCT_AD rec per ad row.
+// target_text = the ad's adId (string).
+// Idempotent: skip if an open REPLACE_PRODUCT_AD rec exists for the same ad_id.
+console.log('\n── Phase 8: REPLACE_PRODUCT_AD ──────────────────────────────────────────');
+
+const { rows: replaceAdRows } = await pool.query(
+  `SELECT
+       pa.ad_id,
+       pa.asin                     AS b0_asin,
+       pa.campaign_id,
+       pa.ad_group_id,
+       hc.amazon_title,
+       hc.hc_isbn13,
+       hc.hc_title,
+       c.name                      AS campaign_name
+     FROM amazon_product_ads pa
+     JOIN b0_hc_candidates hc
+       ON hc.b0_asin  = pa.asin
+      AND hc.status   = 'CONFIRMED'
+     LEFT JOIN amazon_campaigns c
+       ON c.campaign_id = pa.campaign_id
+      AND c.profile_id  = pa.profile_id
+    WHERE pa.profile_id = $1
+      AND pa.state      = 'ENABLED'`,
+  [profileId],
+);
+console.log(`  ${replaceAdRows.length} ENABLED product ad(s) with CONFIRMED HC pair.`);
+
+// Idempotency: fetch all open REPLACE_PRODUCT_AD recs for this profile once.
+const { rows: openReplaceRows } = await pool.query(
+  `SELECT target_text
+     FROM recommendations
+    WHERE profile_id = $1
+      AND rec_type   = 'REPLACE_PRODUCT_AD'
+      AND status     = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+);
+const openReplaceSet = new Set(openReplaceRows.map((r) => r.target_text));
+console.log(`  Open REPLACE_PRODUCT_AD recs (idempotency): ${openReplaceSet.size}`);
+
+for (const row of replaceAdRows) {
+  const adId      = row.ad_id;
+  const b0Asin    = row.b0_asin;
+  const hcIsbn13  = row.hc_isbn13;
+  const hcIsbn10  = isbn13ToIsbn10(hcIsbn13);
+  const hcTitle   = row.hc_title;
+  const campName  = row.campaign_name ?? row.campaign_id;
+  const kindleTitle = row.amazon_title ?? b0Asin;
+
+  if (!hcIsbn10) {
+    console.log(`  skipped (isbn13ToIsbn10 null for ${hcIsbn13}): ad_id ${adId}`);
+    continue;
+  }
+
+  // Idempotency: skip when open rec already exists for this ad_id.
+  if (openReplaceSet.has(adId)) {
+    console.log(`  skipped (open rec exists): [REPLACE_PRODUCT_AD] ad_id ${adId}`);
+    skippedExisting++;
+    continue;
+  }
+
+  const proposal =
+    `Replace Kindle ad '${kindleTitle}' with HC '${hcTitle}' (${hcIsbn10}) in ${campName}.`;
+
+  const evidence = {
+    kind:        'REPLACE',
+    b0_asin:     b0Asin,
+    hc_isbn10:   hcIsbn10,
+    hc_isbn13:   hcIsbn13,
+    hc_title:    hcTitle,
+    campaign_id: row.campaign_id,
+    ad_group_id: row.ad_group_id,
+    ad_id:       adId,
+  };
+
+  await pool.query(
+    `INSERT INTO recommendations
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    ['REPLACE_PRODUCT_AD', profileId, row.campaign_id, adId, proposal, JSON.stringify(evidence)],
+  );
+  countsByType['REPLACE_PRODUCT_AD']++;
+  written++;
+  console.log(`  [REPLACE_PRODUCT_AD] Kindle ad ${adId} (${b0Asin}) → HC ${hcIsbn10} in '${campName}'`);
+}
+console.log('─'.repeat(70));
 
 await pool.end();
 
