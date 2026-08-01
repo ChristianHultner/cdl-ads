@@ -1,5 +1,6 @@
 // watchdog.mjs — bite 1: freshness, liveness, completion
 //               bite 2: WhatsApp alert on OK→ALERT / ALERT→OK transitions
+//               bite 3: ALERT→ALERT re-escalation + self-heartbeat
 // Writes artifacts/watchdog-status.json and upserts watchdog_status row 1.
 import { statSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -10,11 +11,12 @@ import { sendAlert } from './notify.mjs';
 
 neonConfig.webSocketConstructor = WebSocket;
 
-const __dirname  = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT  = join(__dirname, '..');
-const ARTIFACTS  = join(REPO_ROOT, 'artifacts');
-const LOG_FILE   = join(ARTIFACTS, 'cron-nightly.log');
-const STATUS_FILE = join(ARTIFACTS, 'watchdog-status.json');
+const __dirname       = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT       = join(__dirname, '..');
+const ARTIFACTS       = join(REPO_ROOT, 'artifacts');
+const LOG_FILE        = join(ARTIFACTS, 'cron-nightly.log');
+const STATUS_FILE     = join(ARTIFACTS, 'watchdog-status.json');
+const HEARTBEAT_FILE  = join(ARTIFACTS, 'watchdog-heartbeat');
 
 const { DATABASE_URL } = process.env;
 if (!DATABASE_URL) throw new Error('DATABASE_URL is not set');
@@ -165,57 +167,136 @@ let   verdict = 'OK';
 }
 
 // ---------------------------------------------------------------------------
-// Write status JSON
+// Write status JSON + self-heartbeat (always — even if DB fails later)
 // ---------------------------------------------------------------------------
 const status = { checked_at: now.toISOString(), checks, verdict, details };
 writeFileSync(STATUS_FILE, JSON.stringify(status, null, 2) + '\n');
+// Self-heartbeat: mtime = proof the watchdog ran this cycle.
+writeFileSync(HEARTBEAT_FILE, '');
 console.log(`[watchdog] checked_at: ${now.toISOString()}`);
 console.log(`[watchdog] verdict:    ${verdict}`);
 if (details.length > 0) console.log(`[watchdog] details:    ${details.join(' | ')}`);
-console.log(`[watchdog] status written → ${STATUS_FILE}`);
+console.log(`[watchdog] status written    → ${STATUS_FILE}`);
+console.log(`[watchdog] heartbeat touched → ${HEARTBEAT_FILE}`);
 
 // ---------------------------------------------------------------------------
-// Upsert watchdog_status table (row 1) + bite-2 transition alerts
+// Upsert watchdog_status table (row 1) + bite-3 escalation alerts
+//
+// Alert fires when ANY of:
+//   (a) OK→ALERT transition (or first-ever ALERT)
+//   (b) verdict stays ALERT and last_alert_sent_at > 6 hours ago
+//   (c) details CHANGED vs last_details while already ALERT (new/different problem)
+// Recovery ping (ALERT→OK) unchanged.
 // ---------------------------------------------------------------------------
 {
   const pool = new Pool({ connectionString: DATABASE_URL });
   try {
-    // Read previous verdict BEFORE upserting (rate-limit: alert only on transitions)
-    let previousVerdict = null;
+    // Read previous state BEFORE upserting
+    let previousVerdict   = null;
+    let lastAlertSentAt   = null;   // Date | null
+    let lastDetailsFromDb = null;   // array | null
+
     try {
       const { rows } = await pool.query(
-        'SELECT verdict FROM watchdog_status WHERE id = 1',
+        'SELECT verdict, last_alert_sent_at, last_details FROM watchdog_status WHERE id = 1',
       );
-      if (rows.length > 0) previousVerdict = rows[0].verdict;
+      if (rows.length > 0) {
+        previousVerdict   = rows[0].verdict;
+        lastAlertSentAt   = rows[0].last_alert_sent_at;   // already a JS Date from pg
+        lastDetailsFromDb = rows[0].last_details;
+      }
     } catch (e) {
-      console.error('[watchdog] could not read previous verdict:', e.message);
+      console.error('[watchdog] could not read previous state:', e.message);
     }
 
-    await pool.query(`
-      INSERT INTO watchdog_status (id, checked_at, verdict, details)
-      VALUES (1, $1, $2, $3)
-      ON CONFLICT (id) DO UPDATE SET
-        checked_at = EXCLUDED.checked_at,
-        verdict    = EXCLUDED.verdict,
-        details    = EXCLUDED.details
-    `, [now.toISOString(), verdict, JSON.stringify(details)]);
-    console.log('[watchdog] watchdog_status row 1 upserted');
-
-    // Bite 2: notify on state transitions only
     const wasAlert = previousVerdict === 'ALERT';
     const nowAlert = verdict === 'ALERT';
 
+    // -------------------------------------------------------------------------
+    // Escalation decision
+    // -------------------------------------------------------------------------
+    let shouldAlert = false;
+    let alertReason = '';
+
     if (!wasAlert && nowAlert) {
-      // OK → ALERT (or first-ever ALERT)
-      const msg = `cdl-ads watchdog ALERT: ${details.join(', ')}`;
-      console.log(`[watchdog] transition OK→ALERT — sending WhatsApp alert`);
+      // (a) OK→ALERT (or first-ever ALERT with no previous row)
+      shouldAlert = true;
+      alertReason = 'OK→ALERT transition';
+    } else if (wasAlert && nowAlert) {
+      // Persistent ALERT — check (b) and (c)
+      const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+      const alertAgeMs   = lastAlertSentAt
+        ? now.getTime() - new Date(lastAlertSentAt).getTime()
+        : Infinity;
+
+      if (alertAgeMs > SIX_HOURS_MS) {
+        // (b) no ping in over 6 hours
+        shouldAlert = true;
+        const ageStr = isFinite(alertAgeMs)
+          ? `${Math.floor(alertAgeMs / 3_600_000)}h ago`
+          : 'never alerted';
+        alertReason = `ALERT persists — last alert ${ageStr}`;
+      } else {
+        // (c) problem changed while already red
+        const prevJson = JSON.stringify(lastDetailsFromDb ?? []);
+        const currJson = JSON.stringify(details);
+        if (prevJson !== currJson) {
+          shouldAlert = true;
+          alertReason = 'problem changed while already ALERT';
+        }
+      }
+    }
+
+    const isRecovery = wasAlert && !nowAlert;
+
+    // -------------------------------------------------------------------------
+    // Compute columns to persist
+    //   last_alert_sent_at — update whenever any alert fires (ALERT or recovery)
+    //   last_details       — update only on ALERT sends (baseline for condition-c)
+    // -------------------------------------------------------------------------
+    const newLastAlertSentAt = (shouldAlert || isRecovery)
+      ? now.toISOString()
+      : (lastAlertSentAt ? new Date(lastAlertSentAt).toISOString() : null);
+
+    const newLastDetails = shouldAlert
+      ? details
+      : (lastDetailsFromDb ?? null);
+
+    await pool.query(`
+      INSERT INTO watchdog_status (id, checked_at, verdict, details, last_alert_sent_at, last_details)
+      VALUES (1, $1, $2, $3, $4, $5)
+      ON CONFLICT (id) DO UPDATE SET
+        checked_at         = EXCLUDED.checked_at,
+        verdict            = EXCLUDED.verdict,
+        details            = EXCLUDED.details,
+        last_alert_sent_at = EXCLUDED.last_alert_sent_at,
+        last_details       = EXCLUDED.last_details
+    `, [
+      now.toISOString(),
+      verdict,
+      JSON.stringify(details),
+      newLastAlertSentAt,
+      JSON.stringify(newLastDetails ?? []),
+    ]);
+    console.log('[watchdog] watchdog_status row 1 upserted');
+
+    // -------------------------------------------------------------------------
+    // Send alerts
+    // -------------------------------------------------------------------------
+    if (shouldAlert) {
+      const msg = `cdl-ads watchdog ALERT (${alertReason}): ${details.join(', ')}`;
+      console.log(`[watchdog] sending alert — ${alertReason}`);
       await sendAlert(msg);
-    } else if (wasAlert && !nowAlert) {
-      // ALERT → OK (recovery)
-      console.log(`[watchdog] transition ALERT→OK — sending recovery notice`);
+    } else if (isRecovery) {
+      console.log('[watchdog] transition ALERT→OK — sending recovery notice');
       await sendAlert('cdl-ads watchdog: recovered — all checks OK');
     } else {
-      console.log(`[watchdog] no transition (${previousVerdict ?? 'first-run'} → ${verdict}) — no alert sent`);
+      const ageNote = (wasAlert && nowAlert && lastAlertSentAt)
+        ? ` (last alert ${Math.floor((now.getTime() - new Date(lastAlertSentAt).getTime()) / 3_600_000)}h ago)`
+        : '';
+      console.log(
+        `[watchdog] no alert — ${previousVerdict ?? 'first-run'} → ${verdict}${ageNote}`,
+      );
     }
   } catch (e) {
     console.error('[watchdog] DB upsert failed:', e.message);
