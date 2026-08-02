@@ -36,10 +36,14 @@ const ARTIFACTS_DIR = join(__dirname, '..', 'artifacts');
 // ── Args ─────────────────────────────────────────────────────────────────────
 const { values: cliValues } = parseArgs({
   args:    process.argv.slice(2),
-  options: { all: { type: 'boolean', default: false } },
+  options: {
+    all:   { type: 'boolean', default: false },
+    delay: { type: 'string',  default: '5'   },
+  },
   strict:  false,
 });
 const ALL_MODE = cliValues.all === true;
+const delayMs  = Math.max(0, Number(cliValues.delay ?? 5) || 5) * 1000;
 
 // ── Head list (default mode) ─────────────────────────────────────────────────
 const HEAD_ASINS = [
@@ -98,7 +102,6 @@ function acceptLang(domain) {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const UA         = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-const DELAY_MS   = 5000;
 const SUFFIX_RE  = /\s*[\-\u2013\u2014|:,]\s*(versi[oó]n kindle|ebook kindle|kindle edition|edici[oó]n kindle|ebook|kindle)\s*$/i;
 const BRACKET_RE = /\s*[\(\[（【][^\)\]）】]*[\)\]）】]\s*$/;
 
@@ -182,7 +185,7 @@ async function main() {
       const result = await fetchOne(asin, 'amazon.es');
       console.log(`  → status=${result.status} title=${JSON.stringify(result.title)}`);
       results.push(result);
-      if (i < HEAD_ASINS.length - 1) await sleep(DELAY_MS);
+      if (i < HEAD_ASINS.length - 1) await sleep(delayMs);
     }
     const out = join(ARTIFACTS_DIR, 'b0-titles-head.json');
     await writeFile(out, JSON.stringify(results, null, 2), 'utf8');
@@ -241,32 +244,37 @@ async function main() {
 
   // Load existing tail file for resumability
   const outPath = join(ARTIFACTS_DIR, 'b0-titles-tail.json');
-  let results = [];
+  let existingResults = [];
   try {
-    results = JSON.parse(await readFile(outPath, 'utf8'));
-    console.log(`Loaded ${results.length} existing entries (resuming)`);
+    existingResults = JSON.parse(await readFile(outPath, 'utf8'));
+    console.log(`Loaded ${existingResults.length} existing entries (resuming)`);
   } catch {
     console.log('Starting fresh tail file.');
   }
-  const doneSet = new Set(results.map(r => r.asin));
+  // Resume: skip ONLY entries with a non-null title.
+  // Entries with title=null (captcha/failed/404/error) are retried on re-run
+  // and their existing json entries are overwritten by the new attempt.
+  const resultsMap = new Map(existingResults.map(r => [r.asin, r]));
+  const doneSet    = new Set(existingResults.filter(r => r.title != null).map(r => r.asin));
 
   const toFetch = asinDomains.filter(({ asin }) => !doneSet.has(asin));
-  console.log(`To fetch: ${toFetch.length}  (skipping ${doneSet.size} already done)\n`);
+  console.log(`To fetch: ${toFetch.length}  (skipping ${doneSet.size} with confirmed title)\n`);
 
   for (let i = 0; i < toFetch.length; i++) {
     const { asin, domain } = toFetch[i];
     console.log(`[${i + 1}/${toFetch.length}] ${asin} (${domain}) …`);
     const result = await fetchOne(asin, domain);
     console.log(`  → status=${result.status} title=${JSON.stringify(result.title)}`);
-    results.push(result);
+    resultsMap.set(asin, result);  // upsert — overwrites null-title entry if present
     // Write after every entry — safe resume point if killed
-    await writeFile(outPath, JSON.stringify(results, null, 2), 'utf8');
-    if (i < toFetch.length - 1) await sleep(DELAY_MS);
+    await writeFile(outPath, JSON.stringify([...resultsMap.values()], null, 2), 'utf8');
+    if (i < toFetch.length - 1) await sleep(delayMs);
   }
 
-  const ok   = results.filter(r => r.status === 'ok' && r.title).length;
-  const fail = results.filter(r => r.status !== 'ok' || !r.title).length;
-  console.log(`\nWrote ${results.length} total entries → ${outPath}`);
+  const allResults = [...resultsMap.values()];
+  const ok   = allResults.filter(r => r.status === 'ok' && r.title).length;
+  const fail = allResults.filter(r => r.status !== 'ok' || !r.title).length;
+  console.log(`\nWrote ${allResults.length} total entries → ${outPath}`);
   console.log(`ok=${ok}  failed/no-title=${fail}`);
 }
 
