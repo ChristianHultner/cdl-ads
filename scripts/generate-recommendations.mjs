@@ -65,9 +65,9 @@ const windowEnd   = toISO(windowEndMs);
 
 console.log(JSON.stringify({ window_start: windowStart, window_end: windowEnd }));
 
-// ── Fetch profile (currency) ──────────────────────────────────────────────────
+// ── Fetch profile (currency + target_acos) ──────────────────────────────────
 const { rows: profileRows } = await pool.query(
-  `SELECT currency_code, country_code FROM amazon_profiles WHERE profile_id = $1`,
+  `SELECT currency_code, country_code, target_acos FROM amazon_profiles WHERE profile_id = $1`,
   [profileId],
 );
 if (!profileRows.length) {
@@ -76,6 +76,8 @@ if (!profileRows.length) {
 }
 const currencyCode = profileRows[0].currency_code;
 const countryCode  = profileRows[0].country_code ?? 'US';
+// Override target_acos from the profile row (seeded at 0.30; editable by Christian in the DB).
+params.target_acos = Number(profileRows[0].target_acos);
 const CURRENCY_SYMBOL = { EUR: '€', USD: '$', GBP: '£', CAD: 'CA$', MXN: 'MX$' };
 const currSym = CURRENCY_SYMBOL[currencyCode] ?? `${currencyCode}\u202f`;
 
@@ -953,6 +955,7 @@ for (const entity of bidEligible) {
     orders:            entity.orders,
     sales:             entity.sales,
     acos:              entity.acos,
+    target_acos:       params.target_acos,
     performance_basis: entity.performance_basis,
     params_used:       params,
     bound_by:          boundBy,
@@ -1407,6 +1410,7 @@ for (const row of budgetCampRows) {
     acos_30d:        acos30d,
     orders_30d:      orders30d,
     sales_30d:       row.sales_30d,
+    target_acos:     params.target_acos,
   };
 
   await pool.query(
@@ -1493,6 +1497,7 @@ for (const row of pauseCandRows) {
     sales_30d:     sales30d,
     acos_30d:      acos30d,
     budget_amount: row.budget_amount,
+    target_acos:   params.target_acos,
   };
 
   await pool.query(
@@ -1516,7 +1521,7 @@ console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
 // Criteria: state='ENABLED', spend_30d < 2, lifetime sales > 0 OR orders > 0,
 //   >= 1 ENABLED target/keyword, max enabled bid < viability_floor.
 // viability_floor = median bid of ENABLED targets+keywords belonging to
-//   campaigns with spend_30d >= 10; fallback 0.30.
+//   campaigns with spend_30d >= 10; fallback = params.target_acos.
 // rec_type = 'BID_ADJUST', evidence.kind = 'REVIVE', target_text = campaign_id.
 console.log('\n\u2500\u2500 Phase 7c: REVIVE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
 
@@ -1554,7 +1559,7 @@ const { rows: floorRows } = await pool.query(
 const _floorRow      = floorRows[0];
 const viabilityFloor = (_floorRow && Number(_floorRow.n_bids) > 0 && _floorRow.median_bid != null)
   ? Math.round(Number(_floorRow.median_bid) * 100) / 100
-  : 0.30;
+  : params.target_acos;
 console.log(`  viability_floor: ${currSym}${viabilityFloor.toFixed(2)} (from ${_floorRow?.n_bids ?? 0} ENABLED bid(s) in active campaigns)`);
 
 // Step 2: candidate campaigns.

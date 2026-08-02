@@ -6,6 +6,7 @@ interface MarketRow {
   profile_id: string
   country_code: string
   currency_code: string
+  target_acos: string
   spend_30d: string
   sales_30d: string
   acos: string | null
@@ -75,13 +76,14 @@ export default async function CampaignsPage({
           ap.profile_id::text,
           ap.country_code,
           ap.currency_code,
+          ap.target_acos::text,
           sum(acd.cost)::text                                     AS spend_30d,
           sum(acd.sales_14d)::text                                AS sales_30d,
           (sum(acd.cost) / nullif(sum(acd.sales_14d), 0))::text  AS acos
         FROM amazon_campaign_daily acd
         JOIN amazon_profiles ap USING (profile_id)
         WHERE acd.date >= CURRENT_DATE - INTERVAL '30 days'
-        GROUP BY ap.profile_id, ap.country_code, ap.currency_code
+        GROUP BY ap.profile_id, ap.country_code, ap.currency_code, ap.target_acos
         HAVING sum(acd.cost) > 0
         ORDER BY sum(acd.cost) DESC
       `,
@@ -181,12 +183,9 @@ export default async function CampaignsPage({
   const recMap   = new Map(
     draftRecs.map(r => [`${r.profile_id}:${r.resolved_campaign_id}`, parseInt(r.rec_count, 10)])
   )
-  const acosMap      = new Map(acosParams.map(p => [p.scope, parseFloat(p.value)]))
-  const globalTarget = acosMap.get('GLOBAL') ?? 0.30
-
-  function resolveTarget(pid: string): number {
-    return acosMap.get(pid) ?? globalTarget
-  }
+  // target_acos now read directly from amazon_profiles column (per-profile, seeded at 0.30).
+  // acosMap retained for other parameter reads if needed.
+  const acosMap = new Map(acosParams.map(p => [p.scope, parseFloat(p.value)]))
 
   const filterLabel =
     stateFilter === 'enabled' ? 'Enabled'
@@ -216,7 +215,7 @@ export default async function CampaignsPage({
 
       {/* ── One section per active market ── */}
       {markets.map(m => {
-        const target     = resolveTarget(m.profile_id)
+        const target     = parseFloat(m.target_acos)
         const camps      = applyFilter(campsByProfile.get(m.profile_id) ?? [])
         const totalCamps = countMap.get(m.profile_id) ?? '0'
 
