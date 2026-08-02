@@ -153,17 +153,19 @@ async function collectBidEntities(bidPool, bidProfileId, bTermMap) {
     [bidProfileId],
   );
 
-  // KEYWORD: ENABLED EXACT amazon_keywords
+  // KEYWORD: ENABLED keywords of ALL match types (EXACT/PHRASE/BROAD) — v6.1
+  // Safety: PHRASE/BROAD bid changes affect whole query families — the per-step
+  // caps (raise_max_step / cut_max_step) are the guard; no additional mechanism needed.
   const { rows: kRows } = await bidPool.query(
     `SELECT keyword_id::text  AS entity_id,
             ad_group_id::text,
             campaign_id::text,
             bid,
-            keyword_text
+            keyword_text,
+            match_type
        FROM amazon_keywords
       WHERE profile_id  = $1
-        AND state       = 'ENABLED'
-        AND match_type  = 'EXACT'`,
+        AND state       = 'ENABLED'`,
     [bidProfileId],
   );
 
@@ -235,6 +237,7 @@ async function collectBidEntities(bidPool, bidProfileId, bTermMap) {
       campaign_id:       row.campaign_id,
       current_bid:       row.bid != null ? Number(row.bid) : null,
       keyword_text:      row.keyword_text,
+      match_type:        row.match_type,   // EXACT | PHRASE | BROAD
       spend, clicks, orders, sales,
       acos:              sales > 0 ? spend / sales : null,
       performance_basis: 'term-in-group',
@@ -765,7 +768,8 @@ function bidKindPhrase(entity, agName) {
     return `target '${entity.resolved_asin}' in '${grp}'`;
   }
   if (entity.entity_kind === 'KEYWORD') {
-    return `keyword '${entity.keyword_text}' in '${grp}'`;
+    const mtTag = entity.match_type ? ` [${entity.match_type}]` : '';
+    return `keyword '${entity.keyword_text}'${mtTag} in '${grp}'`;
   }
   // AUTO_STRATEGY — map from expression JSON
   const exprArr   = Array.isArray(entity.expression) ? entity.expression : [];
@@ -952,6 +956,7 @@ for (const entity of bidEligible) {
     performance_basis: entity.performance_basis,
     params_used:       params,
     bound_by:          boundBy,
+    ...(entity.match_type ? { match_type: entity.match_type } : {}),
     ...(amzRec ? {
       amazon_suggested:   amzRec.amazon_suggested,
       amazon_range_start: amzRec.amazon_range_start,
