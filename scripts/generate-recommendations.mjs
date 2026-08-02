@@ -303,7 +303,9 @@ for (const row of termRows) {
   let recType = null;
 
   if (orders === 0 && spend >= negate_min_spend && clicks >= negate_min_clicks) {
-    recType = 'NEGATE_TERM';
+    // ASIN-shaped terms need a campaign-level negative product target, not a keyword negation.
+    // Keyword negation cannot block product-targeting traffic (learned lesson from t7 cohort).
+    recType = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
   } else if (
     !ASIN_SHAPE.test(row.search_term) &&
     orders >= harvest_min_orders &&
@@ -338,7 +340,7 @@ for (const row of termRows) {
 let written         = 0;
 let skippedExisting = 0;
 let skippedRejected = 0;
-const countsByType  = { NEGATE_TERM: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0, BUDGET_ADJUST: 0, PAUSE_CAMPAIGN: 0, REPLACE_PRODUCT_AD: 0 };
+const countsByType  = { NEGATE_TERM: 0, NEGATE_TARGET: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0, BUDGET_ADJUST: 0, PAUSE_CAMPAIGN: 0, REPLACE_PRODUCT_AD: 0 };
 
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
@@ -615,6 +617,28 @@ if (candidates.length > 0) {
         primary_placement: primaryPlacement,
         params_used:       params,
       };
+    } else if (finalRecType === 'NEGATE_TARGET') {
+      // ASIN-shaped term: keyword negation cannot block product-targeting traffic.
+      // Must be pushed as a campaign-level negative product target (push-negative-targets.mjs).
+      proposal =
+        `Negative product target for ${c.searchTerm.toUpperCase()} — ` +
+        `keyword negation cannot block product-targeting traffic.`;
+      const primaryPlacement = c.placements.reduce(
+        (max, p) => (p.spend > max.spend ? p : max),
+        c.placements[0],
+      );
+      evidence = {
+        window_start:      windowStart,
+        window_end:        windowEnd,
+        spend:             c.spend,
+        clicks:            c.clicks,
+        orders:            c.orders,
+        sales:             c.sales,
+        acos:              c.acos,
+        placements:        c.placements,
+        primary_placement: primaryPlacement,
+        params_used:       params,
+      };
     } else if (finalRecType === 'PROMOTE_TERM') {
       // Unchanged from v4. v5.1: compute observed_cpc/proposed_bid and add to evidence when clicks > 0.
       if (c.clicks > 0) {
@@ -696,6 +720,26 @@ if (candidates.length > 0) {
   }
 } else {
   console.log('No candidates found — nothing to write.');
+}
+
+// ── Retro sweep: PUSHED NEGATE_TERM with ASIN-shaped target (leak cohort) ────────
+// Print only — no auto-action. Christian decides whether to remediate as NEGATE_TARGET.
+{
+  const { rows: leakedRecs } = await pool.query(
+    `SELECT target_text
+       FROM recommendations
+      WHERE profile_id = $1
+        AND rec_type   = 'NEGATE_TERM'
+        AND status     = 'PUSHED'`,
+    [profileId],
+  );
+  for (const row of leakedRecs) {
+    if (ASIN_SHAPE.test(row.target_text)) {
+      console.log(
+        `info: consider NEGATE_TARGET for previously keyword-negated ASIN ${row.target_text}`,
+      );
+    }
+  }
 }
 
 

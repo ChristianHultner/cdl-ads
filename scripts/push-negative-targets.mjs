@@ -13,9 +13,10 @@
 //   that is a FINDING to report back to Christian — do NOT improvise
 //   a workaround; stop the run and surface the raw response.
 //
-// ELIGIBILITY: ISBN-10/ASIN shape only (/^[0-9]{9}[0-9xX]$/).
-//   Query-term recs are skipped here (handled by push-negatives.mjs).
-//   ASINs are uppercased in the expression value (e.g. 846960564x → 846960564X).
+// ELIGIBILITY: ISBN-10 shape (/^[0-9]{9}[0-9xX]$/) or B0-ASIN shape (/^b0[a-z0-9]{8}$/i).
+//   Matches the ASIN_SHAPE classification in generate-recommendations.mjs.
+//   All NEGATE_TARGET recs should already be ASIN-shaped; the filter here is a safety guard.
+//   ASINs are uppercased in the expression value (e.g. b0abc12345 → B0ABC12345).
 
 import { parseArgs } from 'node:util';
 import { Pool, neonConfig } from '@neondatabase/serverless';
@@ -109,7 +110,7 @@ const { rows: recs } = await pool.query(
      FROM recommendations
     WHERE profile_id = $1
       AND status     = 'APPROVED'
-      AND rec_type   = 'NEGATE_TERM'
+      AND rec_type   = 'NEGATE_TARGET'
     ORDER BY id
     LIMIT $2`,
   [profileId, limit],
@@ -122,7 +123,7 @@ if (recs.length === 0) {
 }
 
 console.log(
-  `Found ${recs.length} approved NEGATE_TERM recommendation(s)` +
+  `Found ${recs.length} approved NEGATE_TARGET recommendation(s)` +
   ` (limit: ${limit}, region: ${region})`,
 );
 console.log('');
@@ -134,9 +135,9 @@ console.log('               target_text uppercased for ASIN expression value.');
 console.log('');
 
 // ── ELIGIBILITY FILTER + PLAN ─────────────────────────────────────────────────
-// Eligible: ISBN-10/ASIN shape only — /^[0-9]{9}[0-9xX]$/
-// Skipped:  query-term recs (handled by push-negatives.mjs)
-const ISBN10_RE = /^[0-9]{9}[0-9xX]$/;
+// Eligible: ISBN-10 or B0-ASIN shape — matches generate-recommendations.mjs ASIN_SHAPE.
+// NEGATE_TARGET recs are always ASIN-shaped by classification; this is a safety guard.
+const ASIN_SHAPE = /^([0-9]{9}[0-9xX]|b0[a-z0-9]{8})$/i;
 
 const eligible = [];  // { rec, requestBody }
 let skipped    = 0;
@@ -155,9 +156,9 @@ for (const rec of recs) {
   console.log(`Rec id     : ${rec.id}`);
   console.log(`Term       : "${rec.target_text}"`);
 
-  // Skip non-ASIN terms — those belong to push-negatives.mjs
-  if (!ISBN10_RE.test(rec.target_text)) {
-    console.log('  skipped (keyword term — handled by push-negatives)');
+  // Safety guard: all NEGATE_TARGET recs should be ASIN-shaped by classification.
+  if (!ASIN_SHAPE.test(rec.target_text)) {
+    console.log('  skipped (unexpected non-ASIN shape in NEGATE_TARGET — classification error)');
     console.log('');
     skipped++;
     continue;
@@ -208,7 +209,7 @@ for (const rec of recs) {
 // ── PLAN TOTALS ───────────────────────────────────────────────────────────────
 console.log('─'.repeat(60));
 console.log(
-  `Totals: ${recs.length} fetched, ${skipped} skipped (keyword terms),` +
+  `Totals: ${recs.length} fetched, ${skipped} skipped (unexpected non-ASIN shape),` +
   ` ${eligible.length} eligible → ${eligible.length} planned API call(s)`,
 );
 console.log('');

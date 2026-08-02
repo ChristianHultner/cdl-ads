@@ -169,6 +169,38 @@ let   verdict = 'OK';
 }
 
 // ---------------------------------------------------------------------------
+// B0_EXTINCTION (policy 2026-08-01, HC only)
+// Ensures Kindle B0 ASINs purged in the 315-REPLACE wave never re-enter ENABLED state.
+// ---------------------------------------------------------------------------
+{
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n
+         FROM amazon_product_ads
+        WHERE asin ~* '^B0'
+          AND state = 'ENABLED'`,
+    );
+    const n = rows[0].n;
+    if (n > 0) {
+      checks.b0_extinction = {
+        status:  'ALERT',
+        count:   n,
+        message: `B0 ads re-enabled: ${n}`,
+      };
+      verdict = 'ALERT';
+      details.push(`B0 ads re-enabled: ${n}`);
+    } else {
+      checks.b0_extinction = { status: 'OK', message: 'no B0 ENABLED product ads' };
+    }
+  } catch (e) {
+    checks.b0_extinction = { status: 'ERROR', message: `DB query failed: ${e.message}` };
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Write status JSON + self-heartbeat (always — even if DB fails later)
 // ---------------------------------------------------------------------------
 const status = { checked_at: now.toISOString(), checks, verdict, details };
