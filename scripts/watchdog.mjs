@@ -146,12 +146,14 @@ let   verdict = 'OK';
           FROM amazon_campaign_daily
           GROUP BY profile_id
         ) d ON d.profile_id = p.profile_id
-        WHERE d.last_landed IS NULL
-           OR d.last_landed < now() - interval '30 hours'
+        WHERE (d.last_landed IS NULL
+           OR d.last_landed < now() - interval '30 hours')
+          -- CA2 retired 2026-08-02, dead shell — see Christian's ruling
+          AND p.profile_id::text <> '1068790837798301'
         ORDER BY p.country_code
       `);
       if (rows.length > 0) {
-        const stale = rows.map(r => r.country_code || r.profile_id).join(', ');
+        const stale = rows.map(r => `${r.country_code}(…${r.profile_id.slice(-4)})`).join(', ');
         checks.completion = { status: 'ALERT', stale: rows, message: `stale: ${stale}` };
         verdict = 'ALERT';
         details.push(`stale: ${stale}`);
