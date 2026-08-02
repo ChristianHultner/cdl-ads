@@ -374,14 +374,30 @@ for (const { rec, requestBody } of eligible) {
     process.exit(1);
   }
 
+  // ── Request-order index map (index is authoritative for campaignId resolution) ──
+  // Amazon v3 multi-status responses carry an `index` field on each result item
+  // mapping back to the request array position.  Error items (e.g. DUPLICATE_VALUE)
+  // may not carry campaignId directly — use request order, not message parsing.
+  const requestIndexMap = new Map(
+    requestBody.campaignNegativeTargetingClauses.map((clause, i) => [i, String(clause.campaignId)])
+  );
+
+  function resolveItemCampaignId(item) {
+    if (item.index != null) {
+      const mapped = requestIndexMap.get(item.index);
+      if (mapped) return mapped;
+    }
+    return String(item.campaignId ?? '');
+  }
+
   // ── Duplicate-is-satisfied doctrine ────────────────────────────────────────
   // DUPLICATE_VALUE errors mean the clause already exists — desired state reached.
   const duplicateItems   = errorItems.filter((item) => JSON.stringify(item).includes('DUPLICATE_VALUE'));
   const genuineFailItems = errorItems.filter((item) => !JSON.stringify(item).includes('DUPLICATE_VALUE'));
 
-  const createdCampaignIds        = successItems.map((item) => String(item.campaignId ?? '')).filter(Boolean);
-  const alreadyExistedCampaignIds = duplicateItems.map((item) => String(item.campaignId ?? '')).filter(Boolean);
-  const failedCampaignIds         = genuineFailItems.map((item) => String(item.campaignId ?? '')).filter(Boolean);
+  const createdCampaignIds        = successItems.map(resolveItemCampaignId).filter(Boolean);
+  const alreadyExistedCampaignIds = duplicateItems.map(resolveItemCampaignId).filter(Boolean);
+  const failedCampaignIds         = genuineFailItems.map(resolveItemCampaignId).filter(Boolean);
 
   const pushResult = {
     created:         createdCampaignIds,

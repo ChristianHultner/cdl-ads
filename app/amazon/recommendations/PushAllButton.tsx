@@ -31,6 +31,8 @@ interface ProfileResult {
 interface Props {
   totalApproved: number
   profiles: ProfileMeta[]
+  /** Per-rec_type approved counts; shown as a small breakdown line under the button. */
+  recTypeCounts?: Record<string, number>
 }
 
 // ── Human-readable script names ───────────────────────────────────────────────
@@ -44,7 +46,7 @@ const SCRIPT_LABELS: Record<string, string> = {
 }
 
 // ── Root component ─────────────────────────────────────────────────────────────
-export function PushAllButton({ totalApproved, profiles }: Props) {
+export function PushAllButton({ totalApproved, profiles, recTypeCounts }: Props) {
   const [phase, setPhase]     = useState<'idle' | 'modal' | 'running' | 'done'>('idle')
   const [results, setResults] = useState<ProfileResult[]>([])
   const [current, setCurrent] = useState<string | null>(null)
@@ -88,35 +90,49 @@ export function PushAllButton({ totalApproved, profiles }: Props) {
   return (
     <>
       {/* ── Trigger button ─────────────────────────────────────────────────── */}
-      <button
-        onClick={() => { if (!disabled) setPhase('modal') }}
-        disabled={disabled}
-        style={{
-          cursor:       disabled ? 'not-allowed' : 'pointer',
-          padding:      '5px 16px',
-          fontFamily:   'inherit',
-          fontSize:     '0.85rem',
-          fontWeight:   700,
-          borderRadius: '5px',
-          border:       '1px solid var(--cdl-blue)',
-          background:   disabled
-            ? 'rgba(0,147,208,0.04)'
-            : 'rgba(0,147,208,0.12)',
-          color:        disabled ? 'var(--cdl-muted)' : 'var(--cdl-blue)',
-          transition:   'background 0.12s',
-          marginBottom: '1.5rem',
-          display:      'inline-flex',
-          alignItems:   'center',
-          gap:          '0.35rem',
-        }}
-      >
-        Push approved ({totalApproved})
-        {DRY_RUN && (
-          <span style={{ fontWeight: 400, fontSize: '0.78rem', opacity: 0.75 }}>
-            — dry-run
-          </span>
+      <div style={{ marginBottom: '1.5rem' }}>
+        <button
+          onClick={() => { if (!disabled) setPhase('modal') }}
+          disabled={disabled}
+          style={{
+            cursor:       disabled ? 'not-allowed' : 'pointer',
+            padding:      '5px 16px',
+            fontFamily:   'inherit',
+            fontSize:     '0.85rem',
+            fontWeight:   700,
+            borderRadius: '5px',
+            border:       '1px solid var(--cdl-blue)',
+            background:   disabled
+              ? 'rgba(0,147,208,0.04)'
+              : 'rgba(0,147,208,0.12)',
+            color:        disabled ? 'var(--cdl-muted)' : 'var(--cdl-blue)',
+            transition:   'background 0.12s',
+            display:      'inline-flex',
+            alignItems:   'center',
+            gap:          '0.35rem',
+          }}
+        >
+          Push approved ({totalApproved})
+          {DRY_RUN && (
+            <span style={{ fontWeight: 400, fontSize: '0.78rem', opacity: 0.75 }}>
+              — dry-run
+            </span>
+          )}
+        </button>
+        {recTypeCounts && Object.keys(recTypeCounts).length > 0 && (
+          <div style={{
+            fontSize:   '0.75rem',
+            color:      'var(--cdl-muted)',
+            marginTop:  '0.3rem',
+            lineHeight: 1.4,
+          }}>
+            {Object.entries(recTypeCounts)
+              .sort(([, a], [, b]) => b - a)
+              .map(([type, count]) => `${type} ${count}`)
+              .join(' · ')}
+          </div>
         )}
-      </button>
+      </div>
 
       {/* ── Confirm modal ──────────────────────────────────────────────────── */}
       {phase === 'modal' && (

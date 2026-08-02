@@ -53,6 +53,10 @@ export interface Evidence {
   window_start?: string
   window_end?: string
   params_used?: { target_acos?: number }
+  /** BID_ADJUST v6 entity fields */
+  entity_kind?: 'KEYWORD' | 'TARGET' | 'AUTO_STRATEGY'
+  entity_id?: string
+  match_type?: string
   campaign_ids?: string[]
   /** Direct campaign attribution stored in evidence JSON */
   campaign_id?: string
@@ -134,6 +138,8 @@ export interface RecCardContext {
   bidAdjStateMap: Map<string, string>
   destTargetsMap: Map<string, DestTargetRow[]>
   outcomesMap:    Map<string, RecOutcomeRow[]>
+  /** entity_id → human display name for BID_ADJUST cards (keyword text [MATCH], ASIN, or auto-lever label) */
+  bidAdjNameMap?: Map<string, string>
 }
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
@@ -160,6 +166,7 @@ function stateBadgeCls(state: string): string {
 function statusBadgeCls(status: string): string {
   if (status === 'APPROVED' || status === 'PUSHED') return 'badge badge-ok'
   if (status === 'REJECTED') return 'badge badge-warn'
+  if (status === 'HELD')     return 'badge badge-hold'
   return 'badge badge-muted'
 }
 
@@ -633,16 +640,22 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
     const url         = amazonLink(rec.target_text, rec.country_code)
     const hasBidInput = BID_INPUT_TYPES.has(rec.rec_type)
     const proposedBid = rec.evidence.proposed_bid
+    // BID_ADJUST: resolve entity human name from bidAdjNameMap
+    const bidAdjName = rec.rec_type === 'BID_ADJUST'
+      ? (ctx.bidAdjNameMap?.get(rec.evidence.entity_id ?? '') ?? rec.target_text)
+      : null
     return (
       <details className="rec-card">
         <summary>
           <span className={recTypeBadge(rec.rec_type)}>{rec.rec_type}</span>
           <span style={{ fontWeight: 600, flexShrink: 0 }}>
-            {url
-              ? <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cdl-blue)' }}>
-                  {rec.target_text}
-                </a>
-              : rec.target_text}
+            {bidAdjName != null
+              ? bidAdjName
+              : url
+                ? <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cdl-blue)' }}>
+                    {rec.target_text}
+                  </a>
+                : rec.target_text}
           </span>
           <span style={{
             color: 'var(--cdl-muted)', flex: 1, minWidth: 0,
@@ -697,16 +710,22 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
   // Ruled card — status badge only, no action buttons
   function RuledCard({ r: rec }: { r: RecRow }) {
     const url = amazonLink(rec.target_text, rec.country_code)
+    // BID_ADJUST: resolve entity human name from bidAdjNameMap
+    const bidAdjName = rec.rec_type === 'BID_ADJUST'
+      ? (ctx.bidAdjNameMap?.get(rec.evidence.entity_id ?? '') ?? rec.target_text)
+      : null
     return (
       <details className="rec-card">
         <summary>
           <span className={recTypeBadge(rec.rec_type)}>{rec.rec_type}</span>
           <span style={{ fontWeight: 600, flexShrink: 0 }}>
-            {url
-              ? <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cdl-blue)' }}>
-                  {rec.target_text}
-                </a>
-              : rec.target_text}
+            {bidAdjName != null
+              ? bidAdjName
+              : url
+                ? <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--cdl-blue)' }}>
+                    {rec.target_text}
+                  </a>
+                : rec.target_text}
           </span>
           <span style={{
             color: 'var(--cdl-muted)', flex: 1, minWidth: 0,

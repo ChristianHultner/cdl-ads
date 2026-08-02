@@ -957,6 +957,8 @@ for (const entity of bidEligible) {
     acos:              entity.acos,
     target_acos:       params.target_acos,
     performance_basis: entity.performance_basis,
+    window_start:      windowStart,
+    window_end:        windowEnd,
     params_used:       params,
     bound_by:          boundBy,
     ...(entity.match_type ? { match_type: entity.match_type } : {}),

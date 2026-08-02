@@ -156,6 +156,77 @@ export default async function RecommendationsPage() {
   ]
   const bidAdjProfileIds = [...new Set(bidAdjRecs.map(r => r.profile_id))]
 
+  // ── BID_ADJUST entity name resolution (batch, no N–1) ──────────────────
+  interface KwNameRow  { entity_id: string; keyword_text: string; match_type: string }
+  interface TgtNameRow { entity_id: string; resolved_asin: string | null; expression: unknown }
+
+  const kwEntityIds = [...new Set(
+    bidAdjRecs
+      .filter(r => r.evidence.entity_kind === 'KEYWORD')
+      .map(r => r.evidence.entity_id)
+      .filter((x): x is string => x != null),
+  )]
+  const tgtEntityIds = [...new Set(
+    bidAdjRecs
+      .filter(r => r.evidence.entity_kind === 'TARGET' || r.evidence.entity_kind === 'AUTO_STRATEGY')
+      .map(r => r.evidence.entity_id)
+      .filter((x): x is string => x != null),
+  )]
+
+  const entityKindByEntityId = new Map<string, string>()
+  for (const r of bidAdjRecs) {
+    if (r.evidence.entity_id && r.evidence.entity_kind) {
+      entityKindByEntityId.set(r.evidence.entity_id, r.evidence.entity_kind)
+    }
+  }
+
+  let kwNameRows:  KwNameRow[]  = []
+  let tgtNameRows: TgtNameRow[] = []
+
+  if (kwEntityIds.length > 0 && bidAdjProfileIds.length > 0) {
+    kwNameRows = (await sql`
+      SELECT keyword_id::text AS entity_id, keyword_text, match_type
+      FROM amazon_keywords
+      WHERE profile_id::text = ANY(${bidAdjProfileIds})
+        AND keyword_id::text = ANY(${kwEntityIds})
+    `) as unknown as KwNameRow[]
+  }
+  if (tgtEntityIds.length > 0 && bidAdjProfileIds.length > 0) {
+    tgtNameRows = (await sql`
+      SELECT target_id::text AS entity_id, resolved_asin, expression
+      FROM amazon_targets
+      WHERE profile_id::text = ANY(${bidAdjProfileIds})
+        AND target_id::text  = ANY(${tgtEntityIds})
+    `) as unknown as TgtNameRow[]
+  }
+
+  const AUTO_EXPR_LABEL: Record<string, string> = {
+    'close-match':             'Close Match',
+    'loose-match':             'Loose Match',
+    'substitutes':             'Substitutes',
+    'complements':             'Complements',
+    'QUERY_HIGH_REL_MATCHES':  'Close Match',
+    'QUERY_BROAD_REL_MATCHES': 'Loose Match',
+    'ASIN_SUBSTITUTE_RELATED': 'Substitutes',
+    'ASIN_ACCESSORY_RELATED':  'Complements',
+  }
+
+  const bidAdjNameMap = new Map<string, string>()
+  for (const row of kwNameRows) {
+    const matchTag = row.match_type ? ` [${row.match_type}]` : ''
+    bidAdjNameMap.set(row.entity_id, `${row.keyword_text}${matchTag}`)
+  }
+  for (const row of tgtNameRows) {
+    const kind = entityKindByEntityId.get(row.entity_id)
+    if (kind === 'AUTO_STRATEGY') {
+      const exprArr = Array.isArray(row.expression) ? (row.expression as Array<{ type?: string }>) : []
+      const rawType = exprArr[0]?.type ?? null
+      bidAdjNameMap.set(row.entity_id, (rawType && AUTO_EXPR_LABEL[rawType]) ?? 'Auto')
+    } else if (row.resolved_asin) {
+      bidAdjNameMap.set(row.entity_id, row.resolved_asin)
+    }
+  }
+
   // ── Supplemental queries ───────────────────────────────────────────────
   let destTargetRows:  DestTargetRow[]  = []
   let targetAcosRows:  TargetAcosRow[]  = []
@@ -242,7 +313,7 @@ export default async function RecommendationsPage() {
   }
 
   // ── RecCard context (for ruled section) ───────────────────────────────
-  const ctx: RecCardContext = { adGroupMap, campMap, bidAdjStateMap, destTargetsMap, outcomesMap }
+  const ctx: RecCardContext = { adGroupMap, campMap, bidAdjStateMap, destTargetsMap, outcomesMap, bidAdjNameMap }
 
   // ── Partition rows ─────────────────────────────────────────────────────
   const draftRows    = rows.filter(r => r.status === 'DRAFT')
@@ -273,6 +344,12 @@ export default async function RecommendationsPage() {
   const approvedProfiles: ProfileMeta[] = Array.from(profileApprMap.entries()).map(
     ([profileId, { count, country }]) => ({ profileId, label: country, count }),
   )
+
+  // Per-rec_type approved counts for Push button breakdown
+  const approvedByType: Record<string, number> = {}
+  for (const r of approvedRows) {
+    approvedByType[r.rec_type] = (approvedByType[r.rec_type] ?? 0) + 1
+  }
 
   // ── Scoreboard derived data ────────────────────────────────────────────
   const draftByProfile = new Map<string, number>()
@@ -323,7 +400,7 @@ export default async function RecommendationsPage() {
       <h1>Recommendations</h1>
 
       {/* ── Push button (top, unchanged) ── */}
-      <PushAllButton totalApproved={totalApproved} profiles={approvedProfiles} />
+      <PushAllButton totalApproved={totalApproved} profiles={approvedProfiles} recTypeCounts={approvedByType} />
 
       {/* ── Empty state ── */}
       {openProfileIds.length === 0 ? (
@@ -428,9 +505,10 @@ export default async function RecommendationsPage() {
           }}>
             Ruled ({nonDraftRows.length}){' '}
             <span style={{ fontWeight: 400, fontSize: '0.82rem' }}>
-              — {(['APPROVED', 'REJECTED', 'PUSHED'] as const)
-                .map(s => `${s} ${nonDraftCounts.get(s) ?? 0}`)
-                .join(' · ')}
+              {'— '}PUSHED {nonDraftCounts.get('PUSHED') ?? 0}
+              {' · '}APPROVED {nonDraftCounts.get('APPROVED') ?? 0}
+              {' · '}REJECTED {nonDraftCounts.get('REJECTED') ?? 0}
+              {' · '}<span className="badge badge-hold">{nonDraftCounts.get('HELD') ?? 0} HELD</span>
             </span>
           </summary>
           <div style={{ marginTop: '0.75rem' }}>
