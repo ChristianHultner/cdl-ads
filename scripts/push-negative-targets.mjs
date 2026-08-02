@@ -285,8 +285,10 @@ const { access_token: accessToken } = await tokenRes.json();
 console.log(`Token ok (len ${accessToken.length})`);
 console.log('');
 
-let pushed   = 0;
-let partials = 0;
+let pushed             = 0;
+let partials           = 0;
+let totalCreated       = 0;
+let totalAlreadyExisted = 0;
 
 for (const { rec, requestBody } of eligible) {
   console.log('─'.repeat(60));
@@ -372,19 +374,39 @@ for (const { rec, requestBody } of eligible) {
     process.exit(1);
   }
 
-  // ── Partial or full error: leave APPROVED ──────────────────────────────────
-  if (errorItems.length > 0) {
+  // ── Duplicate-is-satisfied doctrine ────────────────────────────────────────
+  // DUPLICATE_VALUE errors mean the clause already exists — desired state reached.
+  const duplicateItems   = errorItems.filter((item) => JSON.stringify(item).includes('DUPLICATE_VALUE'));
+  const genuineFailItems = errorItems.filter((item) => !JSON.stringify(item).includes('DUPLICATE_VALUE'));
+
+  const createdCampaignIds        = successItems.map((item) => String(item.campaignId ?? '')).filter(Boolean);
+  const alreadyExistedCampaignIds = duplicateItems.map((item) => String(item.campaignId ?? '')).filter(Boolean);
+  const failedCampaignIds         = genuineFailItems.map((item) => String(item.campaignId ?? '')).filter(Boolean);
+
+  const pushResult = {
+    created:         createdCampaignIds,
+    already_existed: alreadyExistedCampaignIds,
+    failed:          failedCampaignIds,
+  };
+
+  // ── Genuine failures → partial (leave APPROVED) ────────────────────────────
+  if (genuineFailItems.length > 0) {
     const expected = requestBody.campaignNegativeTargetingClauses.length;
     console.log(
-      `PARTIAL — left APPROVED (${successItems.length}/${expected} succeeded)`,
+      `PARTIAL — left APPROVED` +
+      ` (${successItems.length} created, ${duplicateItems.length} already_existed,` +
+      ` ${genuineFailItems.length} genuine fail / ${expected} total)`,
     );
-    console.log('Failing items:', JSON.stringify(errorItems, null, 2));
+    console.log('Genuine failing items:', JSON.stringify(genuineFailItems, null, 2));
+    if (duplicateItems.length > 0) {
+      console.log(`Satisfied via duplicate (already_existed): ${duplicateItems.length}`);
+    }
     console.log('');
     partials++;
     continue;
   }
 
-  // ── All succeeded: UPDATE DB ────────────────────────────────────────────────
+  // ── All created OR already_existed → PUSHED ─────────────────────────────────
   const pushedTargetIds = successItems
     .map((item) => item.campaignNegativeTargetingClauseId)
     .filter(Boolean);
@@ -397,14 +419,22 @@ for (const { rec, requestBody } of eligible) {
       WHERE id        = $2
         AND status    = 'APPROVED'`,
     [
-      JSON.stringify({ push_response: responseData, pushed_target_ids: pushedTargetIds }),
+      JSON.stringify({
+        push_response:     responseData,
+        pushed_target_ids: pushedTargetIds,
+        push_result:       pushResult,
+      }),
       rec.id,
     ],
   );
 
+  totalCreated        += createdCampaignIds.length;
+  totalAlreadyExisted += alreadyExistedCampaignIds.length;
+
   console.log(
-    `PUSHED — rec id=${rec.id}, target ids: ` +
-    (pushedTargetIds.length ? pushedTargetIds.join(', ') : '(none returned)'),
+    `PUSHED — rec id=${rec.id}` +
+    ` (${createdCampaignIds.length} created, ${alreadyExistedCampaignIds.length} already_existed)` +
+    (pushedTargetIds.length ? `  target ids: ${pushedTargetIds.join(', ')}` : ''),
   );
   console.log('');
   pushed++;
@@ -414,6 +444,6 @@ await pool.end();
 
 console.log('─'.repeat(60));
 console.log(
-  `Execute complete: ${pushed} pushed, ${partials} partial (left APPROVED).`,
+  `${pushed} pushed (${totalCreated} clauses created, ${totalAlreadyExisted} already existed), ${partials} partial.`,
 );
 process.exit(0);
