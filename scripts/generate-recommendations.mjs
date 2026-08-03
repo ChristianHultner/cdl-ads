@@ -14,9 +14,10 @@ neonConfig.webSocketConstructor = WebSocket;
 const { values } = parseArgs({
   args: process.argv.slice(2),
   options: {
-    profile:         { type: 'string' },
-    'cluster-rooms': { type: 'boolean', default: false },
-    'cluster-lang':  { type: 'string',  default: 'spa'  },
+    profile:          { type: 'string' },
+    'cluster-rooms':  { type: 'boolean', default: false },
+    'cluster-lang':   { type: 'string',  default: 'spa'  },
+    'cluster-names':  { type: 'string',  default: ''     }, // comma-separated; empty = all
   },
 });
 if (!values.profile) throw new Error('--profile <id> required');
@@ -1943,10 +1944,12 @@ console.log('─'.repeat(70));
 // ── CLUSTER_ROOM PHASE ──────────────────────────────────────────────────────
 // Runs ONLY when --cluster-rooms flag is passed; never emits during normal
 // generation. Scoped to --cluster-lang (default: 'spa') and --profile.
-// For each cluster lacking a dedicated room (no ENABLED campaign whose name
-// contains 'CDL | SP | CLUSTER | <cluster_name>'), emits ONE CREATE_STRUCTURE
-// rec proposing the AUTO+KW pair, born DRAFT (default status).
-// Evidence manifest: rosters, seed keywords, bids, budgets, campaign names.
+// Cold-start pattern: AUTO-only. KW siblings born later from the AUTO room's
+// own harvest via the existing PROMOTE_TERM road once traffic accrues.
+// Emits ONE CREATE_STRUCTURE rec per cluster lacking a dedicated AUTO room.
+// Campaign: 'CDL | SP | CLUSTER | <NAME> | AUTO', budget €3.00/day,
+// AUTO targeting, full cluster ASIN roster as product ads, born PAUSED.
+// Evidence manifest: roster, bid, budget, targeting_type, works_count, spend_60d.
 if (values['cluster-rooms']) {
   console.log('\n── CLUSTER_ROOM phase ──────────────────────────────────────────────────────');
   const crLang = values['cluster-lang'] ?? 'spa';
@@ -1969,17 +1972,29 @@ if (values['cluster-rooms']) {
   );
   console.log(`  Clusters in '${crLang}': ${crClusters.length}`);
 
-  // CR-2. ENABLED CLUSTER campaigns (room-exists check)
+  // CR-1b. Optional cluster-names filter (comma-separated; empty = all)
+  const crNameFilter = (values['cluster-names'] ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  const crFiltered = crNameFilter.length > 0
+    ? crClusters.filter(r => crNameFilter.includes(r.cluster_name))
+    : crClusters;
+  if (crNameFilter.length > 0) {
+    console.log(`  --cluster-names filter: ${crNameFilter.length} name(s) → ${crFiltered.length} match(es)`);
+  }
+
+  // CR-2. ENABLED CLUSTER AUTO campaigns (room-exists check)
   const { rows: crEnabledCamps } = await pool.query(
     `SELECT name
        FROM amazon_campaigns
       WHERE profile_id = $1
         AND state      = 'ENABLED'
-        AND name       ILIKE '%CDL | SP | CLUSTER |%'`,
+        AND name       ILIKE '%CDL | SP | CLUSTER |%| AUTO'`,
     [profileId],
   );
   const crEnabledNamesLower = crEnabledCamps.map(r => r.name.toLowerCase());
-  console.log(`  Existing ENABLED CLUSTER campaigns: ${crEnabledNamesLower.length}`);
+  console.log(`  Existing ENABLED CLUSTER AUTO campaigns: ${crEnabledNamesLower.length}`);
 
   // CR-3. Open CREATE_STRUCTURE CLUSTER recs (idempotency)
   const { rows: crOpenRows } = await pool.query(
@@ -2009,22 +2024,20 @@ if (values['cluster-rooms']) {
   console.log(`  AUTO_STRATEGY median bid: ${currSym}${crBid.toFixed(2)} (fallback 0.30)`);
   console.log('');
 
-  // CR-5. Artifacts dir for seed files
-  const crArtDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'artifacts');
-
   let crWritten = 0;
   let crSkipped = 0;
 
-  for (const { cluster_name } of crClusters) {
-    const crSlug = crToSlug(cluster_name);
-    const recKey = `CLUSTER | ${cluster_name}`;
+  for (const { cluster_name } of crFiltered) {
+    const crSlug     = crToSlug(cluster_name);
+    const recKey     = `CLUSTER | ${cluster_name} | AUTO`;
+    const crCampName = `CDL | SP | CLUSTER | ${cluster_name} | AUTO`;
     console.log(`  ── ${cluster_name}`);
 
-    // Room-exists: either the AUTO or KW campaign already ENABLED
+    // Room-exists: ENABLED AUTO campaign for this cluster
     if (crEnabledNamesLower.some(n =>
-      n.includes(`cdl | sp | cluster | ${cluster_name.toLowerCase()}`)
+      n.includes(`cdl | sp | cluster | ${cluster_name.toLowerCase()} | auto`)
     )) {
-      console.log(`     skip: ENABLED room already present`);
+      console.log(`     skip: ENABLED room '${crCampName}' already present`);
       crSkipped++;
       continue;
     }
@@ -2055,54 +2068,47 @@ if (values['cluster-rooms']) {
       crSkipped++;
       continue;
     }
-    console.log(`     ASINs: ${crSeedAsins.length}`);
+    console.log(`     works: ${crSeedAsins.length}`);
 
-    // CR-5b. Top-20 seed keywords from artifacts/seed-<slug>.json
-    const crSeedPath = join(crArtDir, `seed-${crSlug}.json`);
-    let crKeywords   = [];
-    if (existsSync(crSeedPath)) {
-      try {
-        const sf = JSON.parse(readFileSync(crSeedPath, 'utf8'));
-        crKeywords = (sf.terms ?? []).slice(0, 20).map(t => ({
-          term:       t.term,
-          match_type: 'PHRASE',
-          bid:        crBid,
-          rank:       t.rank,
-          orders:     t.orders,
-        }));
-        console.log(`     Seed keywords: ${crKeywords.length} (seed-${crSlug}.json)`);
-      } catch (e) {
-        console.log(`     Seed file parse error — keywords empty: ${e.message}`);
-      }
-    } else {
-      console.log(`     Seed file absent (seed-${crSlug}.json) — keywords will be empty`);
-    }
+    // CR-5b. spend_60d: cost from all campaigns containing cluster ASINs
+    const { rows: crSpendRows } = await pool.query(
+      `SELECT COALESCE(SUM(d.cost), 0)::float AS spend_60d
+         FROM amazon_campaign_daily d
+        WHERE d.profile_id  = $1
+          AND d.date        >= CURRENT_DATE - INTERVAL '60 days'
+          AND d.campaign_id IN (
+                SELECT DISTINCT pa.campaign_id
+                  FROM amazon_product_ads pa
+                 WHERE pa.profile_id = $1
+                   AND pa.state      = 'ENABLED'
+                   AND pa.asin       = ANY($2)
+              )`,
+      [profileId, crSeedAsins.map(s => s.asin)],
+    );
+    const crSpend60d = Math.round(Number(crSpendRows[0]?.spend_60d ?? 0) * 100) / 100;
+    console.log(`     spend_60d: ${currSym}${crSpend60d.toFixed(2)}`);
 
-    // CR-5c. Campaign names
-    const crAutoCampName = `CDL | SP | CLUSTER | ${cluster_name} | AUTO`;
-    const crKwCampName   = `CDL | SP | CLUSTER | ${cluster_name} | KW`;
-
-    // CR-5d. Evidence manifest
+    // CR-5c. Evidence manifest
     const crEvidence = {
-      kind:                 'cluster_room_pair',
+      kind:                 'cluster_auto_room',
       cluster_name,
       cluster_slug:         crSlug,
       language:             crLang,
       profile_id:           profileIdStr,
       seed_asins:           crSeedAsins,
       proposed_default_bid: crBid,
+      targeting_type:       'AUTO',
       budget:               3.00,
-      auto_campaign_name:   crAutoCampName,
-      kw_campaign_name:     crKwCampName,
-      keywords:             crKeywords,
+      works_count:          crSeedAsins.length,
+      spend_60d:            crSpend60d,
     };
 
     const crProposal =
-      `Create cluster room pair for '${cluster_name}': ` +
-      `'${crAutoCampName}' (AUTO, ${currSym}3.00/day, ${crSeedAsins.length} books) + ` +
-      `'${crKwCampName}' (PHRASE KW, ${currSym}3.00/day, ${crSeedAsins.length} books, ` +
-      `${crKeywords.length} seed keyword(s) at ${currSym}${crBid.toFixed(2)}). ` +
-      `Both born PAUSED — activate in console after eyeball.`;
+      `Create AUTO cluster room for '${cluster_name}': ` +
+      `'${crCampName}' — ${crSeedAsins.length} works, ` +
+      `${currSym}3.00/day budget, AUTO targeting, ` +
+      `default bid ${currSym}${crBid.toFixed(2)}, born PAUSED. ` +
+      `Cluster 60d spend ${currSym}${crSpend60d.toFixed(2)} across all current rooms.`;
 
     await pool.query(
       `INSERT INTO recommendations
