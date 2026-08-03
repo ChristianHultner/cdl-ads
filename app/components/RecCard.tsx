@@ -2,6 +2,7 @@
 
 import { approveRecommendation, rejectRecommendation } from '@/app/amazon/recommendations/actions'
 import { CreativeTargetApproveForm } from '@/app/amazon/recommendations/CreativeTargetApproveForm'
+import { BookCover } from '@/app/components/BookCover'
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const CURRENCY_SYMBOL: Record<string, string> = {
@@ -81,6 +82,8 @@ export interface Evidence {
   amazon_range_start?: number
   amazon_range_end?:   number
   quote_age_days?:     number
+  /** HC/print ISBN13 for cover display (REPLACE rec type). */
+  hc_isbn13?: string
 }
 
 export interface RecRow {
@@ -140,6 +143,8 @@ export interface RecCardContext {
   outcomesMap:    Map<string, RecOutcomeRow[]>
   /** entity_id → human display name for BID_ADJUST cards (keyword text [MATCH], ASIN, or auto-lever label) */
   bidAdjNameMap?: Map<string, string>
+  /** ASIN (upper) → isbn13 for cover accents. Populated for PROMOTE_ASIN / CREATIVE_TARGET cards. */
+  isbn13Map?: Map<string, string>
 }
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
@@ -185,6 +190,13 @@ function fmtN(v: number | undefined | null): string {
  */
 export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
   const { adGroupMap, campMap, bidAdjStateMap, destTargetsMap } = ctx
+
+  // isbn13 for cover accent — REPLACE: from evidence; PROMOTE_ASIN/CREATIVE_TARGET: from isbn13Map
+  const isbn13: string | undefined =
+    r.evidence.hc_isbn13 ??
+    ((r.rec_type === 'PROMOTE_ASIN' || r.rec_type === 'CREATIVE_TARGET')
+      ? ctx.isbn13Map?.get(r.target_text.toUpperCase())
+      : undefined)
 
   // ── Sub-components (closures over ctx maps) ──────────────────────────────
 
@@ -648,6 +660,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
       <details className="rec-card">
         <summary>
           <span className={recTypeBadge(rec.rec_type)}>{rec.rec_type}</span>
+          {isbn13 && <BookCover isbn13={isbn13} alt={rec.target_text} size="sm" />}
           <span style={{ fontWeight: 600, flexShrink: 0 }}>
             {bidAdjName != null
               ? bidAdjName
@@ -718,6 +731,7 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
       <details className="rec-card">
         <summary>
           <span className={recTypeBadge(rec.rec_type)}>{rec.rec_type}</span>
+          {isbn13 && <BookCover isbn13={isbn13} alt={rec.target_text} size="sm" />}
           <span style={{ fontWeight: 600, flexShrink: 0 }}>
             {bidAdjName != null
               ? bidAdjName

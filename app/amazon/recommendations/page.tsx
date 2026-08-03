@@ -312,8 +312,32 @@ export default async function RecommendationsPage() {
     outcomesMap.get(o.rec_id)!.push(o)
   }
 
+  // ── title_cache isbn13 lookup for cover accents (one IN query, no N+1) ─
+  interface TitleCacheIsbn13Row { asin: string; isbn13: string }
+  const coverAsinSet = new Set<string>()
+  for (const r of rows) {
+    if (r.rec_type === 'PROMOTE_ASIN' || r.rec_type === 'CREATIVE_TARGET') {
+      coverAsinSet.add(r.target_text.toUpperCase())
+    }
+  }
+  const coverAsinList = [...coverAsinSet]
+  let titleCacheIsbn13Rows: TitleCacheIsbn13Row[] = []
+  if (coverAsinList.length > 0) {
+    titleCacheIsbn13Rows = (await sql`
+      SELECT asin, isbn13
+      FROM title_cache
+      WHERE upper(asin) = ANY(${coverAsinList})
+        AND isbn13 IS NOT NULL
+        AND found = true
+    `) as unknown as TitleCacheIsbn13Row[]
+  }
+  const isbn13Map = new Map<string, string>()
+  for (const row of titleCacheIsbn13Rows) {
+    isbn13Map.set(row.asin.toUpperCase(), row.isbn13)
+  }
+
   // ── RecCard context (for ruled section) ───────────────────────────────
-  const ctx: RecCardContext = { adGroupMap, campMap, bidAdjStateMap, destTargetsMap, outcomesMap, bidAdjNameMap }
+  const ctx: RecCardContext = { adGroupMap, campMap, bidAdjStateMap, destTargetsMap, outcomesMap, bidAdjNameMap, isbn13Map }
 
   // ── Partition rows ─────────────────────────────────────────────────────
   const draftRows    = rows.filter(r => r.status === 'DRAFT')

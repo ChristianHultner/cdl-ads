@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic'
 import { neon } from '@neondatabase/serverless'
 import { notFound } from 'next/navigation'
 import { RecCard, type RecCardContext, type RecRow, type DestTargetRow } from '@/app/components/RecCard'
+import { BookCover } from '@/app/components/BookCover'
 import { evidenceAdGroupId, isCampaignLevel } from '@/app/lib/rec-scope'
 
 // ── TLD by country code ──────────────────────────────────────────────────────
@@ -453,12 +454,40 @@ export default async function CampaignDetailPage({
     recDestTargetsMap.get(key)!.push(t)
   }
 
+  // ── isbn13 lookup for cover accents (recs + advertised products, one IN query) ──
+  interface TitleCacheIsbn13Row { asin: string; isbn13: string }
+  const coverAsinSet = new Set<string>()
+  for (const r of detailRecRows) {
+    if (r.rec_type === 'PROMOTE_ASIN' || r.rec_type === 'CREATIVE_TARGET') {
+      coverAsinSet.add(r.target_text.toUpperCase())
+    }
+  }
+  for (const pa of productAds) {
+    if (pa.asin) coverAsinSet.add(pa.asin.toUpperCase())
+  }
+  const coverAsinList = [...coverAsinSet]
+  let titleCacheIsbn13Rows: TitleCacheIsbn13Row[] = []
+  if (coverAsinList.length > 0) {
+    titleCacheIsbn13Rows = (await sql`
+      SELECT asin, isbn13
+      FROM title_cache
+      WHERE upper(asin) = ANY(${coverAsinList})
+        AND isbn13 IS NOT NULL
+        AND found = true
+    `) as unknown as TitleCacheIsbn13Row[]
+  }
+  const isbn13Map = new Map<string, string>()
+  for (const row of titleCacheIsbn13Rows) {
+    isbn13Map.set(row.asin.toUpperCase(), row.isbn13)
+  }
+
   const recCtx: RecCardContext = {
-    adGroupMap:    recAdGroupMap,
-    campMap:       recCampMap,
+    adGroupMap:     recAdGroupMap,
+    campMap:        recCampMap,
     bidAdjStateMap: recBidAdjStateMap,
     destTargetsMap: recDestTargetsMap,
-    outcomesMap:   new Map(),
+    outcomesMap:    new Map(),
+    isbn13Map,
   }
 
   // ── Partition recs: campaign-level vs per-ad-group ───────────────────────
@@ -675,14 +704,23 @@ export default async function CampaignDetailPage({
                           <tr key={i}>
                             <td>
                               {pa.asin ? (
-                                <a
-                                  href={asinUrl(pa.asin, profile.country_code)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  style={{ color: 'var(--cdl-blue)', fontFamily: 'monospace', fontSize: '0.88em' }}
-                                >
-                                  {pa.asin.toUpperCase()}
-                                </a>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                                  {isbn13Map.get(pa.asin.toUpperCase()) && (
+                                    <BookCover
+                                      isbn13={isbn13Map.get(pa.asin.toUpperCase())!}
+                                      alt={pa.asin}
+                                      size="sm"
+                                    />
+                                  )}
+                                  <a
+                                    href={asinUrl(pa.asin, profile.country_code)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{ color: 'var(--cdl-blue)', fontFamily: 'monospace', fontSize: '0.88em' }}
+                                  >
+                                    {pa.asin.toUpperCase()}
+                                  </a>
+                                </span>
                               ) : (
                                 <span style={{ color: 'var(--cdl-muted)' }}>—</span>
                               )}
