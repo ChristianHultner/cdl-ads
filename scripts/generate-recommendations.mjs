@@ -1,8 +1,11 @@
 // scripts/generate-recommendations.mjs
 // Usage: node --env-file=.env.local scripts/generate-recommendations.mjs --profile <id>
-import { parseArgs } from 'node:util';
+import { parseArgs }       from 'node:util';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath }    from 'node:url';
+import { join, dirname }    from 'node:path';
 import { Pool, neonConfig } from '@neondatabase/serverless';
-import { isbn13ToIsbn10 } from './lib/isbn.mjs';
+import { isbn13ToIsbn10 }   from './lib/isbn.mjs';
 
 // Node 22+ native WebSocket
 neonConfig.webSocketConstructor = WebSocket;
@@ -10,7 +13,11 @@ neonConfig.webSocketConstructor = WebSocket;
 // ── Args ─────────────────────────────────────────────────────────────────────
 const { values } = parseArgs({
   args: process.argv.slice(2),
-  options: { profile: { type: 'string' } },
+  options: {
+    profile:         { type: 'string' },
+    'cluster-rooms': { type: 'boolean', default: false },
+    'cluster-lang':  { type: 'string',  default: 'spa'  },
+  },
 });
 if (!values.profile) throw new Error('--profile <id> required');
 const profileId    = BigInt(values.profile);
@@ -1932,6 +1939,187 @@ for (const row of replaceAdRows) {
   console.log(`  [REPLACE_PRODUCT_AD] Kindle ad ${adId} (${b0Asin}) → HC ${hcIsbn10} in '${campName}'`);
 }
 console.log('─'.repeat(70));
+
+// ── CLUSTER_ROOM PHASE ──────────────────────────────────────────────────────
+// Runs ONLY when --cluster-rooms flag is passed; never emits during normal
+// generation. Scoped to --cluster-lang (default: 'spa') and --profile.
+// For each cluster lacking a dedicated room (no ENABLED campaign whose name
+// contains 'CDL | SP | CLUSTER | <cluster_name>'), emits ONE CREATE_STRUCTURE
+// rec proposing the AUTO+KW pair, born DRAFT (default status).
+// Evidence manifest: rosters, seed keywords, bids, budgets, campaign names.
+if (values['cluster-rooms']) {
+  console.log('\n── CLUSTER_ROOM phase ──────────────────────────────────────────────────────');
+  const crLang = values['cluster-lang'] ?? 'spa';
+  console.log(`  --cluster-rooms active — language: ${crLang}`);
+
+  // Slug helper (mirrors seed-cluster-terms.mjs)
+  const crToSlug = (s) =>
+    s.toLowerCase()
+     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+     .replace(/\s+/g, '-')
+     .replace(/[^a-z0-9-]/g, '');
+
+  // CR-1. Distinct cluster names for this language
+  const { rows: crClusters } = await pool.query(
+    `SELECT DISTINCT cluster_name
+       FROM book_clusters
+      WHERE language = $1
+      ORDER BY cluster_name`,
+    [crLang],
+  );
+  console.log(`  Clusters in '${crLang}': ${crClusters.length}`);
+
+  // CR-2. ENABLED CLUSTER campaigns (room-exists check)
+  const { rows: crEnabledCamps } = await pool.query(
+    `SELECT name
+       FROM amazon_campaigns
+      WHERE profile_id = $1
+        AND state      = 'ENABLED'
+        AND name       ILIKE '%CDL | SP | CLUSTER |%'`,
+    [profileId],
+  );
+  const crEnabledNamesLower = crEnabledCamps.map(r => r.name.toLowerCase());
+  console.log(`  Existing ENABLED CLUSTER campaigns: ${crEnabledNamesLower.length}`);
+
+  // CR-3. Open CREATE_STRUCTURE CLUSTER recs (idempotency)
+  const { rows: crOpenRows } = await pool.query(
+    `SELECT target_text
+       FROM recommendations
+      WHERE profile_id  = $1
+        AND rec_type    = 'CREATE_STRUCTURE'
+        AND target_text LIKE 'CLUSTER |%'
+        AND status      = ANY($2)`,
+    [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+  );
+  const crOpenSet = new Set(crOpenRows.map(r => r.target_text));
+  console.log(`  Open CLUSTER CREATE_STRUCTURE recs: ${crOpenSet.size}`);
+
+  // CR-4. AUTO_STRATEGY median bid (≤14d fresh), fallback 0.30
+  const { rows: crBidRows } = await pool.query(
+    `SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY suggested::float) AS median_bid
+       FROM amazon_bid_recommendations
+      WHERE profile_id  = $1
+        AND entity_kind = 'AUTO_STRATEGY'
+        AND fetched_at >= now() - INTERVAL '14 days'`,
+    [profileId],
+  );
+  const crBid = crBidRows[0]?.median_bid != null
+    ? Math.round(Number(crBidRows[0].median_bid) * 100) / 100
+    : 0.30;
+  console.log(`  AUTO_STRATEGY median bid: ${currSym}${crBid.toFixed(2)} (fallback 0.30)`);
+  console.log('');
+
+  // CR-5. Artifacts dir for seed files
+  const crArtDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'artifacts');
+
+  let crWritten = 0;
+  let crSkipped = 0;
+
+  for (const { cluster_name } of crClusters) {
+    const crSlug = crToSlug(cluster_name);
+    const recKey = `CLUSTER | ${cluster_name}`;
+    console.log(`  ── ${cluster_name}`);
+
+    // Room-exists: either the AUTO or KW campaign already ENABLED
+    if (crEnabledNamesLower.some(n =>
+      n.includes(`cdl | sp | cluster | ${cluster_name.toLowerCase()}`)
+    )) {
+      console.log(`     skip: ENABLED room already present`);
+      crSkipped++;
+      continue;
+    }
+
+    // Idempotency
+    if (crOpenSet.has(recKey)) {
+      console.log(`     skip: open rec '${recKey}' already exists`);
+      crSkipped++;
+      continue;
+    }
+
+    // CR-5a. Full ASIN roster for this cluster
+    const { rows: crAsinRows } = await pool.query(
+      `SELECT bc.isbn13, bc.work_title, tc.asin
+         FROM book_clusters bc
+         JOIN title_cache   tc ON tc.isbn13 = bc.isbn13
+        WHERE bc.cluster_name = $1
+          AND bc.language     = $2
+        ORDER BY bc.isbn13`,
+      [cluster_name, crLang],
+    );
+    const crSeedAsins = crAsinRows
+      .filter(r => r.asin)
+      .map(r => ({ asin: r.asin, title: r.work_title, isbn13: r.isbn13 }));
+
+    if (crSeedAsins.length === 0) {
+      console.log(`     skip: no resolved ASINs`);
+      crSkipped++;
+      continue;
+    }
+    console.log(`     ASINs: ${crSeedAsins.length}`);
+
+    // CR-5b. Top-20 seed keywords from artifacts/seed-<slug>.json
+    const crSeedPath = join(crArtDir, `seed-${crSlug}.json`);
+    let crKeywords   = [];
+    if (existsSync(crSeedPath)) {
+      try {
+        const sf = JSON.parse(readFileSync(crSeedPath, 'utf8'));
+        crKeywords = (sf.terms ?? []).slice(0, 20).map(t => ({
+          term:       t.term,
+          match_type: 'PHRASE',
+          bid:        crBid,
+          rank:       t.rank,
+          orders:     t.orders,
+        }));
+        console.log(`     Seed keywords: ${crKeywords.length} (seed-${crSlug}.json)`);
+      } catch (e) {
+        console.log(`     Seed file parse error — keywords empty: ${e.message}`);
+      }
+    } else {
+      console.log(`     Seed file absent (seed-${crSlug}.json) — keywords will be empty`);
+    }
+
+    // CR-5c. Campaign names
+    const crAutoCampName = `CDL | SP | CLUSTER | ${cluster_name} | AUTO`;
+    const crKwCampName   = `CDL | SP | CLUSTER | ${cluster_name} | KW`;
+
+    // CR-5d. Evidence manifest
+    const crEvidence = {
+      kind:                 'cluster_room_pair',
+      cluster_name,
+      cluster_slug:         crSlug,
+      language:             crLang,
+      profile_id:           profileIdStr,
+      seed_asins:           crSeedAsins,
+      proposed_default_bid: crBid,
+      budget:               3.00,
+      auto_campaign_name:   crAutoCampName,
+      kw_campaign_name:     crKwCampName,
+      keywords:             crKeywords,
+    };
+
+    const crProposal =
+      `Create cluster room pair for '${cluster_name}': ` +
+      `'${crAutoCampName}' (AUTO, ${currSym}3.00/day, ${crSeedAsins.length} books) + ` +
+      `'${crKwCampName}' (PHRASE KW, ${currSym}3.00/day, ${crSeedAsins.length} books, ` +
+      `${crKeywords.length} seed keyword(s) at ${currSym}${crBid.toFixed(2)}). ` +
+      `Both born PAUSED — activate in console after eyeball.`;
+
+    await pool.query(
+      `INSERT INTO recommendations
+         (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+       VALUES ($1, $2, NULL, $3, $4, $5)`,
+      ['CREATE_STRUCTURE', profileId, recKey, crProposal, JSON.stringify(crEvidence)],
+    );
+    countsByType['CREATE_STRUCTURE']++;
+    written++;
+    crWritten++;
+    console.log(`     ✓ Drafted '${recKey}'`);
+    console.log('');
+  }
+
+  console.log(`  CLUSTER_ROOM: ${crWritten} drafted, ${crSkipped} skipped.`);
+  console.log('──────────────────────────────────────────────────────────────────────');
+}
 
 await pool.end();
 
