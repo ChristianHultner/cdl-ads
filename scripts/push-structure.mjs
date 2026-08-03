@@ -119,14 +119,19 @@ if (!executeMode) {
     console.log('');
 
     // 2a. CAMPAIGN
+    // Evidence overrides: targeting_type (AUTO → API auto; absent → MANUAL) and budget.
+    // Manual creative arc paths are bit-identical (evTargetingType defaults to 'MANUAL').
+    const evTargetingType = ev.targeting_type?.toUpperCase() === 'AUTO' ? 'AUTO' : 'MANUAL';
+    const evDailyBudget   = (typeof ev.budget === 'number' && ev.budget > 0) ? ev.budget : 5;
+
     const campaignBody = {
       campaigns: [
         {
           name:           campaignName,
-          targetingType:  'MANUAL',
+          targetingType:  evTargetingType,
           state:          'PAUSED',
-          dynamicBidding: { strategy: 'LEGACY_FOR_SALES' },
-          budget:         { budgetType: 'DAILY', budget: 5 },
+          ...(evTargetingType === 'MANUAL' ? { dynamicBidding: { strategy: 'LEGACY_FOR_SALES' } } : {}),
+          budget:         { budgetType: 'DAILY', budget: evDailyBudget },
           startDate:      todayISODate(),
         },
       ],
@@ -289,14 +294,19 @@ for (const rec of recs) {
 
   // ── 2a. CAMPAIGN ────────────────────────────────────────────────────────────
   if (!createdCampaignId) {
+  // Evidence overrides: targeting_type (AUTO → API auto; absent → MANUAL) and budget.
+  // Manual creative arc paths are bit-identical (evTargetingType defaults to 'MANUAL').
+  const evTargetingType = ev.targeting_type?.toUpperCase() === 'AUTO' ? 'AUTO' : 'MANUAL';
+  const evDailyBudget   = (typeof ev.budget === 'number' && ev.budget > 0) ? ev.budget : 5;
+
   const campaignBody = {
     campaigns: [
       {
         name:           campaignName,
-        targetingType:  'MANUAL',
+        targetingType:  evTargetingType,
         state:          'PAUSED',
-        dynamicBidding: { strategy: 'LEGACY_FOR_SALES' },
-        budget:         { budgetType: 'DAILY', budget: 5 },
+        ...(evTargetingType === 'MANUAL' ? { dynamicBidding: { strategy: 'LEGACY_FOR_SALES' } } : {}),
+        budget:         { budgetType: 'DAILY', budget: evDailyBudget },
         startDate:      todayISODate(),
       },
     ],
@@ -469,18 +479,28 @@ for (const rec of recs) {
   console.log('');
 
   // ── Mark PUSHED: evidence || { created_campaign_id, created_ad_group_id,
-  //                               created_ad_ids, seed_failures }
+  //                               created_ad_ids, seed_failures, pushed_at,
+  //                               push_result }
   const updatedEvidence = {
     ...ev,
     created_campaign_id: createdCampaignId,
     created_ad_group_id: createdAdGroupId,
     created_ad_ids:      createdAdIds,
     seed_failures:       paFailures,
+    pushed_at:           new Date().toISOString(),
+    push_result: {
+      campaign_id:    createdCampaignId,
+      ad_group_id:    createdAdGroupId,
+      ad_ids:         createdAdIds,
+      ad_success_cnt: createdAdIds.length,
+      ad_failure_cnt: paFailures.length,
+    },
   };
   await pool.query(
     `UPDATE recommendations
-        SET status   = 'PUSHED',
-            evidence = $2
+        SET status    = 'PUSHED',
+            pushed_at = now(),
+            evidence  = $2
       WHERE id     = $1
         AND status = 'APPROVED'`,
     [rec.id, JSON.stringify(updatedEvidence)],
