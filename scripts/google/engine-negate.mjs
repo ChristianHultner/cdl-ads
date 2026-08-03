@@ -31,7 +31,7 @@ const NGRAM_MIN_TERMS   = 5;
 const NGRAM_MIN_SPEND   = 15;   // EUR
 const TERM_MIN_SPEND    = 10;   // EUR
 const M_PRIOR           = 30;
-const PARENT_RATE_FLOOR = 1e-5; // absolute floor when window has 0 conversions
+const PARENT_MIN_CONV   = 5;    // minimum campaign convs (from conv-from) to produce verdicts
 
 // ── Arg parsing ────────────────────────────────────────────────────────────────
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -126,19 +126,30 @@ const [campRow] = await sql`
 
 const campClicks     = Number(campRow.clicks) || 0;
 const campConvs      = Number(campRow.conv)   || 0;
-const campParentRate = Math.max(
-  campClicks > 0 ? campConvs / campClicks : 0,
-  PARENT_RATE_FLOOR
-);
+const campParentRate = campClicks > 0 ? campConvs / campClicks : 0;
 
-// Build per-ag parent rates (fallback to campaign when ag < 50 clicks)
+// Parent data sufficiency guard
+if (campConvs < PARENT_MIN_CONV) {
+  console.log(
+    `PARENT DATA INSUFFICIENT: ${campConvs} conversions since ${convFrom}` +
+    ` (< ${PARENT_MIN_CONV} required). No verdicts possible; all rules stand down.`
+  );
+  console.log(`\nRULE 1 (NEGATE_TERM)`);
+  console.log(`  terms=0 | brand=0 | below_spend=0 | evaluated=0`);
+  console.log(`  of evaluated: ACT 0 / WATCH 0 / NEUTRAL 0 / INSUFFICIENT 0`);
+  console.log(`\nRULE 2 (NEGATE_NGRAM)`);
+  console.log(`  grams=0 | failed_entry=0 (clicks/terms/spend) | in_keyword=0 | evaluated=0`);
+  console.log(`  of evaluated: ACT 0 / WATCH 0 / NEUTRAL 0 / INSUFFICIENT 0`);
+  console.log(`\nTOTAL candidate cards: 0`);
+  process.exit(0);
+}
+
+// Build per-ag parent rates (ag qualifies for own rate only if conv >= 5 AND clicks >= 50)
 const agRateMap = {};
 for (const r of agTotalRows) {
   const c = Number(r.clicks) || 0;
   const v = Number(r.conv)   || 0;
-  agRateMap[r.ag_id] = c >= 50
-    ? Math.max(v / c, PARENT_RATE_FLOOR)
-    : campParentRate;
+  agRateMap[r.ag_id] = (v >= 5 && c >= 50) ? v / c : campParentRate;
 }
 
 // Active positive keyword texts — for NGRAM guard
@@ -153,9 +164,7 @@ const kwRows = await sql`
 const kwTexts = kwRows.map(r => r.kw_text);
 
 // Print window stats
-const convRateStr = campConvs > 0
-  ? (campConvs / campClicks).toFixed(5)
-  : `0 (floor=${PARENT_RATE_FLOOR})`;
+const convRateStr = campConvs > 0 ? (campConvs / campClicks).toFixed(5) : '0';
 console.log(
   `  terms_in_window=${termRows.length}` +
   ` | camp_clicks=${campClicks}` +
@@ -231,7 +240,8 @@ function fmtCard(c) {
 // ── RULE 1 — NEGATE_TERM ──────────────────────────────────────────────────────
 const r1 = { ACT: 0, WATCH: 0, NEUTRAL: 0, INSUFFICIENT: 0 };
 const r1Cards = [];
-let r1EntryCount = 0;
+const r1Total = termRows.length;
+let r1Brand = 0, r1BelowSpend = 0, r1EntryCount = 0;
 
 for (const row of termRows) {
   const clicks  = Number(row.clicks);
@@ -240,8 +250,8 @@ for (const row of termRows) {
   const term    = row.search_term;
   const agId    = row.ag_id;
 
-  if (costEur < TERM_MIN_SPEND) continue;  // spend gate
-  if (isBrand(term))            continue;  // brand guard
+  if (isBrand(term))            { r1Brand++;      continue; }  // brand guard first
+  if (costEur < TERM_MIN_SPEND) { r1BelowSpend++; continue; }  // spend gate
   r1EntryCount++;
 
   const parentRate = agRateMap[agId] ?? campParentRate;
@@ -284,15 +294,16 @@ for (const row of termRows) {
 
 const r2 = { ACT: 0, WATCH: 0, NEUTRAL: 0, INSUFFICIENT: 0 };
 const r2Cards = [];
-let r2EntryCount = 0;
+const r2TotalGrams = Object.keys(gramMap).length;
+let r2FailedEntry = 0, r2InKeyword = 0, r2EntryCount = 0;
 
 for (const [gram, stats] of Object.entries(gramMap)) {
   const { clicks, costEur, conv, terms } = stats;
 
-  if (clicks     < NGRAM_MIN_CLICKS) continue;  // pooled click gate
-  if (terms.size < NGRAM_MIN_TERMS)  continue;  // distinct-term gate
-  if (costEur    < NGRAM_MIN_SPEND)  continue;  // pooled spend gate
-  if (gramInKeyword(gram))           continue;  // active keyword guard
+  if (clicks < NGRAM_MIN_CLICKS || terms.size < NGRAM_MIN_TERMS || costEur < NGRAM_MIN_SPEND) {
+    r2FailedEntry++; continue;                                 // clicks/terms/spend gate
+  }
+  if (gramInKeyword(gram)) { r2InKeyword++; continue; }        // active keyword guard
   r2EntryCount++;
 
   // gate1Met is trivially true: clicks >= NGRAM_MIN_CLICKS already verified
@@ -311,17 +322,14 @@ for (const [gram, stats] of Object.entries(gramMap)) {
 }
 
 // ── Output ─────────────────────────────────────────────────────────────────────
-console.log(
-  `\nRULE 1 (NEGATE_TERM)  entries=${r1EntryCount} (spend≥€${TERM_MIN_SPEND}, non-brand)` +
-  `  →  ACT ${r1.ACT} / WATCH ${r1.WATCH} / NEUTRAL ${r1.NEUTRAL} / INSUFFICIENT ${r1.INSUFFICIENT}`
-);
+console.log(`\nRULE 1 (NEGATE_TERM)`);
+console.log(`  terms=${r1Total} | brand=${r1Brand} | below_spend=${r1BelowSpend} | evaluated=${r1EntryCount}`);
+console.log(`  of evaluated: ACT ${r1.ACT} / WATCH ${r1.WATCH} / NEUTRAL ${r1.NEUTRAL} / INSUFFICIENT ${r1.INSUFFICIENT}`);
 for (const c of r1Cards) console.log(fmtCard(c));
 
-console.log(
-  `\nRULE 2 (NEGATE_NGRAM) entries=${r2EntryCount}` +
-  ` (pooled≥${NGRAM_MIN_CLICKS}clk, ≥${NGRAM_MIN_TERMS}terms, ≥€${NGRAM_MIN_SPEND}, not-in-kw)` +
-  `  →  ACT ${r2.ACT} / WATCH ${r2.WATCH} / NEUTRAL ${r2.NEUTRAL} / INSUFFICIENT ${r2.INSUFFICIENT}`
-);
+console.log(`\nRULE 2 (NEGATE_NGRAM)`);
+console.log(`  grams=${r2TotalGrams} | failed_entry=${r2FailedEntry} (clicks/terms/spend) | in_keyword=${r2InKeyword} | evaluated=${r2EntryCount}`);
+console.log(`  of evaluated: ACT ${r2.ACT} / WATCH ${r2.WATCH} / NEUTRAL ${r2.NEUTRAL} / INSUFFICIENT ${r2.INSUFFICIENT}`);
 for (const c of r2Cards) console.log(fmtCard(c));
 
 console.log(`\nTOTAL candidate cards: ${r1Cards.length + r2Cards.length}`);
