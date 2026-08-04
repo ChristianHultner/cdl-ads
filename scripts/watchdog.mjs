@@ -179,7 +179,9 @@ let   verdict = 'OK';
       `SELECT count(*)::int AS n
          FROM amazon_product_ads
         WHERE asin ~* '^B0'
-          AND state = 'ENABLED'`,
+          AND state = 'ENABLED'
+          AND asin NOT IN ('B0FTZT6YS7','B0FTZTZHKB','B0FTZWPR42')
+          -- pack exceptions, Christian 2026-08-02`,
     );
     const n = rows[0].n;
     if (n > 0) {
