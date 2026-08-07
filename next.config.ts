@@ -5,7 +5,10 @@ const nextConfig: NextConfig = {
   // Scripts run as child processes (not imported); tracing ensures they
   // are available in the Vercel function package alongside the route.
   outputFileTracingIncludes: {
-    '/api/amazon/push-approved': ['./scripts/*.mjs'],
+    '/api/amazon/push-approved': [
+      './scripts/**',
+      './node_modules/@neondatabase/serverless/**',
+    ],
   },
 
   async redirects() {
