@@ -203,6 +203,56 @@ let   verdict = 'OK';
 }
 
 // ---------------------------------------------------------------------------
+// GENERATION_LIVENESS (cause-agnostic weekly-gen health check)
+//
+// Incident 2026-08-06: the Monday weekly (which includes generation) silently
+// failed. launchd reported exit 1 with zero log output. Root cause: an editor
+// save had applied a quarantine xattr to cron-weekly.sh; macOS Gatekeeper
+// refused direct-exec. Repaired manually:
+//   xattr -c scripts/cron-weekly.sh
+//   launchctl kickstart -k gui/$(id -u)/com.cdl-ads.weekly
+//
+// Lesson: editor saves (VS Code, Zed, etc.) can quarantine scripts that run
+// via launchd direct-exec plists. xattr -c <script> cures it. Any future
+// silent Monday failure should be suspected as the same class of problem.
+//
+// This check is cause-agnostic: it only asks "has generation produced anything
+// in the last 8 days?" — 8d = one weekly cycle (7d) + 1d slack. Quiet-but-
+// healthy estates stay under the threshold because weeklies always produce at
+// least one row, or the estate is truly frozen and the alert is correct.
+// ---------------------------------------------------------------------------
+{
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const { rows } = await pool.query(
+      `SELECT max(created_at) AS last_born FROM recommendations`,
+    );
+    const lastBorn      = rows[0]?.last_born;   // null if table is empty
+    const EIGHT_DAYS_MS = 8 * 24 * 60 * 60 * 1000;
+    const tooOld        = !lastBorn || (now.getTime() - new Date(lastBorn).getTime() > EIGHT_DAYS_MS);
+    if (tooOld) {
+      checks.generation_liveness = {
+        status:    'ALERT',
+        last_born: lastBorn ? new Date(lastBorn).toISOString() : null,
+        message:   'no recommendation born in >8d — generation leg may be dead',
+      };
+      verdict = 'ALERT';
+      details.push('no recommendation born in >8d — generation leg may be dead');
+    } else {
+      checks.generation_liveness = {
+        status:    'OK',
+        last_born: new Date(lastBorn).toISOString(),
+        message:   'recommendations born within last 8 days',
+      };
+    }
+  } catch (e) {
+    checks.generation_liveness = { status: 'ERROR', message: `DB query failed: ${e.message}` };
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Write status JSON + self-heartbeat (always — even if DB fails later)
 // ---------------------------------------------------------------------------
 const status = { checked_at: now.toISOString(), checks, verdict, details };
