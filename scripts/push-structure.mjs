@@ -36,6 +36,7 @@ const executeMode  = values.execute === true;
 const STRUCTURE_MAX_PER_RUN = 2;     // v1 hard cap; never increase without Christian's ruling
 const DELAY_MS              = 5_000;
 const TIMEOUT_MS            = 30_000;
+const DEFAULT_BID           = 0.75;  // platform fallback when evidence carries no bid info
 
 // ── DB ───────────────────────────────────────────────────────────────────────
 const { DATABASE_URL } = process.env;
@@ -77,6 +78,13 @@ if (!host) {
 // ── Date helper ───────────────────────────────────────────────────────────────
 // SP v3 campaigns startDate: confirmed shape is ISO "YYYY-MM-DD" (e.g. "2026-07-27").
 const todayISODate = () => new Date().toISOString().slice(0, 10);
+
+// Bid resolver: proposed_default_bid → max per-keyword bid → DEFAULT_BID. Never null.
+// Covers cluster_kw_room evidence that carries per-keyword bids but no top-level bid.
+const resolveDefaultBid = (ev) =>
+  ev.proposed_default_bid
+  ?? (ev.keywords?.length ? Math.max(...ev.keywords.map(k => k.bid ?? 0)) : undefined)
+  ?? DEFAULT_BID;
 
 // ── 1. SELECT APPROVED CREATE_STRUCTURE recs (PUSHED guard via status filter) ─
 const { rows: recs } = await pool.query(
@@ -148,7 +156,7 @@ if (!executeMode) {
           campaignId:  '<created_campaign_id>',
           name:        targetText,
           state:       'ENABLED',
-          defaultBid:  ev.proposed_default_bid,
+          defaultBid:  resolveDefaultBid(ev),
         },
       ],
     };
@@ -288,7 +296,7 @@ for (const rec of recs) {
   let createdAdGroupId  = sp.created_ad_group_id ?? null;
 
   if (createdCampaignId) {
-    console.log(`Resuming rec ${rec.id} from existing campaign ${createdCampaignId}`);
+    console.log(`campaign REUSED ${createdCampaignId}`);
     console.log('');
   }
 
@@ -373,7 +381,7 @@ for (const rec of recs) {
         campaignId:  createdCampaignId,
         name:        targetText,
         state:       'ENABLED',
-        defaultBid:  ev.proposed_default_bid,
+        defaultBid:  resolveDefaultBid(ev),
       },
     ],
   };

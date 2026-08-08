@@ -2266,15 +2266,16 @@ if (values['cluster-rooms']) {
           `${currSym}3.00/day budget, MANUAL targeting, ${ckKeywords.length} exact keyword(s), born PAUSED. ` +
           `Graduates stranded PROMOTE_TERM rec(s): ${graduationFrom.join(', ')}.`;
         const ckEvidence = {
-          kind:            'cluster_kw_room',
-          cluster_name:    clusterName,
-          profile_id:      profileIdStr,
-          seed_asins:      ckSeedAsins,
-          keywords:        ckKeywords,
-          targeting_type:  'MANUAL',
-          budget:          3.00,
-          graduation_from: graduationFrom,
-          orphan_rec_ids:  graduationFrom,
+          kind:                 'cluster_kw_room',
+          cluster_name:         clusterName,
+          profile_id:           profileIdStr,
+          seed_asins:           ckSeedAsins,
+          keywords:             ckKeywords,
+          proposed_default_bid: Math.max(...ckKeywords.map(k => k.bid)),
+          targeting_type:       'MANUAL',
+          budget:               3.00,
+          graduation_from:      graduationFrom,
+          orphan_rec_ids:       graduationFrom,
         };
 
         await pool.query(
