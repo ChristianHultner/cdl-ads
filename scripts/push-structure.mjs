@@ -107,7 +107,7 @@ if (!executeMode) {
   for (const rec of recs) {
     const ev           = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence;
     const targetText   = rec.target_text;
-    const campaignName = `CDL | SP | ${targetText}`;
+    const campaignName = ev.campaign_name ?? `CDL | SP | ${targetText}`;
     const seedAsins    = ev.seed_asins ?? [];
 
     console.log('─'.repeat(60));
@@ -272,7 +272,7 @@ let pushed = 0;
 for (const rec of recs) {
   const ev           = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence;
   const targetText   = rec.target_text;
-  const campaignName = `CDL | SP | ${targetText}`;
+  const campaignName = ev.campaign_name ?? `CDL | SP | ${targetText}`;
   const seedAsins    = ev.seed_asins ?? [];
 
   console.log('─'.repeat(60));

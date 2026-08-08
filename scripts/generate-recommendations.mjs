@@ -1119,7 +1119,7 @@ if (orphans.length === 0) {
   for (const [lang, langOrphans] of Object.entries(orphansByLang)) {
     if (langOrphans.length === 0) continue;
 
-    const targetText = `Keywords - Exacta ${countryCode} (${lang})`;
+    const targetText = countryCode === 'US' ? 'CDL | US | SP | ORPHAN KWs | EXACT' : `Keywords - Exacta ${countryCode} (${lang})`;
 
     // Idempotency: skip if an open CREATE_STRUCTURE for this target_text already exists.
     const { rows: existOpen } = await pool.query(
@@ -2125,6 +2125,271 @@ if (values['cluster-rooms']) {
 
   console.log(`  CLUSTER_ROOM: ${crWritten} drafted, ${crSkipped} skipped.`);
   console.log('──────────────────────────────────────────────────────────────────────');
+
+  // ── CLUSTER_KW_ROOM: keyword sibling rooms born-PAUSED for clusters with ──────
+  // an existing CDL AUTO room + ≥1 stranded APPROVED PROMOTE_TERM orphan.
+  // 'CDL | SP | CLUSTER | <name> | KW' — MANUAL, budget 3.00, full ASIN
+  // roster from AUTO room product ads, keywords = stranded terms EXACT at
+  // evidence.approved_bid. Evidence: kind='cluster_kw_room', graduation_from.
+  console.log('\n── CLUSTER_KW_ROOM phase ───────────────────────────────────────────────────');
+
+  // CK-1. CDL CLUSTER AUTO rooms + their ASIN rosters (ENABLED)
+  const { rows: ckAutoRows } = await pool.query(
+    `SELECT c.campaign_id::text, c.name,
+            array_agg(DISTINCT pa.asin) FILTER (WHERE pa.state = 'ENABLED') AS asins
+       FROM amazon_campaigns   c
+       JOIN amazon_ad_groups   ag ON ag.campaign_id = c.campaign_id
+                                 AND ag.profile_id  = c.profile_id
+       JOIN amazon_product_ads pa ON pa.ad_group_id = ag.ad_group_id
+                                 AND pa.profile_id  = ag.profile_id
+      WHERE c.profile_id = $1
+        AND c.state      = 'ENABLED'
+        AND c.name       ILIKE 'CDL | SP | CLUSTER |%| AUTO'
+      GROUP BY c.campaign_id, c.name`,
+    [profileId],
+  );
+  const ckAutoRooms = ckAutoRows.map(r => {
+    const m = r.name.match(/CDL \| SP \| CLUSTER \| (.+) \| AUTO$/);
+    return m ? { cluster_name: m[1], campaign_id: r.campaign_id, asins: r.asins ?? [] } : null;
+  }).filter(Boolean);
+  console.log(`  CDL CLUSTER AUTO rooms: ${ckAutoRooms.length}`);
+
+  // CK-2. Idempotency — ENABLED KW rooms + open CREATE_STRUCTURE recs
+  const { rows: ckLiveKwRows } = await pool.query(
+    `SELECT name FROM amazon_campaigns
+      WHERE profile_id = $1 AND state = 'ENABLED' AND name ILIKE 'CDL | SP | CLUSTER |%| KW'`,
+    [profileId],
+  );
+  const ckLiveKwNamesLower = new Set(ckLiveKwRows.map(r => r.name.toLowerCase()));
+  const { rows: ckOpenKwRows } = await pool.query(
+    `SELECT target_text FROM recommendations
+      WHERE profile_id = $1 AND rec_type = 'CREATE_STRUCTURE'
+        AND target_text LIKE 'CLUSTER |%| KW'
+        AND status = ANY($2)`,
+    [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+  );
+  const ckOpenKwSet = new Set(ckOpenKwRows.map(r => r.target_text));
+
+  if (ckAutoRooms.length === 0) {
+    console.log('  No CDL CLUSTER AUTO rooms — skipping CLUSTER_KW_ROOM phase.');
+  } else {
+    // CK-3. Stranded APPROVED PROMOTE_TERM orphans (resolved_destination = null)
+    const { rows: ckStrandedRows } = await pool.query(
+      `SELECT id, target_text, evidence
+         FROM recommendations
+        WHERE profile_id = $1
+          AND rec_type   = 'PROMOTE_TERM'
+          AND status     = 'APPROVED'
+          AND (evidence->>'resolved_destination') IS NULL`,
+      [profileId],
+    );
+    console.log(`  Stranded APPROVED PROMOTE_TERM recs: ${ckStrandedRows.length}`);
+
+    if (ckStrandedRows.length === 0) {
+      console.log('  No stranded recs — skipping CLUSTER_KW_ROOM phase.');
+    } else {
+      // CK-4. Map each orphan to a cluster via ASIN overlap with AUTO room rosters
+      const ckClusterAsinSets = new Map(); // cluster_name → Set<asin>
+      for (const room of ckAutoRooms) ckClusterAsinSets.set(room.cluster_name, new Set(room.asins));
+
+      const ckAllAgIds = [];
+      const ckRecEvMap = new Map(); // rec_id → { target_text, ev, convAgIds }
+      for (const row of ckStrandedRows) {
+        const ev = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence;
+        const pls = Array.isArray(ev.placements) ? ev.placements : [];
+        const convAgs = pls.filter(p => Number(p.orders) > 0).map(p => String(p.ad_group_id)).filter(Boolean);
+        const allAgs  = pls.map(p => String(p.ad_group_id)).filter(Boolean);
+        const targetAgs = convAgs.length > 0 ? convAgs : allAgs;
+        ckAllAgIds.push(...targetAgs);
+        ckRecEvMap.set(Number(row.id), { target_text: row.target_text, ev, convAgIds: targetAgs });
+      }
+
+      // Batch-fetch product ads for all relevant ag ids
+      const ckAgAsinMap = new Map(); // ag_id → Set<asin>
+      const ckUniqueAgIds = [...new Set(ckAllAgIds)];
+      if (ckUniqueAgIds.length > 0) {
+        const { rows: ckPaRows } = await pool.query(
+          `SELECT ad_group_id::text AS ag_id, asin FROM amazon_product_ads
+            WHERE profile_id = $1 AND ad_group_id = ANY($2) AND state = 'ENABLED'`,
+          [profileId, ckUniqueAgIds],
+        );
+        for (const r of ckPaRows) {
+          if (!ckAgAsinMap.has(r.ag_id)) ckAgAsinMap.set(r.ag_id, new Set());
+          ckAgAsinMap.get(r.ag_id).add(r.asin);
+        }
+      }
+
+      // Map rec → best-overlap cluster
+      const ckOrphansByCluster = new Map(); // cluster_name → [rec_info]
+      for (const [recId, recInfo] of ckRecEvMap) {
+        const recAsins = new Set(recInfo.convAgIds.flatMap(ag => [...(ckAgAsinMap.get(ag) ?? [])]));
+        let bestCluster = null, bestOverlap = 0;
+        for (const [cn, cnAsins] of ckClusterAsinSets) {
+          let overlap = 0;
+          for (const a of recAsins) if (cnAsins.has(a)) overlap++;
+          if (overlap > bestOverlap) { bestOverlap = overlap; bestCluster = cn; }
+        }
+        console.log(
+          bestCluster
+            ? `  rec ${recId} '${recInfo.target_text}' → '${bestCluster}' (${bestOverlap} ASIN overlap)`
+            : `  rec ${recId} '${recInfo.target_text}' → no cluster match`,
+        );
+        if (!bestCluster) continue;
+        if (!ckOrphansByCluster.has(bestCluster)) ckOrphansByCluster.set(bestCluster, []);
+        ckOrphansByCluster.get(bestCluster).push({ id: recId, ...recInfo });
+      }
+
+      // CK-5. Emit ONE CREATE_STRUCTURE per qualifying cluster
+      let ckKwWritten = 0, ckKwSkipped = 0;
+      for (const [clusterName, clusterOrphans] of ckOrphansByCluster) {
+        const recKey   = `CLUSTER | ${clusterName} | KW`;
+        const campName = `CDL | SP | CLUSTER | ${clusterName} | KW`;
+
+        if (ckLiveKwNamesLower.has(campName.toLowerCase())) {
+          console.log(`  skip: ENABLED KW room '${campName}' already present`); ckKwSkipped++; continue;
+        }
+        if (ckOpenKwSet.has(recKey)) {
+          console.log(`  skip: open rec '${recKey}' already exists`); ckKwSkipped++; continue;
+        }
+        const autoRoom = ckAutoRooms.find(r => r.cluster_name === clusterName);
+        if (!autoRoom) { console.log(`  skip: AUTO room not found for '${clusterName}'`); ckKwSkipped++; continue; }
+
+        const ckSeedAsins    = autoRoom.asins.map(asin => ({ asin }));
+        const ckKeywords     = clusterOrphans.map(o => ({
+          keyword: o.target_text, match_type: 'EXACT',
+          bid: Number(o.ev.approved_bid ?? o.ev.proposed_bid ?? 0.35),
+        }));
+        const graduationFrom = clusterOrphans.map(o => o.id);
+
+        const ckProposal =
+          `Create MANUAL cluster KW room '${campName}' — ${ckSeedAsins.length} ASIN(s), ` +
+          `${currSym}3.00/day budget, MANUAL targeting, ${ckKeywords.length} exact keyword(s), born PAUSED. ` +
+          `Graduates stranded PROMOTE_TERM rec(s): ${graduationFrom.join(', ')}.`;
+        const ckEvidence = {
+          kind:            'cluster_kw_room',
+          cluster_name:    clusterName,
+          profile_id:      profileIdStr,
+          seed_asins:      ckSeedAsins,
+          keywords:        ckKeywords,
+          targeting_type:  'MANUAL',
+          budget:          3.00,
+          graduation_from: graduationFrom,
+          orphan_rec_ids:  graduationFrom,
+        };
+
+        await pool.query(
+          `INSERT INTO recommendations (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+           VALUES ($1, $2, NULL, $3, $4, $5)`,
+          ['CREATE_STRUCTURE', profileId, recKey, ckProposal, JSON.stringify(ckEvidence)],
+        );
+        countsByType['CREATE_STRUCTURE']++;
+        written++;
+        ckKwWritten++;
+        console.log(`  ✓ Drafted '${recKey}' — ${ckKeywords.length} keyword(s), ${ckSeedAsins.length} ASIN(s)`);
+      }
+      console.log(`  CLUSTER_KW_ROOM: ${ckKwWritten} drafted, ${ckKwSkipped} skipped.`);
+    }
+  }
+  console.log('──────────────────────────────────────────────────────────────────────');
+
+  // ── ORPHAN KW ROOM (non-ES profiles): 'CDL | <CC> | SP | ORPHAN KWs | EXACT' ──
+  // For profiles without CDL CLUSTER rooms (e.g. US): collect stranded APPROVED
+  // PROMOTE_TERM orphans and emit ONE CREATE_STRUCTURE as the orphan-router
+  // destination. Uses evidence.campaign_name (push-structure honors it over default).
+  if (countryCode !== 'ES') {
+    console.log('\n── ORPHAN KW ROOM phase ─────────────────────────────────────────────────────');
+    const orphanKwCampName = `CDL | ${countryCode} | SP | ORPHAN KWs | EXACT`;
+    const orphanKwRecKey   = orphanKwCampName; // target_text = full room name
+
+    const { rows: orphanKwExist } = await pool.query(
+      `SELECT id FROM recommendations
+        WHERE profile_id = $1 AND rec_type = 'CREATE_STRUCTURE'
+          AND target_text = $2 AND status = ANY($3)`,
+      [profileId, orphanKwRecKey, ['DRAFT', 'APPROVED', 'PUSHED']],
+    );
+    if (orphanKwExist.length > 0) {
+      console.log(`  [ORPHAN KW ROOM] '${orphanKwCampName}' already open (id ${orphanKwExist[0].id}) — skipping.`);
+    } else {
+      const { rows: orphanKwStrandedRows } = await pool.query(
+        `SELECT id, target_text, evidence
+           FROM recommendations
+          WHERE profile_id = $1
+            AND rec_type   = 'PROMOTE_TERM'
+            AND status     = 'APPROVED'
+            AND (evidence->>'resolved_destination') IS NULL`,
+        [profileId],
+      );
+      console.log(`  Stranded APPROVED PROMOTE_TERM recs: ${orphanKwStrandedRows.length}`);
+
+      if (orphanKwStrandedRows.length === 0) {
+        console.log('  No stranded recs — skipping ORPHAN KW ROOM.');
+      } else {
+        // Seed ASINs: converting placement ag product ads, sorted by order weight
+        const orphanKwAgMap = new Map(); // ag_id → total_orders
+        for (const row of orphanKwStrandedRows) {
+          const ev = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence;
+          const pls  = Array.isArray(ev.placements) ? ev.placements : [];
+          const conv = pls.filter(p => Number(p.orders) > 0);
+          for (const p of (conv.length > 0 ? conv : pls)) {
+            if (p.ad_group_id) {
+              const ag = String(p.ad_group_id);
+              orphanKwAgMap.set(ag, (orphanKwAgMap.get(ag) ?? 0) + Number(p.orders));
+            }
+          }
+        }
+        const orphanKwAsinMap = new Map();
+        if (orphanKwAgMap.size > 0) {
+          const { rows: orphanKwPaRows } = await pool.query(
+            `SELECT DISTINCT asin, ad_group_id::text AS ag_id FROM amazon_product_ads
+              WHERE profile_id = $1 AND ad_group_id = ANY($2) AND state = 'ENABLED'`,
+            [profileId, [...orphanKwAgMap.keys()]],
+          );
+          for (const r of orphanKwPaRows) {
+            orphanKwAsinMap.set(r.asin, (orphanKwAsinMap.get(r.asin) ?? 0) + (orphanKwAgMap.get(r.ag_id) ?? 0));
+          }
+        }
+        const orphanKwSeedAsins = [...orphanKwAsinMap.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([asin, orders]) => ({ asin, orders }));
+
+        // Keywords from stranded recs
+        const orphanKwKeywords = orphanKwStrandedRows.map(row => {
+          const ev = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence;
+          return {
+            keyword: row.target_text, match_type: 'EXACT',
+            bid: Number(ev.approved_bid ?? ev.proposed_bid ?? 0.35),
+          };
+        });
+        const orphanRecIds = orphanKwStrandedRows.map(r => Number(r.id));
+
+        const orphanKwProposal =
+          `Create MANUAL orphan KW room '${orphanKwCampName}' — ${orphanKwSeedAsins.length} ASIN(s), ` +
+          `${currSym}3.00/day budget, MANUAL targeting, ${orphanKwKeywords.length} exact keyword(s), born PAUSED. ` +
+          `US orphan-router destination for stranded PROMOTE_TERM rec(s): ${orphanRecIds.join(', ')}.`;
+        const orphanKwEvidence = {
+          kind:           'us_orphan_kw_room',
+          profile_id:     profileIdStr,
+          campaign_name:  orphanKwCampName,
+          seed_asins:     orphanKwSeedAsins,
+          keywords:       orphanKwKeywords,
+          targeting_type: 'MANUAL',
+          budget:         3.00,
+          orphan_rec_ids: orphanRecIds,
+          orphan_router:  true,
+        };
+
+        await pool.query(
+          `INSERT INTO recommendations (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+           VALUES ($1, $2, NULL, $3, $4, $5)`,
+          ['CREATE_STRUCTURE', profileId, orphanKwRecKey, orphanKwProposal, JSON.stringify(orphanKwEvidence)],
+        );
+        countsByType['CREATE_STRUCTURE']++;
+        written++;
+        console.log(`  ✓ Drafted '${orphanKwCampName}' — ${orphanKwKeywords.length} keyword(s), ${orphanKwSeedAsins.length} ASIN(s)`);
+      }
+    }
+    console.log('──────────────────────────────────────────────────────────────────────');
+  }
 }
 
 await pool.end();
