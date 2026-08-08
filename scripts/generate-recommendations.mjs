@@ -1950,9 +1950,20 @@ console.log('─'.repeat(70));
 // Campaign: 'CDL | SP | CLUSTER | <NAME> | AUTO', budget €3.00/day,
 // AUTO targeting, full cluster ASIN roster as product ads, born PAUSED.
 // Evidence manifest: roster, bid, budget, targeting_type, works_count, spend_60d.
-if (values['cluster-rooms']) {
+// Profile → language mapping (cluster_auto_room, cluster_kw_room, orphan_kw_room).
+// Add new entries as profiles onboard; absent profiles are skipped with a log line.
+const CLUSTER_LANG_MAP = {
+  '2263723137827296': 'spa',  // ES profile (Spain)
+  '139446882235960':  'eng',  // US profile
+};
+
+// ── cluster_auto_room entry guard ────────────────────────────────────────────
+if (!values['cluster-rooms']) {
+  console.log('cluster-room phases skipped (no --cluster-rooms flag)');
+} else {
   console.log('\n── CLUSTER_ROOM phase ──────────────────────────────────────────────────────');
-  const crLang = values['cluster-lang'] ?? 'spa';
+  const crLang = CLUSTER_LANG_MAP[profileIdStr];
+  if (!crLang) { console.log(`  cluster-room phases skipped — no language mapping for profile ${profileIdStr}`); } else {
   console.log(`  --cluster-rooms active — language: ${crLang}`);
 
   // Slug helper (mirrors seed-cluster-terms.mjs)
@@ -2125,6 +2136,15 @@ if (values['cluster-rooms']) {
 
   console.log(`  CLUSTER_ROOM: ${crWritten} drafted, ${crSkipped} skipped.`);
   console.log('──────────────────────────────────────────────────────────────────────');
+  } // end crLang check
+} // end cluster_auto_room guard
+
+// ── cluster_kw_room entry guard ──────────────────────────────────────────────
+if (!values['cluster-rooms']) {
+  console.log('cluster-room phases skipped (no --cluster-rooms flag)');
+} else {
+  const ckLang = CLUSTER_LANG_MAP[profileIdStr];
+  if (!ckLang) { console.log(`  cluster-room phases skipped — no language mapping for profile ${profileIdStr}`); } else {
 
   // ── CLUSTER_KW_ROOM: keyword sibling rooms born-PAUSED for clusters with ──────
   // an existing CDL AUTO room + ≥1 stranded APPROVED PROMOTE_TERM orphan.
@@ -2292,12 +2312,16 @@ if (values['cluster-rooms']) {
     }
   }
   console.log('──────────────────────────────────────────────────────────────────────');
+  } // end ckLang check
+} // end cluster_kw_room guard
 
-  // ── ORPHAN KW ROOM (non-ES profiles): 'CDL | <CC> | SP | ORPHAN KWs | EXACT' ──
-  // For profiles without CDL CLUSTER rooms (e.g. US): collect stranded APPROVED
-  // PROMOTE_TERM orphans and emit ONE CREATE_STRUCTURE as the orphan-router
-  // destination. Uses evidence.campaign_name (push-structure honors it over default).
-  if (countryCode !== 'ES') {
+// ── orphan_kw_room entry guard ───────────────────────────────────────────────
+if (!values['cluster-rooms']) {
+  console.log('cluster-room phases skipped (no --cluster-rooms flag)');
+} else {
+  const orpLang = CLUSTER_LANG_MAP[profileIdStr];
+  if (!orpLang) { console.log(`  cluster-room phases skipped — no language mapping for profile ${profileIdStr}`); }
+  else if (countryCode !== 'ES') {
     console.log('\n── ORPHAN KW ROOM phase ─────────────────────────────────────────────────────');
     const orphanKwCampName = `CDL | ${countryCode} | SP | ORPHAN KWs | EXACT`;
     const orphanKwRecKey   = orphanKwCampName; // target_text = full room name
@@ -2391,7 +2415,7 @@ if (values['cluster-rooms']) {
     }
     console.log('──────────────────────────────────────────────────────────────────────');
   }
-}
+} // end orphan_kw_room guard
 
 await pool.end();
 
