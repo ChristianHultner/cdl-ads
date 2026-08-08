@@ -115,7 +115,7 @@ if (!executeMode) {
   for (const rec of recs) {
     const ev           = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence;
     const targetText   = rec.target_text;
-    const campaignName = ev.campaign_name ?? `CDL | SP | ${targetText}`;
+    const campaignName = ev.campaign_name ?? (targetText.startsWith('CDL | ') ? targetText : `CDL | SP | ${targetText}`);
     const seedAsins    = ev.seed_asins ?? [];
 
     console.log('─'.repeat(60));
@@ -130,7 +130,7 @@ if (!executeMode) {
     // Evidence overrides: targeting_type (AUTO → API auto; absent → MANUAL) and budget.
     // Manual creative arc paths are bit-identical (evTargetingType defaults to 'MANUAL').
     const evTargetingType = ev.targeting_type?.toUpperCase() === 'AUTO' ? 'AUTO' : 'MANUAL';
-    const evDailyBudget   = (typeof ev.budget === 'number' && ev.budget > 0) ? ev.budget : 5;
+    const evDailyBudget   = (typeof ev.budget === 'number' && ev.budget > 0) ? ev.budget : 3.00;
 
     const campaignBody = {
       campaigns: [
@@ -280,7 +280,7 @@ let pushed = 0;
 for (const rec of recs) {
   const ev           = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence;
   const targetText   = rec.target_text;
-  const campaignName = ev.campaign_name ?? `CDL | SP | ${targetText}`;
+  const campaignName = ev.campaign_name ?? (targetText.startsWith('CDL | ') ? targetText : `CDL | SP | ${targetText}`);
   const seedAsins    = ev.seed_asins ?? [];
 
   console.log('─'.repeat(60));
@@ -305,7 +305,7 @@ for (const rec of recs) {
   // Evidence overrides: targeting_type (AUTO → API auto; absent → MANUAL) and budget.
   // Manual creative arc paths are bit-identical (evTargetingType defaults to 'MANUAL').
   const evTargetingType = ev.targeting_type?.toUpperCase() === 'AUTO' ? 'AUTO' : 'MANUAL';
-  const evDailyBudget   = (typeof ev.budget === 'number' && ev.budget > 0) ? ev.budget : 5;
+  const evDailyBudget   = (typeof ev.budget === 'number' && ev.budget > 0) ? ev.budget : 3.00;
 
   const campaignBody = {
     campaigns: [
