@@ -256,9 +256,10 @@ async function downloadReport(phase, reportId) {
   let gzBuf = Buffer.from(await s3Res.arrayBuffer());
 
   // Gunzip + parse
-  const decompressed = gunzipSync(gzBuf);
+  let decompressed = gunzipSync(gzBuf);
   gzBuf = null;
   const reportRows = JSON.parse(decompressed.toString('utf8'));
+  decompressed = null;
   console.log(`${phase}: downloaded ${reportRows.length} rows`);
   return reportRows;
 }
@@ -288,7 +289,7 @@ let campaignOk = false;
       },
     });
 
-    const reportRows = await downloadReport(phase, reportId);
+    let reportRows = await downloadReport(phase, reportId);
     const fetched    = reportRows.length;
 
     // Pool created after COMPLETED + downloaded; closed in finally
@@ -332,6 +333,7 @@ let campaignOk = false;
     } finally {
       client.release();
     }
+    reportRows = null; // release report body — free memory before next phase
 
     // Count invariant
     const { rows: cntRows } = await phasePool.query(
@@ -377,7 +379,7 @@ let searchOk = false;
       },
     });
 
-    const reportRows = await downloadReport(phase, reportId);
+    let reportRows = await downloadReport(phase, reportId);
     const fetched    = reportRows.length;
 
     // Pool created after COMPLETED + downloaded; closed in finally
@@ -439,6 +441,7 @@ let searchOk = false;
     } finally {
       client.release();
     }
+    reportRows = null; // release report body — free memory before next phase
 
     // Count invariant
     const { rows: cntRows } = await phasePool.query(
@@ -487,7 +490,7 @@ let advProdOk = false;
       },
     });
 
-    const reportRows = await downloadReport(phase, reportId);
+    let reportRows = await downloadReport(phase, reportId);
     const fetched    = reportRows.length;
 
     // Pool created after COMPLETED + downloaded; closed in finally
@@ -550,6 +553,7 @@ let advProdOk = false;
     } finally {
       client.release();
     }
+    reportRows = null; // release report body — free memory after landing
 
     // Count invariant
     const { rows: cntRows } = await phasePool.query(

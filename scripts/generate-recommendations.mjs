@@ -366,14 +366,16 @@ if (candidates.length > 0) {
     [profileId, termList],
   );
 
-  // Build lookup sets keyed "recType|target_text"
+  // Build lookup sets keyed "recType|lower(target_text)"
   // v5: BID_ADJUST keyed same way — profile+type+target.
+  // v6 fix: match on lower(target_text) and include HELD in terminal statuses
+  //         so re-born terms (any case) are suppressed across all terminal states.
   const openSet     = new Set(); // DRAFT | APPROVED | PUSHED → skip
-  const rejectedSet = new Set(); // REJECTED → skip
+  const rejectedSet = new Set(); // REJECTED | HELD → skip (not placement-scoped)
   for (const row of existingRows) {
-    const key = `${row.rec_type}|${row.target_text}`;
+    const key = `${row.rec_type}|${row.target_text.toLowerCase()}`;
     if (['DRAFT', 'APPROVED', 'PUSHED'].includes(row.status)) openSet.add(key);
-    else if (row.status === 'REJECTED')                        rejectedSet.add(key);
+    else if (['REJECTED', 'HELD'].includes(row.status))        rejectedSet.add(key);
   }
 
   // Detect auto ad groups: any group whose ENABLED targets include expression_type='AUTO'.
@@ -593,7 +595,7 @@ if (candidates.length > 0) {
 
     // ── Idempotency check — uses finalRecType ─────────────────────────────────
     countsByType[finalRecType] = (countsByType[finalRecType] ?? 0) + 1;
-    const key = `${finalRecType}|${c.searchTerm}`;
+    const key = `${finalRecType}|${c.searchTerm.toLowerCase()}`;
 
     if (openSet.has(key)) {
       skippedExisting++;

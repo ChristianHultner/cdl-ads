@@ -420,14 +420,20 @@ for (const rec of recs) {
     partial++;
   } else {
     // Both legs satisfied.
-    pushResult.outcome = 'SUCCESS';
+    const nowIso = new Date().toISOString();
+    pushResult.outcome   = 'SUCCESS';
+    pushResult.pushed_at = nowIso;
     if (isDuplicatePath) pushResult.pause = { adId: kindleAdId, http: pauseRes.status };
     await pool.query(
       `UPDATE recommendations
-          SET status   = 'PUSHED',
-              evidence = evidence || jsonb_build_object('push_result', $2::jsonb)
+          SET status    = 'PUSHED',
+              pushed_at = $3,
+              evidence  = evidence || jsonb_build_object(
+                            'push_result', $2::jsonb,
+                            'pushed_at',   $4::text
+                          )
         WHERE id = $1`,
-      [rec.id, JSON.stringify(pushResult)],
+      [rec.id, JSON.stringify(pushResult), nowIso, nowIso],
     );
     if (isDuplicatePath) {
       console.log(`  Rec ${rec.id} → PUSHED via existing HC (hc_enable: ${JSON.stringify(pushResult.hc_enable)}, Kindle paused: ${kindleAdId})`);
