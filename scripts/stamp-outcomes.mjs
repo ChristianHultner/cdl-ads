@@ -38,13 +38,15 @@ const HORIZONS = [
 ];
 const MS_PER_DAY = 86_400_000;
 
-// ── 1. Fetch PUSHED recs with a pushed_at in evidence ───────────────────────
+// ── 1. Fetch PUSHED recs with a resolvable pushed_at ───────────────────────
+// Column is authoritative (set by push scripts and backdate); evidence legacy fallback.
 const { rows: recs } = await pool.query(
-  `SELECT id, rec_type, profile_id, campaign_id, target_text, evidence
+  `SELECT id, rec_type, profile_id, campaign_id, target_text, evidence,
+          COALESCE(pushed_at, (evidence->>'pushed_at')::timestamptz) AS pushed_at_resolved
      FROM recommendations
-    WHERE status    = 'PUSHED'
+    WHERE status     = 'PUSHED'
       AND profile_id = $1
-      AND evidence->>'pushed_at' IS NOT NULL`,
+      AND COALESCE(pushed_at, (evidence->>'pushed_at')::timestamptz) IS NOT NULL`,
   [profileIdStr],
 );
 
@@ -69,7 +71,8 @@ let stampsWritten = 0;
 
 for (const rec of recs) {
   const ev        = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence;
-  const pushedAt  = new Date(ev.pushed_at);
+  // Column authoritative; evidence.pushed_at is legacy fallback.
+  const pushedAt  = new Date(rec.pushed_at_resolved ?? ev.pushed_at);
   const pushedMs  = pushedAt.getTime();
 
   const dueHorizons = HORIZONS.filter(h => {
