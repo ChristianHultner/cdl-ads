@@ -84,17 +84,36 @@ function judgeNegateTerm(ev, m) {
   const cost     = safeN(m.cost);
   const refSpend = safeN(ev.spend);
   const stopped  = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
-  if (cost < 0.10) return { verdict: 'WIN', euros_stopped: stopped };
-  if (!isNaN(refSpend) && refSpend > 0 && cost < refSpend * 0.50)
-    return { verdict: 'PARTIAL', euros_stopped: stopped, pct_reduced: 1 - cost / refSpend };
-  return { verdict: 'LEAK', euros_stopped: stopped };
+  // WIN bar: window spend ≤ 5% of ev.spend (pre-negation spend)
+  // PARTIAL: ≤ 50% of ev.spend; LEAK: else
+  // (Previous bar was cost < 0.10 absolute — unreachable when window overlaps
+  //  pre-push days or attribution lag; changed 2026-08-11)
+  if (!isNaN(refSpend) && refSpend > 0) {
+    const ratio = cost / refSpend;
+    if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio };
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio };
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio };
+  }
+  // refSpend unknown or zero — fall back to near-zero absolute
+  if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
+  return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
 }
 
 function judgeNegateTarget(ev, m) {
-  // stamp-outcomes.mjs has NO handler for NEGATE_TARGET.
-  // All stamps carry only { rows_found: 0, window_days }.
-  // No spend or cost data is captured → cannot grade.
-  return { verdict: 'NO-DATA', note: 'stamp handler absent; metrics={rows_found:0,window_days} only' };
+  // Metrics: spend/clicks for target ASIN in amazon_search_term_daily post-negation.
+  // WIN bar mirrors NEGATE_TERM: window spend ≤ 5% of ev.spend; PARTIAL ≤ 50%; else LEAK.
+  if (m.rows_found === 0) return { verdict: 'NO-DATA' };
+  const cost     = safeN(m.cost);
+  const refSpend = safeN(ev.spend);
+  const stopped  = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
+  if (!isNaN(refSpend) && refSpend > 0) {
+    const ratio = cost / refSpend;
+    if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio };
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio };
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio };
+  }
+  if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
+  return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
 }
 
 function judgeBidAdjust(ev, m) {
@@ -162,16 +181,31 @@ function judgeBidAdjust(ev, m) {
 }
 
 function judgeReplaceProductAd(ev, m) {
-  // stamp-outcomes.mjs has NO handler for REPLACE_PRODUCT_AD.
-  // All 3,563 stamps carry only { rows_found: 0, window_days }.
-  // Evidence carries: b0_asin, hc_isbn10/13, ad_id, campaign_id.
-  // No cost/impression data for either B0 or HC ad captured.
-  return {
+  // Metrics: B0 and HC ad-pair daily rows from amazon_advertised_product_daily,
+  // scoped to campaign_id (grain: asin+campaign_id).
+  // WIN:     B0 dark (b0_impressions=0) AND HC serving (hc_impressions>0 or hc_clicks>0)
+  // PARTIAL: B0 dark but HC not yet serving, OR HC serving but B0 still active
+  // LEAK:    B0 still serving and HC not serving
+  if (m.rows_found === 0) return {
     verdict: 'NO-DATA',
-    note: 'stamp handler absent; no B0/HC ad-pair metrics captured',
-    b0_asin:   ev.b0_asin,
-    hc_isbn13: ev.hc_isbn13,
+    note: 'no daily rows for B0 or HC in window',
+    b0_asin: ev.b0_asin,
+    hc_asin: ev.hc_isbn10,
   };
+  const b0Impr   = safeN(m.b0_impressions ?? 0);
+  const hcImpr   = safeN(m.hc_impressions ?? 0);
+  const hcClicks = safeN(m.hc_clicks      ?? 0);
+  const b0Spend  = safeN(m.b0_spend);
+  const hcOrders = safeN(m.hc_orders      ?? 0);
+  const b0Dark   = b0Impr === 0;
+  const hcServe  = hcImpr > 0 || hcClicks > 0;
+  if (b0Dark && hcServe)
+    return { verdict: 'WIN',     note: 'B0 dark, HC serving', b0_spend: b0Spend, hc_orders: hcOrders };
+  if (b0Dark)
+    return { verdict: 'PARTIAL', note: 'B0 dark but HC not yet serving', b0_spend: b0Spend };
+  if (hcServe)
+    return { verdict: 'PARTIAL', note: 'HC serving but B0 still active', b0_spend: b0Spend };
+  return   { verdict: 'LEAK',    note: 'B0 still active, HC not serving', b0_spend: b0Spend };
 }
 
 function judgePromoteTerm(ev, m, horizon) {
@@ -299,15 +333,14 @@ console.log(SEP1);
 
 console.log(`
 ⚠  ADAPTATIONS (stamp reality vs spec):
-  1. NEGATE_TARGET  — stamp-outcomes.mjs has no NEGATE_TARGET handler.
-     All 37 stamps: {rows_found:0, window_days}.  No spend captured.
-     All 37 → NO-DATA.  Cannot grade until stamp handler is added.
+  1. NEGATE_TARGET  — handler added 2026-08-11; metrics: clicks+cost from
+     amazon_search_term_daily WHERE search_term = target ASIN.
+     WIN bar mirrors NEGATE_TERM (≤5% of ev.spend).
 
-  2. REPLACE_PRODUCT_AD — stamp-outcomes.mjs has no handler.
-     All 3,563 stamps: {rows_found:0, window_days}.
-     Evidence carries b0_asin, hc_isbn10/13, ad_id, campaign_id —
-     but metrics lack the B0/HC ad-pair split entirely.
-     All 3,563 → NO-DATA.  Grading requires a dedicated stamp handler.
+  2. REPLACE_PRODUCT_AD — handler added 2026-08-11; metrics: B0+HC ad-pair
+     rows from amazon_advertised_product_daily scoped by campaign_id.
+     HC ASIN = ev.hc_isbn10. Grain: asin+campaign_id (approximate if ASIN
+     rides other campaigns).
 
   3. PROMOTE_TERM / CREATIVE_KEYWORD — stamp metrics lack impressions.
      Using clicks>0 as serving proxy (clicks ≥ 1 ⟹ impressions ≥ 1).
@@ -316,6 +349,10 @@ console.log(`
      for all 227 stamps; cannot use proposed-vs-approved delta.
      Direction resolved from evidence.current_bid vs pushed_bid
      (fallback: existing_targets[0].bid for 56 older recs).
+
+  5. NEGATE_TERM WIN bar — changed 2026-08-11: was cost<0.10 (absolute,
+     unreachable vs attribution lag); now ≤5% of ev.spend = WIN,
+     ≤50% = PARTIAL, else LEAK.
 `);
 
 // ── Per rec_type sections ─────────────────────────────────────────────────────
@@ -468,7 +505,7 @@ const totalData = total - totalND;
 
 console.log(`\nTotal stamps:  ${total}`);
 console.log(`Graded:        ${totalData}  (${pct(totalData, total)} of total)`);
-console.log(`NO-DATA:       ${totalND}  (${pct(totalND, total)} — REPLACE_PRODUCT_AD + NEGATE_TARGET have no stamp handler)`);
+console.log(`NO-DATA:       ${totalND}  (${pct(totalND, total)})`);
 console.log(`\nOverall (graded only):  WIN=${pct(estateVerdicts.WIN, totalData)}  PARTIAL=${pct(estateVerdicts.PARTIAL, totalData)}  LEAK=${pct(estateVerdicts.LEAK, totalData)}`);
 console.log('');
 console.log(`${'Type'.padEnd(22)} ${'n'.padStart(5)}  ${'graded'.padStart(7)}  ${'WIN%'.padStart(6)}  ${'PART%'.padStart(6)}  ${'LEAK%'.padStart(6)}  ${'NO-DATA'.padStart(8)}`);
@@ -497,10 +534,11 @@ const artifact = {
   total_stamps:    total,
   verdict_totals:  estateVerdicts,
   adaptations: [
-    'NEGATE_TARGET: stamp handler absent; all 37 stamps → NO-DATA',
-    'REPLACE_PRODUCT_AD: stamp handler absent; all 3563 stamps → NO-DATA',
+    'NEGATE_TARGET: handler added 2026-08-11; search_term ASIN spend/clicks; WIN=≤5% of ev.spend',
+    'REPLACE_PRODUCT_AD: handler added 2026-08-11; B0+HC ad-pair from amazon_advertised_product_daily; grain=asin+campaign_id',
     'PROMOTE_TERM/CREATIVE_KEYWORD: impressions absent; clicks>0 as serving proxy',
     'BID_ADJUST direction: resolved from evidence.current_bid vs pushed_bid (fallback: existing_targets[0].bid)',
+    'NEGATE_TERM WIN bar: changed 2026-08-11 from cost<0.10 to ≤5% of ev.spend',
   ],
   summary:  jsonSummary,
   per_rec:  judged.map(r => ({

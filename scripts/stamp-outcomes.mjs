@@ -115,6 +115,32 @@ for (const rec of recs) {
           rows_found: Number(r.rows_found),
         };
 
+      // ── NEGATE_TARGET ──────────────────────────────────────────────────────
+      // target_text = negated ASIN (ISBN10 used as Amazon ASIN in product targeting)
+      // Metrics: that ASIN's spend/clicks as a search-term hit post-negation.
+      // Table: amazon_search_term_daily, search_term column, scoped to profile + window.
+      } else if (rec.rec_type === 'NEGATE_TARGET') {
+        const targetAsin = (rec.target_text || '').toLowerCase();
+        const { rows: ntRows } = await pool.query(
+          `SELECT
+             COALESCE(SUM(clicks), 0)::bigint AS clicks,
+             COALESCE(SUM(cost),   0)         AS cost,
+             COUNT(*)::int                    AS rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id          = $1
+            AND LOWER(search_term)  = $2
+            AND date >= $3::date
+            AND date <  $4::date`,
+          [profileIdStr, targetAsin, windowStart, windowEnd],
+        );
+        const ntr = ntRows[0];
+        metrics = {
+          ...metrics,
+          clicks:     Number(ntr.clicks),
+          cost:       Number(ntr.cost),
+          rows_found: Number(ntr.rows_found),
+        };
+
       // ── PROMOTE_TERM / CREATIVE_KEYWORD ────────────────────────────────────
       } else if (rec.rec_type === 'PROMOTE_TERM' || rec.rec_type === 'CREATIVE_KEYWORD') {
         const { rows } = await pool.query(
@@ -166,6 +192,70 @@ for (const rec of recs) {
           purchases:  Number(r.purchases),
           sales:      Number(r.sales),
           rows_found: Number(r.rows_found),
+        };
+
+      // ── REPLACE_PRODUCT_AD ─────────────────────────────────────────────────
+      // evidence: b0_asin (B0 being replaced), hc_isbn10 (HC ASIN = isbn10 used
+      // by Amazon as ASIN for HC/paperback editions), campaign_id.
+      // Table: amazon_advertised_product_daily — has campaign_id column ✓,
+      //   impressions ✓, profile_id = text.
+      // Grain: asin + campaign_id scoped (approximate if ASIN rides other
+      //   campaigns; those are excluded). Recorded as grain:'asin+campaign_id'.
+      } else if (rec.rec_type === 'REPLACE_PRODUCT_AD') {
+        const b0Asin = (ev.b0_asin   || '').toLowerCase();
+        const hcAsin = (ev.hc_isbn10 || '').toLowerCase();  // isbn10 = HC ASIN in Amazon
+        const campId = String(ev.campaign_id ?? rec.campaign_id ?? '');
+
+        // B0 metrics: the paused ad
+        const { rows: b0Rows } = await pool.query(
+          `SELECT
+             COALESCE(SUM(cost),        0)         AS b0_spend,
+             COALESCE(SUM(clicks),      0)::bigint AS b0_clicks,
+             COALESCE(SUM(impressions), 0)::bigint AS b0_impressions,
+             COUNT(*)::int                         AS b0_rows_found
+           FROM amazon_advertised_product_daily
+          WHERE profile_id  = $1
+            AND LOWER(asin) = $2
+            AND campaign_id = $3
+            AND date >= $4::date
+            AND date <  $5::date`,
+          [profileIdStr, b0Asin, campId, windowStart, windowEnd],
+        );
+
+        // HC metrics: the replacement ad
+        const { rows: hcRows } = await pool.query(
+          `SELECT
+             COALESCE(SUM(cost),          0)         AS hc_spend,
+             COALESCE(SUM(clicks),        0)::bigint AS hc_clicks,
+             COALESCE(SUM(impressions),   0)::bigint AS hc_impressions,
+             COALESCE(SUM(purchases_14d), 0)::bigint AS hc_orders,
+             COUNT(*)::int                           AS hc_rows_found
+           FROM amazon_advertised_product_daily
+          WHERE profile_id  = $1
+            AND LOWER(asin) = $2
+            AND campaign_id = $3
+            AND date >= $4::date
+            AND date <  $5::date`,
+          [profileIdStr, hcAsin, campId, windowStart, windowEnd],
+        );
+
+        const b0 = b0Rows[0];
+        const hc = hcRows[0];
+        metrics = {
+          ...metrics,
+          grain:          'asin+campaign_id',
+          b0_asin:        ev.b0_asin,
+          hc_asin:        ev.hc_isbn10,
+          b0_spend:       Number(b0.b0_spend),
+          b0_clicks:      Number(b0.b0_clicks),
+          b0_impressions: Number(b0.b0_impressions),
+          hc_spend:       Number(hc.hc_spend),
+          hc_clicks:      Number(hc.hc_clicks),
+          hc_impressions: Number(hc.hc_impressions),
+          hc_orders:      Number(hc.hc_orders),
+          rows_found:     Number(b0.b0_rows_found) + Number(hc.hc_rows_found),
+          b0_rows_found:  Number(b0.b0_rows_found),
+          hc_rows_found:  Number(hc.hc_rows_found),
         };
 
       // ── BID_ADJUST (incl. REVIVE) / BUDGET_ADJUST / PAUSE_CAMPAIGN / CREATE_STRUCTURE
