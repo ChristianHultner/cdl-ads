@@ -1,5 +1,7 @@
-// Inline SVG sales + spend line chart. No chart library. 900×260 viewBox,
-// width="100%" so it scales responsively. Called from client ChartSection.
+// Inline SVG sales + spend line chart. No chart library. 900×260 viewBox.
+// Receives up to 120 days; plots last 90 with 30-day rolling averages (bold).
+// Daily values shown as faint thin lines (~25% opacity) behind the rolling pair.
+// Rolling window = 30: each plotted point = mean of that day + prior 29.
 
 export interface ChartPoint {
   date:  string        // YYYY-MM-DD
@@ -12,6 +14,8 @@ const W = 900, H = 260
 const L = 64, R = 14, T = 14, B = 32
 const PW = W - L - R
 const PH = H - T - B
+const PLOT_DAYS = 90
+const ROLL_WIN  = 30
 
 function tx(i: number, n: number) { return n <= 1 ? L : L + (i / (n - 1)) * PW }
 function ty(v: number, maxV: number) {
@@ -27,6 +31,13 @@ function niceMax(v: number): number {
   const candidates = [1, 2, 2.5, 5, 10].map(f => f * mag)
   return candidates.find(c => c >= v) ?? v * 1.1
 }
+function rollingAvg(vals: number[], window: number): number[] {
+  return vals.map((_, i) => {
+    const start = Math.max(0, i - window + 1)
+    const slice = vals.slice(start, i + 1)
+    return slice.reduce((a, b) => a + b, 0) / slice.length
+  })
+}
 
 const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
 
@@ -39,19 +50,31 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
     )
   }
 
-  const sym    = SYM[currency] ?? currency
-  const maxSales = Math.max(...points.map(p => p.sales))
-  const maxSpend = Math.max(...points.map(p => p.spend))
-  const maxV     = niceMax(Math.max(maxSales, maxSpend))
-  const n        = points.length
+  // Compute rolling over full input (up to 120 days), slice to last 90 for plotting
+  const rollSalesAll = rollingAvg(points.map(p => p.sales), ROLL_WIN)
+  const rollSpendAll = rollingAvg(points.map(p => p.spend), ROLL_WIN)
+  const plot         = points.slice(-PLOT_DAYS)
+  const rSalesPlot   = rollSalesAll.slice(-PLOT_DAYS)
+  const rSpendPlot   = rollSpendAll.slice(-PLOT_DAYS)
+  const n            = plot.length
 
-  const salePts  = points.map((p, i) => ({ x: tx(i, n), y: ty(p.sales, maxV) }))
-  const spendPts = points.map((p, i) => ({ x: tx(i, n), y: ty(p.spend, maxV) }))
+  const sym  = SYM[currency] ?? currency
+  const maxV = niceMax(Math.max(
+    ...rSalesPlot, ...rSpendPlot,
+    ...plot.map(p => p.sales), ...plot.map(p => p.spend),
+  ))
 
-  // Weekly x-ticks (every 7 points)
+  // Daily faint points
+  const dailySalePts  = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.sales, maxV) }))
+  const dailySpendPts = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.spend, maxV) }))
+  // Rolling bold points
+  const rollSalePts   = rSalesPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
+  const rollSpendPts  = rSpendPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
+
+  // Weekly x-ticks
   const xTicks: { x: number; label: string }[] = []
   for (let i = 0; i < n; i += 7) {
-    const d = new Date(points[i].date + 'T00:00:00Z')
+    const d = new Date(plot[i].date + 'T00:00:00Z')
     xTicks.push({
       x: tx(i, n),
       label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }),
@@ -86,18 +109,20 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
       <line x1={L} y1={T} x2={L} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
       <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
 
-      {/* Spend line (warm red / muted — drawn first, under sales) */}
-      <path d={polyline(spendPts)} fill="none" stroke="#e8825c" strokeWidth={1.8} strokeOpacity={0.75} />
+      {/* Daily faint lines (behind rolling) */}
+      <path d={polyline(dailySpendPts)} fill="none" stroke="#e8825c" strokeWidth={1}   strokeOpacity={0.25} />
+      <path d={polyline(dailySalePts)}  fill="none" stroke="#0093d0" strokeWidth={1}   strokeOpacity={0.25} />
 
-      {/* Sales line (CDL blue) */}
-      <path d={polyline(salePts)} fill="none" stroke="#0093d0" strokeWidth={2.2} />
+      {/* Rolling bold lines */}
+      <path d={polyline(rollSpendPts)} fill="none" stroke="#e8825c" strokeWidth={2}   strokeOpacity={0.85} />
+      <path d={polyline(rollSalePts)}  fill="none" stroke="#0093d0" strokeWidth={2.5} />
 
-      {/* Inline legend (top-right) */}
-      <g transform={`translate(${L + PW - 118}, ${T + 6})`}>
-        <line x1={0} y1={5} x2={16} y2={5} stroke="#0093d0" strokeWidth={2.2} />
-        <text x={20} y={9} fontSize={10} fill="#1a2b3c">Sales</text>
-        <line x1={62} y1={5} x2={78} y2={5} stroke="#e8825c" strokeWidth={1.8} strokeOpacity={0.75} />
-        <text x={82} y={9} fontSize={10} fill="#1a2b3c">Spend</text>
+      {/* Inline legend */}
+      <g transform={`translate(${L + PW - 200}, ${T + 6})`}>
+        <line x1={0} y1={5} x2={16} y2={5} stroke="#0093d0" strokeWidth={2.5} />
+        <text x={20} y={9} fontSize={10} fill="#1a2b3c">Sales (30d avg)</text>
+        <line x1={110} y1={5} x2={126} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
+        <text x={130} y={9} fontSize={10} fill="#1a2b3c">Spend (30d avg)</text>
       </g>
     </svg>
   )

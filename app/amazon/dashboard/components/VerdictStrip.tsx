@@ -1,7 +1,8 @@
-// Design choice: per-currency trend arrows (EUR / USD / MXN / GBP / CAD) shown
-// inline with each total — avoids mixing currencies into a single misleading %.
-// ACoS shown per-country (ES / US / MX / UK), never blended. Threshold: green if
-// within 10% of target_acos, red if >10% above.
+// Design choices (round 2):
+// (a) Trend arrows inline beside each currency figure: '€1,524 ↑4%'
+// (b) Spend arrows neutral grey both directions — spend up is not inherently bad
+// (c) Materiality floor: currencies with week-sales < 50 local units fold into '+ minor'
+// (d) ACoS row: 'ES 34.6% / tgt 30%' — target shown inline, red only when above target
 
 export interface MarketVerdictRow {
   country:       string
@@ -14,6 +15,7 @@ export interface MarketVerdictRow {
 }
 
 const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
+const MATERIALITY = 50   // local currency units; below this → fold into '+ minor'
 
 function fmt(n: number, cur: string) {
   return `${SYM[cur] ?? cur}${Math.round(n).toLocaleString('en-US')}`
@@ -24,19 +26,28 @@ function pctDelta(now: number, prior: number): number | null {
   return (now - prior) / prior * 100
 }
 
-function TrendArrow({ pct, sym }: { pct: number; sym: string }) {
-  const up  = pct >= 0
-  const col = up ? 'var(--cdl-ok)' : 'var(--cdl-warn)'
+function SalesArrow({ pct }: { pct: number }) {
   return (
-    <span style={{ fontSize: '0.73rem', color: 'var(--cdl-muted)', whiteSpace: 'nowrap' }}>
-      <span style={{ fontSize: '0.65rem' }}>{sym}</span>
-      <span style={{ color: col, fontWeight: 700 }}>{up ? '↑' : '↓'}{Math.abs(pct).toFixed(0)}%</span>
+    <span style={{
+      fontSize: '0.72rem', fontWeight: 700, marginLeft: '0.22rem',
+      color: pct >= 0 ? 'var(--cdl-ok)' : 'var(--cdl-warn)',
+    }}>
+      {pct >= 0 ? '↑' : '↓'}{Math.abs(pct).toFixed(0)}%
+    </span>
+  )
+}
+
+function SpendArrow({ pct }: { pct: number }) {
+  // Neutral grey — spend direction is not good/bad on its own
+  return (
+    <span style={{ fontSize: '0.72rem', fontWeight: 700, marginLeft: '0.22rem', color: '#8a97a5' }}>
+      {pct >= 0 ? '↑' : '↓'}{Math.abs(pct).toFixed(0)}%
     </span>
   )
 }
 
 export default function VerdictStrip({ rows }: { rows: MarketVerdictRow[] }) {
-  // Aggregate by currency for SALES / SPEND totals
+  // Aggregate by currency
   const byCur: Record<string, { salesThis: number; salesPrior: number; spendThis: number; spendPrior: number }> = {}
   for (const r of rows) {
     if (!byCur[r.currency]) byCur[r.currency] = { salesThis: 0, salesPrior: 0, spendThis: 0, spendPrior: 0 }
@@ -46,10 +57,15 @@ export default function VerdictStrip({ rows }: { rows: MarketVerdictRow[] }) {
     byCur[r.currency].spendPrior += r.spendPriorAvg
   }
 
-  const activeCurs = ['EUR', 'USD', 'MXN', 'GBP', 'CAD']
-    .filter(c => byCur[c] && (byCur[c].salesThis > 0 || byCur[c].spendThis > 0))
+  const allActive = ['EUR', 'USD', 'MXN', 'GBP', 'CAD'].filter(c =>
+    byCur[c] && (byCur[c].salesThis > 0 || byCur[c].spendThis > 0)
+  )
 
-  // ACoS per major market (weighted from this-week spend / sales)
+  // Split material vs minor by sales threshold
+  const material = allActive.filter(c => byCur[c].salesThis >= MATERIALITY)
+  const minor    = allActive.filter(c => byCur[c].salesThis < MATERIALITY)
+
+  // ACoS per major market — spend/sales this week
   const acosMarkets = ['ES', 'US', 'MX', 'UK']
     .map(cc => {
       const r = rows.find(x => x.country === cc)
@@ -59,8 +75,8 @@ export default function VerdictStrip({ rows }: { rows: MarketVerdictRow[] }) {
     .filter((x): x is { cc: string; acos: number; target: number } => x !== null)
 
   const rowStyle: React.CSSProperties = {
-    display: 'flex', alignItems: 'center', gap: '0.75rem 1rem',
-    padding: '0.5rem 0', borderBottom: '1px solid #e2ecf0', flexWrap: 'wrap',
+    display: 'flex', alignItems: 'center', flexWrap: 'wrap',
+    padding: '0.5rem 0', borderBottom: '1px solid #e2ecf0', gap: '0.35rem 0.5rem',
   }
   const labelStyle: React.CSSProperties = {
     width: 48, flexShrink: 0, fontSize: '0.67rem', fontWeight: 700,
@@ -73,64 +89,66 @@ export default function VerdictStrip({ rows }: { rows: MarketVerdictRow[] }) {
       padding: '0.15rem 1.5rem 0.5rem', marginBottom: '1.5rem',
     }}>
 
-      {/* SALES */}
+      {/* SALES — arrows inline, green/red */}
       <div style={rowStyle}>
         <span style={labelStyle}>Sales</span>
-        <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '0 0.5rem' }}>
-          {activeCurs.map((c, i) => (
-            <span key={c} style={{ display: 'flex', alignItems: 'baseline', gap: '0.15rem' }}>
-              {i > 0 && <span style={{ color: 'var(--cdl-muted)', margin: '0 0.15rem' }}>+</span>}
-              <strong style={{ fontSize: '1.25rem' }}>{fmt(byCur[c].salesThis, c)}</strong>
-            </span>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          {activeCurs.map(c => {
+        <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '0 1.1rem' }}>
+          {material.map((c, i) => {
             const p = pctDelta(byCur[c].salesThis, byCur[c].salesPrior)
-            return p != null ? <TrendArrow key={c} pct={p} sym={SYM[c] ?? c} /> : null
+            return (
+              <span key={c} style={{ display: 'inline-flex', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+                {i > 0 && <span style={{ color: 'var(--cdl-muted)', marginRight: '0.75rem' }}>+</span>}
+                <strong style={{ fontSize: '1.25rem' }}>{fmt(byCur[c].salesThis, c)}</strong>
+                {p != null && <SalesArrow pct={p} />}
+              </span>
+            )
           })}
+          {minor.length > 0 && (
+            <span style={{ fontSize: '0.78rem', color: 'var(--cdl-muted)', alignSelf: 'center' }}>
+              + minor ({minor.map(c => `${SYM[c] ?? c}${Math.round(byCur[c].salesThis)}`).join(', ')})
+            </span>
+          )}
         </div>
       </div>
 
-      {/* SPEND */}
+      {/* SPEND — arrows inline, neutral grey */}
       <div style={rowStyle}>
         <span style={labelStyle}>Spend</span>
-        <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '0 0.5rem' }}>
-          {activeCurs.map((c, i) => (
-            <span key={c} style={{ display: 'flex', alignItems: 'baseline', gap: '0.15rem' }}>
-              {i > 0 && <span style={{ color: 'var(--cdl-muted)', margin: '0 0.15rem' }}>+</span>}
-              <strong style={{ fontSize: '1.25rem' }}>{fmt(byCur[c].spendThis, c)}</strong>
-            </span>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          {activeCurs.map(c => {
+        <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '0 1.1rem' }}>
+          {material.map((c, i) => {
             const p = pctDelta(byCur[c].spendThis, byCur[c].spendPrior)
-            return p != null ? <TrendArrow key={c} pct={p} sym={SYM[c] ?? c} /> : null
+            return (
+              <span key={c} style={{ display: 'inline-flex', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+                {i > 0 && <span style={{ color: 'var(--cdl-muted)', marginRight: '0.75rem' }}>+</span>}
+                <strong style={{ fontSize: '1.25rem' }}>{fmt(byCur[c].spendThis, c)}</strong>
+                {p != null && <SpendArrow pct={p} />}
+              </span>
+            )
           })}
+          {minor.length > 0 && (
+            <span style={{ fontSize: '0.78rem', color: 'var(--cdl-muted)', alignSelf: 'center' }}>
+              + minor
+            </span>
+          )}
         </div>
       </div>
 
-      {/* ACOS */}
+      {/* ACOS — target inline per market, red when above */}
       <div style={{ ...rowStyle, borderBottom: 'none', paddingBottom: 0 }}>
         <span style={labelStyle}>ACoS</span>
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0 0.85rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '0 1.1rem' }}>
           {acosMarkets.map((m, i) => (
-            <span key={m.cc} style={{ whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
-              {i > 0 && <span style={{ color: 'var(--cdl-muted)' }}>·</span>}
-              <span style={{ fontSize: '0.72rem', color: 'var(--cdl-muted)', fontWeight: 600 }}>{m.cc}</span>
-              <strong style={{
-                color: m.acos > m.target * 1.1
-                  ? 'var(--cdl-warn)'
-                  : m.acos < m.target * 0.9
-                    ? 'var(--cdl-ok)'
-                    : 'var(--cdl-ink)',
-              }}>
+            <span key={m.cc} style={{ display: 'inline-flex', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+              {i > 0 && <span style={{ color: 'var(--cdl-muted)', marginRight: '0.75rem' }}>·</span>}
+              <span style={{ fontSize: '0.72rem', color: 'var(--cdl-muted)', fontWeight: 600, marginRight: '0.18rem' }}>{m.cc}</span>
+              <strong style={{ color: m.acos > m.target ? 'var(--cdl-warn)' : 'var(--cdl-ink)' }}>
                 {(m.acos * 100).toFixed(1)}%
               </strong>
+              <span style={{ fontSize: '0.7rem', color: 'var(--cdl-muted)', marginLeft: '0.22rem' }}>
+                / tgt {(m.target * 100).toFixed(0)}%
+              </span>
             </span>
           ))}
-          <span style={{ fontSize: '0.7rem', color: 'var(--cdl-muted)', marginLeft: '0.25rem' }}>this week</span>
         </div>
       </div>
     </div>

@@ -57,7 +57,7 @@ export default async function DashboardPage() {
         dr.acos::float
       FROM daily_rollup dr
       JOIN amazon_profiles p USING (profile_id)
-      WHERE dr.date >= CURRENT_DATE - 90
+      WHERE dr.date >= CURRENT_DATE - 120
       ORDER BY p.profile_id, dr.date
     `,
 
