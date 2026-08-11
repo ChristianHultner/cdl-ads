@@ -517,23 +517,34 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
 
 // ── ACoS Contribution ─────────────────────────────────────────────────────────
 // Computed section: attributable spend removed + directional bid delta estimates.
-// Negation euros_stopped = attributable (counterfactual honest — zero orders on graded WIN/PARTIAL).
+// spend_stopped = local-currency value of Judgment.euros_stopped (field name unchanged in Judgment).
 // Bid deltas = directional estimate (cruder; median ACoS delta × cohort).
+// NO FX conversion. Currencies: ES/DE/FR/IT=EUR, UK=GBP, US=USD, MX=MXN, CA=CAD (from profiles).
+// sales_14d verified same-currency (MX sample: cost+sales both MXN) → ACoS points per market valid.
 
 export interface AcosContributionMonthEntry {
-  euros_stopped:       number        // sum euros_stopped — NEGATE WIN+PARTIAL
-  est_acos_points:     number | null // null when market-month sales unavailable
+  spend_stopped:       number        // sum in local currency — NEGATE WIN+PARTIAL
+  currency:            string        // ISO code from amazon_profiles.currency_code
+  est_acos_points:     number | null // spend_stopped / sales_14d × 100; null when sales unavailable
   bid_cut_delta_med:   number | null // median acos_delta for CUT WIN+PARTIAL (directional)
   bid_raise_delta_med: number | null // median acos_delta for RAISE WIN+PARTIAL (directional)
   n_actions:           number        // total NEGATE+BID_ADJUST WIN+PARTIAL stamps
 }
 
-export interface AcosContributionResult {
-  byMarket: Record<string, Record<string, AcosContributionMonthEntry>> // market → YYYY-MM → entry
-  estate:   Record<string, AcosContributionMonthEntry>                 // YYYY-MM → aggregate
+export interface AcosContributionEstateMonth {
+  byCurrency:          Record<string, number> // currency → spend_stopped; NOT blended (no FX)
+  bid_cut_delta_med:   number | null
+  bid_raise_delta_med: number | null
+  n_actions:           number
+  // est_acos_points omitted — currencies don’t blend
 }
 
-// market → YYYY-MM → total ad sales (from amazon_campaign_daily.sales_14d)
+export interface AcosContributionResult {
+  byMarket: Record<string, Record<string, AcosContributionMonthEntry>> // market → YYYY-MM → entry
+  estate:   Record<string, AcosContributionEstateMonth>                // YYYY-MM → aggregate
+}
+
+// market → YYYY-MM → total ad sales in local currency (amazon_campaign_daily.sales_14d)
 export type MarketMonthSales = Record<string, Record<string, number>>
 
 export function computeAcosContribution(
@@ -548,32 +559,34 @@ export function computeAcosContribution(
   }
 
   const acc: Record<string, Record<string, {
-    eurosStoppedList: number[]
+    currency:         string
+    spendStoppedList: number[]
     cutDeltas:        number[]
     raiseDeltas:      number[]
     nActions:         number
   }>> = {}
 
-  const ensure = (mkt: string, month: string) => {
+  const ensure = (mkt: string, month: string, currency: string) => {
     if (!acc[mkt])        acc[mkt]        = {}
-    if (!acc[mkt][month]) acc[mkt][month] = { eurosStoppedList: [], cutDeltas: [], raiseDeltas: [], nActions: 0 }
+    if (!acc[mkt][month]) acc[mkt][month] = { currency, spendStoppedList: [], cutDeltas: [], raiseDeltas: [], nActions: 0 }
   }
 
   for (const r of judged) {
-    const month = getMonth(r)
+    const month    = getMonth(r)
     if (!month) continue
-    const mkt = r.country_code
-    const v   = r.judgment.verdict
+    const mkt      = r.country_code
+    const currency = r.currency_code   // sourced from amazon_profiles via JOIN
+    const v        = r.judgment.verdict
 
     if ((r.rec_type === 'NEGATE_TERM' || r.rec_type === 'NEGATE_TARGET') && (v === 'WIN' || v === 'PARTIAL')) {
-      ensure(mkt, month)
-      const s = r.judgment.euros_stopped
-      if (s != null && !isNaN(s)) acc[mkt][month].eurosStoppedList.push(s)
+      ensure(mkt, month, currency)
+      const s = r.judgment.euros_stopped  // Judgment field; value is local currency (not EUR-only)
+      if (s != null && !isNaN(s)) acc[mkt][month].spendStoppedList.push(s)
       acc[mkt][month].nActions++
     }
 
     if (r.rec_type === 'BID_ADJUST' && (v === 'WIN' || v === 'PARTIAL')) {
-      ensure(mkt, month)
+      ensure(mkt, month, currency)
       const delta = r.judgment.acos_delta
       if (delta != null && !isNaN(delta)) {
         if (r.judgment.direction === 'CUT')   acc[mkt][month].cutDeltas.push(delta)
@@ -583,17 +596,18 @@ export function computeAcosContribution(
     }
   }
 
-  // ── Per-market result ──
+  // ── Per-market result (local currency throughout) ──
   const byMarket: AcosContributionResult['byMarket'] = {}
   for (const mkt of Object.keys(acc)) {
     byMarket[mkt] = {}
     for (const month of Object.keys(acc[mkt])) {
       const d             = acc[mkt][month]
-      const euros_stopped = d.eurosStoppedList.reduce((a, b) => a + b, 0)
+      const spend_stopped = d.spendStoppedList.reduce((a, b) => a + b, 0)
       const sales         = marketMonthSales[mkt]?.[month] ?? null
       byMarket[mkt][month] = {
-        euros_stopped,
-        est_acos_points:     (sales != null && sales > 0) ? (euros_stopped / sales) * 100 : null,
+        spend_stopped,
+        currency:            d.currency,
+        est_acos_points:     (sales != null && sales > 0) ? (spend_stopped / sales) * 100 : null,
         bid_cut_delta_med:   median(d.cutDeltas),
         bid_raise_delta_med: median(d.raiseDeltas),
         n_actions:           d.nActions,
@@ -601,26 +615,33 @@ export function computeAcosContribution(
     }
   }
 
-  // ── Estate totals (aggregate across all markets per month) ──
-  const estAcc: Record<string, { euros: number; nActions: number; cutD: number[]; raiseD: number[] }> = {}
+  // ── Estate totals: per-currency spend buckets + aggregated bid deltas ──
+  // No FX; currencies are listed separately in the UI.
+  const estAcc: Record<string, {
+    byCurrency: Record<string, number>
+    nActions:   number
+    cutD:       number[]
+    raiseD:     number[]
+  }> = {}
+
   for (const mkt of Object.keys(acc)) {
     for (const month of Object.keys(acc[mkt])) {
-      if (!estAcc[month]) estAcc[month] = { euros: 0, nActions: 0, cutD: [], raiseD: [] }
-      const d = acc[mkt][month]
-      estAcc[month].euros    += d.eurosStoppedList.reduce((a, b) => a + b, 0)
+      if (!estAcc[month]) estAcc[month] = { byCurrency: {}, nActions: 0, cutD: [], raiseD: [] }
+      const d   = acc[mkt][month]
+      const cur = d.currency
+      const amt = d.spendStoppedList.reduce((a, b) => a + b, 0)
+      estAcc[month].byCurrency[cur] = (estAcc[month].byCurrency[cur] ?? 0) + amt
       estAcc[month].nActions += d.nActions
       estAcc[month].cutD.push(...d.cutDeltas)
       estAcc[month].raiseD.push(...d.raiseDeltas)
     }
   }
+
   const estate: AcosContributionResult['estate'] = {}
   for (const month of Object.keys(estAcc)) {
-    const d          = estAcc[month]
-    const totalSales = Object.keys(marketMonthSales)
-      .reduce((sum, mkt) => sum + (marketMonthSales[mkt]?.[month] ?? 0), 0)
+    const d = estAcc[month]
     estate[month] = {
-      euros_stopped:       d.euros,
-      est_acos_points:     totalSales > 0 ? (d.euros / totalSales) * 100 : null,
+      byCurrency:          d.byCurrency,
       bid_cut_delta_med:   median(d.cutD),
       bid_raise_delta_med: median(d.raiseD),
       n_actions:           d.nActions,

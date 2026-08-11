@@ -371,6 +371,11 @@ function DrillPanel({ panel, onClose }: { panel: PanelData; onClose: () => void 
 }
 
 // ── AcosContributionPanel ──────────────────────────────────────────────────────
+function currencySymbol(cur: string): string {
+  const MAP: Record<string, string> = { EUR: '€', GBP: '£', USD: '$', MXN: 'MX$', CAD: 'C$' }
+  return MAP[cur] ?? cur
+}
+
 function AcosContributionPanel({ data }: { data: AcosContributionResult }) {
   const months = [...new Set([
     ...Object.keys(data.estate),
@@ -383,7 +388,7 @@ function AcosContributionPanel({ data }: { data: AcosContributionResult }) {
   const markets = Object.keys(data.byMarket).filter(m => data.byMarket[m][month]).sort()
   const est     = data.estate[month]
 
-  const fmtE   = (n: number) => n.toFixed(2)
+  const fmtAmt = (n: number, cur: string) => `${currencySymbol(cur)}${n.toFixed(2)}`
   const fmtPts = (n: number | null) => n != null ? `≈${n.toFixed(1)} pts ACoS` : 'no sales data'
   const fmtD   = (n: number | null, label: string) =>
     n != null ? `${label} Δ${(n * 100).toFixed(1)}pp` : null
@@ -412,10 +417,14 @@ function AcosContributionPanel({ data }: { data: AcosContributionResult }) {
         )}
       </div>
 
-      {/* Estate total */}
+      {/* Estate total — per-currency sums, no blended points */}
       {est && (
         <div style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '0.35rem', paddingBottom: '0.35rem', borderBottom: '1px solid #edf2f5' }}>
-          {'Estate: −€'}{fmtE(est.euros_stopped)}{' dead spend removed ('}{fmtPts(est.est_acos_points)}{')'}
+          {'Estate: '}
+          {Object.entries(est.byCurrency).sort().map(([cur, amt], i) => (
+            <span key={cur}>{i > 0 ? ' − ' : '−'}{fmtAmt(amt, cur)}</span>
+          ))}
+          {' removed'}
           {[fmtD(est.bid_raise_delta_med, 'raises'), fmtD(est.bid_cut_delta_med, 'cuts')].filter(Boolean).map((s, i) => (
             <span key={i} style={{ fontWeight: 400, color: 'var(--cdl-muted)', marginLeft: '0.4rem' }}>· {s}</span>
           ))}
@@ -423,7 +432,7 @@ function AcosContributionPanel({ data }: { data: AcosContributionResult }) {
         </div>
       )}
 
-      {/* Per-market rows */}
+      {/* Per-market rows — native currency symbol, same-currency ACoS points */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
         {markets.map(mkt => {
           const e = data.byMarket[mkt][month]
@@ -431,7 +440,7 @@ function AcosContributionPanel({ data }: { data: AcosContributionResult }) {
           return (
             <div key={mkt} style={{ fontSize: '0.78rem', display: 'flex', gap: '0.3rem', flexWrap: 'wrap', alignItems: 'baseline' }}>
               <span style={{ fontWeight: 700, fontSize: '0.7rem', color: 'var(--cdl-muted)', textTransform: 'uppercase', minWidth: '2.5rem' }}>{mkt}</span>
-              <span>{'−€'}{fmtE(e.euros_stopped)}{' dead spend removed ('}{fmtPts(e.est_acos_points)}{')'}</span>
+              <span>{'−'}{fmtAmt(e.spend_stopped, e.currency)}{' dead spend removed ('}{fmtPts(e.est_acos_points)}{')'}</span>
               {[fmtD(e.bid_raise_delta_med, 'raises'), fmtD(e.bid_cut_delta_med, 'cuts')].filter(Boolean).map((s, i) => (
                 <span key={i} style={{ color: 'var(--cdl-muted)' }}>· {s}</span>
               ))}
