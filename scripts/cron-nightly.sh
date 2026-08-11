@@ -26,4 +26,7 @@ for P in 2263723137827296 139446882235960 395707988492653 350599867165328 171193
   /opt/homebrew/bin/node scripts/stamp-outcomes.mjs --profile "${P}" || echo "PROFILE ${P} stamp-outcomes FAILED (non-fatal)"
 done
 
+echo "=== rollup-daily (--days 3) ==="
+/opt/homebrew/bin/node scripts/rollup-daily.mjs --days 3 || echo "rollup-daily FAILED (non-fatal)"
+
 exit 0
