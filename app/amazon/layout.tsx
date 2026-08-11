@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 const AMAZON_NAV = [
   { href: '/amazon/campaigns',       label: 'Campaigns' },
   { href: '/amazon/recommendations', label: 'Recommendations' },
+  { href: '/amazon/scorecard',       label: 'Scorecard' },
   { href: '/amazon/spend',           label: 'Spend' },
   { href: '/amazon/accounts',        label: 'Accounts' },
 ]
