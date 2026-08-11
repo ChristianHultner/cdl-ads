@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import type { AcosContributionResult } from '@/app/lib/scorecard'
 
 // ── Serialisable types (server → client boundary) ──────────────────────────────
 export interface PanelCounts {
@@ -26,10 +27,12 @@ export interface PanelData {
   acosData?:       PanelAcosData
   perRec?:         PanelPerRec[]
   adaptationNote?: string
+  subtitle?:       string
 }
 export interface TilePayload {
   key: string; label: string; winPct: number | null; dn: number
   usedHorizon: string | null; matureDate: string | null; panelKey: string
+  subtitle?: string
 }
 export interface MatrixRow   { key: string; label: string }
 export interface MatrixCellData { dn: number; winPct: number | null; panelKey: string }
@@ -76,6 +79,11 @@ function VerdictTile({ t, active, onClick }: {
       <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--cdl-muted)' }}>
         {t.label}
       </div>
+      {t.subtitle && (
+        <div style={{ fontSize: '0.67rem', color: 'var(--cdl-muted)', fontStyle: 'italic', lineHeight: 1.35 }}>
+          {t.subtitle}
+        </div>
+      )}
       <div style={{ fontSize: '1.9rem', fontWeight: 800, lineHeight: 1, fontVariantNumeric: 'tabular-nums', color: chip.color }}>
         {t.winPct !== null ? t.winPct.toFixed(1) + '%' : '—'}
       </div>
@@ -295,6 +303,13 @@ function DrillPanel({ panel, onClose }: { panel: PanelData; onClose: () => void 
         }}>×</button>
       </div>
 
+      {/* Rule promise subtitle */}
+      {panel.subtitle && (
+        <p style={{ fontSize: '0.78rem', color: 'var(--cdl-muted)', fontStyle: 'italic', margin: '0 0 0.7rem', lineHeight: 1.45 }}>
+          {panel.subtitle}
+        </p>
+      )}
+
       {/* Stacked bar */}
       <StackedBarPanel counts={panel.counts} n={panel.n} dn={panel.dn} />
 
@@ -355,6 +370,83 @@ function DrillPanel({ panel, onClose }: { panel: PanelData; onClose: () => void 
   )
 }
 
+// ── AcosContributionPanel ──────────────────────────────────────────────────────
+function AcosContributionPanel({ data }: { data: AcosContributionResult }) {
+  const months = [...new Set([
+    ...Object.keys(data.estate),
+    ...Object.values(data.byMarket).flatMap(m => Object.keys(m)),
+  ])].sort()
+
+  const [selMonth, setSelMonth] = useState<string>(months[months.length - 1] ?? '')
+  if (months.length === 0) return null
+  const month   = selMonth || months[months.length - 1]
+  const markets = Object.keys(data.byMarket).filter(m => data.byMarket[m][month]).sort()
+  const est     = data.estate[month]
+
+  const fmtE   = (n: number) => n.toFixed(2)
+  const fmtPts = (n: number | null) => n != null ? `≈${n.toFixed(1)} pts ACoS` : 'no sales data'
+  const fmtD   = (n: number | null, label: string) =>
+    n != null ? `${label} Δ${(n * 100).toFixed(1)}pp` : null
+
+  return (
+    <div className="table-card" style={{ padding: '0.85rem 1.25rem', marginBottom: '1.25rem' }}>
+      {/* Header + month toggle */}
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.55rem' }}>
+        <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--cdl-muted)' }}>
+          ACoS impact
+          <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, marginLeft: '0.5rem', fontStyle: 'italic' }}>
+            estimated contribution — negations attributable, bid deltas directional
+          </span>
+        </div>
+        {months.length > 1 && (
+          <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+            {months.map(m => (
+              <button key={m} onClick={() => setSelMonth(m)} style={{
+                fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: '4px',
+                border: m === month ? '1px solid var(--cdl-blue)' : '1px solid #c8dfe9',
+                background: m === month ? 'var(--cdl-blue)' : 'transparent',
+                color: m === month ? '#fff' : 'var(--cdl-muted)', cursor: 'pointer',
+              }}>{m}</button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Estate total */}
+      {est && (
+        <div style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '0.35rem', paddingBottom: '0.35rem', borderBottom: '1px solid #edf2f5' }}>
+          {'Estate: −€'}{fmtE(est.euros_stopped)}{' dead spend removed ('}{fmtPts(est.est_acos_points)}{')'}
+          {[fmtD(est.bid_raise_delta_med, 'raises'), fmtD(est.bid_cut_delta_med, 'cuts')].filter(Boolean).map((s, i) => (
+            <span key={i} style={{ fontWeight: 400, color: 'var(--cdl-muted)', marginLeft: '0.4rem' }}>· {s}</span>
+          ))}
+          <span style={{ fontWeight: 400, color: 'var(--cdl-muted)', marginLeft: '0.4rem' }}>· {est.n_actions} actions</span>
+        </div>
+      )}
+
+      {/* Per-market rows */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+        {markets.map(mkt => {
+          const e = data.byMarket[mkt][month]
+          if (!e) return null
+          return (
+            <div key={mkt} style={{ fontSize: '0.78rem', display: 'flex', gap: '0.3rem', flexWrap: 'wrap', alignItems: 'baseline' }}>
+              <span style={{ fontWeight: 700, fontSize: '0.7rem', color: 'var(--cdl-muted)', textTransform: 'uppercase', minWidth: '2.5rem' }}>{mkt}</span>
+              <span>{'−€'}{fmtE(e.euros_stopped)}{' dead spend removed ('}{fmtPts(e.est_acos_points)}{')'}</span>
+              {[fmtD(e.bid_raise_delta_med, 'raises'), fmtD(e.bid_cut_delta_med, 'cuts')].filter(Boolean).map((s, i) => (
+                <span key={i} style={{ color: 'var(--cdl-muted)' }}>· {s}</span>
+              ))}
+              <span style={{ color: 'var(--cdl-muted)' }}>· {e.n_actions} actions</span>
+            </div>
+          )
+        })}
+        {markets.length === 0 && (
+          <div style={{ fontSize: '0.75rem', color: 'var(--cdl-muted)', fontStyle: 'italic' }}>No WIN/PARTIAL negations or bid adjustments for {month}.</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── SmallCohortsPanel ──────────────────────────────────────────────────────────
 function SmallCohortsPanel({ entries }: { entries: SmallCohortEntry[] }) {
   if (entries.length === 0) return null
@@ -386,13 +478,15 @@ export default function ScorecardClient({
   matrixCells,
   panelDataMap,
   smallCohorts,
+  acosContribution,
 }: {
-  tiles:         TilePayload[]
-  matrixRows:    MatrixRow[]
-  matrixMarkets: string[]
-  matrixCells:   Record<string, MatrixCellData>
-  panelDataMap:  Record<string, PanelData>
-  smallCohorts:  SmallCohortEntry[]
+  tiles:             TilePayload[]
+  matrixRows:        MatrixRow[]
+  matrixMarkets:     string[]
+  matrixCells:       Record<string, MatrixCellData>
+  panelDataMap:      Record<string, PanelData>
+  smallCohorts:      SmallCohortEntry[]
+  acosContribution?: AcosContributionResult
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null)
   const toggle = (k: string) => setOpenKey(prev => prev === k ? null : k)
@@ -418,6 +512,11 @@ export default function ScorecardClient({
 
       {/* Drill-down panel — below the matrix, one at a time */}
       {openPanel && <DrillPanel panel={openPanel} onClose={() => setOpenKey(null)} />}
+
+      {/* ACoS impact panel — between matrix and small cohorts */}
+      {acosContribution && Object.keys(acosContribution.estate).length > 0 && (
+        <AcosContributionPanel data={acosContribution} />
+      )}
 
       {/* Small cohorts */}
       <SmallCohortsPanel entries={smallCohorts} />

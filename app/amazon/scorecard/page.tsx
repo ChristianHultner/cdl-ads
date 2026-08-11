@@ -1,8 +1,8 @@
 export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
-import { computeScorecard, ADAPTATIONS } from '@/app/lib/scorecard'
-import type { TypeSection } from '@/app/lib/scorecard'
+import { computeScorecard, computeAcosContribution, ADAPTATIONS } from '@/app/lib/scorecard'
+import type { TypeSection, AcosContributionResult } from '@/app/lib/scorecard'
 import { HorizonFilter } from './HorizonFilter'
 import ScorecardClient from './ScorecardClient'
 import type {
@@ -22,6 +22,7 @@ interface RawRow {
   horizon:       string
   metrics:       unknown
   captured_at:   string
+  pushed_at?:    string | null
 }
 
 // ── Verdict tile helpers ───────────────────────────────────────────────────────
@@ -271,7 +272,8 @@ export default async function ScorecardPage({
       p.currency_code,
       o.horizon,
       o.metrics,
-      o.captured_at::text
+      o.captured_at::text,
+      r.pushed_at::text  AS pushed_at
     FROM recommendations   r
     JOIN rec_outcomes      o ON o.rec_id     = r.id
     JOIN amazon_profiles   p ON p.profile_id = r.profile_id
@@ -279,18 +281,48 @@ export default async function ScorecardPage({
     ORDER BY r.rec_type, o.horizon, p.country_code, r.id
   `) as unknown as RawRow[]
 
-  const { sections, hero } = computeScorecard(rawRows)
-  const matureMap           = buildMatureMap(rawRows)
+  const { sections, hero, judged } = computeScorecard(rawRows)
+  const matureMap                   = buildMatureMap(rawRows)
+
+  // Campaign-daily sales: market → YYYY-MM → total ad sales (for ACoS-points translation)
+  // Column verified: amazon_campaign_daily.sales_14d (numeric)
+  const salesRows = (await sql`
+    SELECT
+      p.country_code,
+      TO_CHAR(DATE_TRUNC('month', acd.date), 'YYYY-MM') AS month,
+      SUM(acd.sales_14d)::float                          AS total_sales
+    FROM amazon_campaign_daily acd
+    JOIN amazon_profiles       p ON p.profile_id = acd.profile_id
+    GROUP BY p.country_code, DATE_TRUNC('month', acd.date)
+  `) as unknown as { country_code: string; month: string; total_sales: number }[]
+
+  const marketMonthSales: Record<string, Record<string, number>> = {}
+  for (const s of salesRows) {
+    if (!marketMonthSales[s.country_code]) marketMonthSales[s.country_code] = {}
+    marketMonthSales[s.country_code][s.month] = Number(s.total_sales)
+  }
+
+  const acosContribution = computeAcosContribution(judged, marketMonthSales)
+
+  // ── Tile promise subtitles ──────────────────────────────────────────────────────
+  const TILE_SUBTITLES: Record<string, string> = {
+    'REPLACE':          'Kindle ad silenced + hardcover serving',
+    'PROMOTE_TERM':     'promoted keyword live and clicked',
+    'NEGATE_TERM':      'wasted search spend fully stopped',
+    'NEGATE_TARGET':    'non-converting product page blocked',
+    'BID_ADJUST·RAISE': 'starved winner fed — ACoS held or improved',
+    'BID_ADJUST·CUT':   'overspend reduced — ACoS improved',
+  }
 
   // ── Tiles ──────────────────────────────────────────────────────────────────
   const tiles: TilePayload[] = TILE_DEFS.map(def => {
     const panelKey = `tile:${def.key}`
     const section  = sections.find(s => s.recType === def.recType)
-    if (!section) return { ...def, winPct: null, dn: 0, usedHorizon: null, matureDate: null, panelKey }
+    if (!section) return { ...def, winPct: null, dn: 0, usedHorizon: null, matureDate: null, panelKey, subtitle: TILE_SUBTITLES[def.key] }
     const { winPct, dn, usedHorizon } = getTileStats(section, horizon, def.direction)
     const matureDate = usedHorizon && horizon !== 'all'
       ? matureDateLabel(matureMap, def.recType, usedHorizon, horizon) : null
-    return { ...def, winPct, dn, usedHorizon, matureDate, panelKey }
+    return { ...def, winPct, dn, usedHorizon, matureDate, panelKey, subtitle: TILE_SUBTITLES[def.key] }
   })
 
   // ── Matrix ─────────────────────────────────────────────────────────────────
@@ -313,7 +345,10 @@ export default async function ScorecardPage({
   // Tile panels (all markets)
   for (const def of TILE_DEFS) {
     const panelKey = `tile:${def.key}`
-    panelDataMap[panelKey] = buildPanelData(sections, rawRows, def.recType, def.direction, undefined, horizon, def.label, panelKey)
+    panelDataMap[panelKey] = {
+      ...buildPanelData(sections, rawRows, def.recType, def.direction, undefined, horizon, def.label, panelKey),
+      subtitle: TILE_SUBTITLES[def.key],
+    }
   }
   // Matrix cell panels (per market)
   for (const row of MATRIX_ROWS) {
@@ -357,6 +392,7 @@ export default async function ScorecardPage({
         matrixCells={matrixCells}
         panelDataMap={panelDataMap}
         smallCohorts={smallCohorts}
+        acosContribution={acosContribution}
       />
 
       {rawRows.length === 0 && (
