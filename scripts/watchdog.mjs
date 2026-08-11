@@ -253,6 +253,104 @@ let   verdict = 'OK';
 }
 
 // ---------------------------------------------------------------------------
+// SALES_TREND — revenue backstop 2026-08-11
+//
+// Efficiency must never grade itself EXCELLENT while ad-sales fall.
+// A = sum(sales_14d) last 7 settled days (skip today + yesterday; attribution
+//     still filling — window is CURRENT_DATE-2 through CURRENT_DATE-8).
+// B = same 7-day sum averaged over prior 4 calendar weeks (days 9-36 back).
+// Alert when B > floor (20 local-currency units) AND A < 0.65 × B.
+// Same-currency per profile — no FX conversion anywhere.
+// ---------------------------------------------------------------------------
+{
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const { rows } = await pool.query(`
+      WITH profiles AS (
+        SELECT profile_id, country_code, currency_code
+        FROM   amazon_profiles
+        WHERE  profile_id::text <> '1068790837798301'   -- CA2 retired
+      ),
+      recent AS (
+        SELECT profile_id, COALESCE(SUM(sales_14d), 0) AS sales_a
+        FROM   amazon_campaign_daily
+        WHERE  date >= CURRENT_DATE - 8
+          AND  date <= CURRENT_DATE - 2
+        GROUP  BY profile_id
+      ),
+      w1 AS (SELECT profile_id, COALESCE(SUM(sales_14d),0) AS s FROM amazon_campaign_daily WHERE date >= CURRENT_DATE-15 AND date <= CURRENT_DATE-9  GROUP BY profile_id),
+      w2 AS (SELECT profile_id, COALESCE(SUM(sales_14d),0) AS s FROM amazon_campaign_daily WHERE date >= CURRENT_DATE-22 AND date <= CURRENT_DATE-16 GROUP BY profile_id),
+      w3 AS (SELECT profile_id, COALESCE(SUM(sales_14d),0) AS s FROM amazon_campaign_daily WHERE date >= CURRENT_DATE-29 AND date <= CURRENT_DATE-23 GROUP BY profile_id),
+      w4 AS (SELECT profile_id, COALESCE(SUM(sales_14d),0) AS s FROM amazon_campaign_daily WHERE date >= CURRENT_DATE-36 AND date <= CURRENT_DATE-30 GROUP BY profile_id)
+      SELECT
+        p.profile_id::text,
+        p.country_code,
+        p.currency_code,
+        COALESCE(r.sales_a, 0)::float                                                          AS sales_a,
+        ((COALESCE(w1.s,0)+COALESCE(w2.s,0)+COALESCE(w3.s,0)+COALESCE(w4.s,0)) / 4.0)::float AS sales_b
+      FROM   profiles p
+      LEFT JOIN recent r  ON r.profile_id  = p.profile_id
+      LEFT JOIN w1        ON w1.profile_id = p.profile_id
+      LEFT JOIN w2        ON w2.profile_id = p.profile_id
+      LEFT JOIN w3        ON w3.profile_id = p.profile_id
+      LEFT JOIN w4        ON w4.profile_id = p.profile_id
+      ORDER  BY p.country_code
+    `);
+
+    const FLOOR     = 20;    // local-currency units; skip dead/tiny profiles
+    const THRESHOLD = 0.65;  // alert when A < 65% of 4wk avg B
+
+    const flagged        = [];
+    const profileResults = [];
+
+    for (const r of rows) {
+      const salesA = Number(r.sales_a);
+      const salesB = Number(r.sales_b);
+      const skip   = salesB <= FLOOR;
+      const pctVsAvg = salesB > 0
+        ? `${((salesA - salesB) / salesB * 100).toFixed(1)}%`
+        : 'n/a';
+
+      profileResults.push({
+        market:     r.country_code,
+        currency:   r.currency_code,
+        sales_a:    salesA.toFixed(2),
+        sales_b:    salesB.toFixed(2),
+        skip,
+        pct_vs_avg: pctVsAvg,
+      });
+
+      if (!skip && salesA < THRESHOLD * salesB) {
+        const pctDown = ((1 - salesA / salesB) * 100).toFixed(0);
+        flagged.push(`${r.country_code} \u2212${pctDown}% vs 4wk avg`);
+      }
+    }
+
+    if (flagged.length > 0) {
+      const msg = `ad sales down: ${flagged.join(', ')}`;
+      checks.sales_trend = {
+        status:   'ALERT',
+        flagged,
+        profiles: profileResults,
+        message:  msg,
+      };
+      verdict = 'ALERT';
+      details.push(msg);
+    } else {
+      checks.sales_trend = {
+        status:   'OK',
+        profiles: profileResults,
+        message:  'all meaningful markets within 35% of 4wk avg',
+      };
+    }
+  } catch (e) {
+    checks.sales_trend = { status: 'ERROR', message: `DB query failed: ${e.message}` };
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Write status JSON + self-heartbeat (always — even if DB fails later)
 // ---------------------------------------------------------------------------
 const status = { checked_at: now.toISOString(), checks, verdict, details };
