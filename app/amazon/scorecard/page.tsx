@@ -2,201 +2,251 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 import { computeScorecard, ADAPTATIONS } from '@/app/lib/scorecard'
-import type {
-  HorizonGroup,
-  BidDirectionGroup,
-  VerdictCounts,
-  MarketCounts,
-} from '@/app/lib/scorecard'
+import type { TypeSection } from '@/app/lib/scorecard'
 import { HorizonFilter } from './HorizonFilter'
+import ScorecardClient from './ScorecardClient'
+import type {
+  PanelData, PanelCounts, PanelPerRec, PanelAcosData,
+  TilePayload, MatrixRow, MatrixCellData, SmallCohortEntry,
+} from './ScorecardClient'
 
 // ── DB row shape ───────────────────────────────────────────────────────────────
 interface RawRow {
-  id:           string
-  rec_type:     string
-  target_text:  string
-  campaign_id:  string | null
-  evidence:     unknown
-  country_code: string
+  id:            string
+  rec_type:      string
+  target_text:   string
+  campaign_id:   string | null
+  evidence:      unknown
+  country_code:  string
   currency_code: string
-  horizon:      string
-  metrics:      unknown
-  captured_at:  string
+  horizon:       string
+  metrics:       unknown
+  captured_at:   string
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
-function pct(n: number, total: number): string {
-  if (total === 0) return '—'
-  return (n / total * 100).toFixed(1) + '%'
-}
-
-function fmtPct(v: number | null): string {
-  return v === null ? '—' : v.toFixed(1) + '%'
-}
-
-// ── Stacked bar component ──────────────────────────────────────────────────────
-function StackedBar({ counts, dn, n }: { counts: VerdictCounts; dn: number; n: number }) {
-  if (dn === 0) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-        <div style={{
-          flex: 1, height: '10px', borderRadius: '4px',
-          background: 'rgba(138,151,165,0.25)',
-        }} />
-        <span style={{ fontSize: '0.75rem', color: 'var(--cdl-muted)', whiteSpace: 'nowrap' }}>
-          all NO-DATA ({n})
-        </span>
-      </div>
-    )
+// ── Verdict tile helpers ───────────────────────────────────────────────────────
+function buildMatureMap(rows: RawRow[]): Map<string, Map<string, Date>> {
+  const map = new Map<string, Map<string, Date>>()
+  for (const r of rows) {
+    if (!map.has(r.rec_type)) map.set(r.rec_type, new Map())
+    const hMap = map.get(r.rec_type)!
+    const d    = new Date(r.captured_at)
+    const prev = hMap.get(r.horizon)
+    if (!prev || d < prev) hMap.set(r.horizon, d)
   }
-  const wPct   = counts.WIN     / dn * 100
-  const paPct  = counts.PARTIAL / dn * 100
-  const lPct   = counts.LEAK    / dn * 100
-  const ndPct  = counts['NO-DATA'] > 0 ? counts['NO-DATA'] / n * 100 : 0
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-      <div style={{ display: 'flex', height: '10px', borderRadius: '4px', overflow: 'hidden', background: 'rgba(138,151,165,0.2)' }}>
-        {wPct  > 0 && <div style={{ width: `${wPct}%`,  background: 'var(--cdl-ok)',   flexShrink: 0 }} title={`WIN ${pct(counts.WIN, dn)}`} />}
-        {paPct > 0 && <div style={{ width: `${paPct}%`, background: '#e6a817',          flexShrink: 0 }} title={`PARTIAL ${pct(counts.PARTIAL, dn)}`} />}
-        {lPct  > 0 && <div style={{ width: `${lPct}%`,  background: 'var(--cdl-warn)', flexShrink: 0 }} title={`LEAK ${pct(counts.LEAK, dn)}`} />}
-        {ndPct > 0 && <div style={{ width: `${ndPct}%`, background: 'rgba(138,151,165,0.4)', flexShrink: 0 }} title={`NO-DATA ${counts['NO-DATA']}`} />}
-      </div>
-      <div style={{ display: 'flex', gap: '0.75rem', fontSize: '0.73rem', flexWrap: 'wrap' }}>
-        {counts.WIN     > 0 && <span style={{ color: 'var(--cdl-ok)' }}>WIN {pct(counts.WIN, dn)}</span>}
-        {counts.PARTIAL > 0 && <span style={{ color: '#a07010' }}>PARTIAL {pct(counts.PARTIAL, dn)}</span>}
-        {counts.LEAK    > 0 && <span style={{ color: 'var(--cdl-warn)' }}>LEAK {pct(counts.LEAK, dn)}</span>}
-        {counts['NO-DATA'] > 0 && <span style={{ color: 'var(--cdl-muted)' }}>NO-DATA {counts['NO-DATA']}</span>}
-        <span style={{ color: 'var(--cdl-muted)', marginLeft: 'auto' }}>n={n}</span>
-      </div>
-    </div>
-  )
+  return map
+}
+function horizonDays(h: string): number {
+  const m = h.match(/t(\d+)/); return m ? parseInt(m[1]) : 0
+}
+function matureDateLabel(
+  matureMap: Map<string, Map<string, Date>>,
+  recType: string, fallbackHorizon: string, targetHorizon: string,
+): string | null {
+  const hMap = matureMap.get(recType); if (!hMap) return null
+  const base = hMap.get(fallbackHorizon); if (!base) return null
+  const d = new Date(base)
+  d.setDate(d.getDate() + horizonDays(targetHorizon) - horizonDays(fallbackHorizon))
+  return d.toLocaleDateString('en-GB', { month: 'short', day: 'numeric' })
 }
 
-// ── Market rows under a section ────────────────────────────────────────────────
-function MarketRows({ markets }: { markets: MarketCounts[] }) {
-  if (markets.length === 0) return null
-  return (
-    <div style={{ marginTop: '0.5rem', paddingLeft: '1rem', borderLeft: '2px solid #eef4f8' }}>
-      {markets.map(m => (
-        <div key={m.market} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.35rem' }}>
-          <span style={{ fontWeight: 700, fontSize: '0.78rem', color: 'var(--cdl-muted)', width: '2.2rem', flexShrink: 0 }}>
-            {m.market}
-          </span>
-          <div style={{ flex: 1 }}>
-            <StackedBar counts={m.counts} dn={m.dn} n={m.n} />
-          </div>
-        </div>
-      ))}
-    </div>
-  )
+interface TileStats { winPct: number | null; dn: number; usedHorizon: string | null }
+function getTileStats(section: TypeSection, horizon: string, direction?: 'RAISE' | 'CUT'): TileStats {
+  if (horizon === 'all') {
+    let totalWin = 0, totalDn = 0
+    for (const hg of section.horizons) {
+      if (direction) {
+        if (hg.bidSplit) { const sp = hg.bidSplit.find(s => s.direction === direction); if (sp) { totalWin += sp.counts.WIN; totalDn += sp.dn } }
+        else if (hg.perRec) { const rel = hg.perRec.filter(r => r.direction === direction && r.verdict !== 'NO-DATA'); totalDn += rel.length; totalWin += rel.filter(r => r.verdict === 'WIN').length }
+      } else { totalWin += hg.counts.WIN; totalDn += hg.dn }
+    }
+    return { winPct: totalDn > 0 ? totalWin / totalDn * 100 : null, dn: totalDn, usedHorizon: null }
+  }
+  const ordered = [...section.horizons.filter(h => h.horizon === horizon), ...section.horizons.filter(h => h.horizon !== horizon)]
+  for (const hg of ordered) {
+    const fromOther = hg.horizon !== horizon
+    if (direction) {
+      if (hg.bidSplit) { const sp = hg.bidSplit.find(s => s.direction === direction); if (sp && sp.dn > 0) return { winPct: sp.counts.WIN / sp.dn * 100, dn: sp.dn, usedHorizon: fromOther ? hg.horizon : null } }
+      else if (hg.perRec) { const rel = hg.perRec.filter(r => r.direction === direction && r.verdict !== 'NO-DATA'); if (rel.length > 0) return { winPct: rel.filter(r => r.verdict === 'WIN').length / rel.length * 100, dn: rel.length, usedHorizon: fromOther ? hg.horizon : null } }
+    } else if (hg.dn > 0) return { winPct: hg.counts.WIN / hg.dn * 100, dn: hg.dn, usedHorizon: fromOther ? hg.horizon : null }
+  }
+  return { winPct: null, dn: 0, usedHorizon: null }
 }
 
-// ── Honesty note ───────────────────────────────────────────────────────────────
-function HonestyNote({ text }: { text: string }) {
-  return (
-    <p style={{
-      fontSize: '0.73rem',
-      color: 'var(--cdl-muted)',
-      fontStyle: 'italic',
-      marginTop: '0.65rem',
-      lineHeight: 1.5,
-      borderTop: '1px solid #eef4f8',
-      paddingTop: '0.5rem',
-    }}>
-      ⚠ {text}
-    </p>
-  )
+// ── Matrix helpers ─────────────────────────────────────────────────────────────
+type MatrixRowDef = { key: string; label: string; recType: string; direction?: 'RAISE' | 'CUT' }
+const MATRIX_ROWS: MatrixRowDef[] = [
+  { key: 'REPLACE',          label: 'REPLACE',           recType: 'REPLACE_PRODUCT_AD'             },
+  { key: 'PROMOTE_TERM',     label: 'PROMOTE_TERM',      recType: 'PROMOTE_TERM'                    },
+  { key: 'NEGATE_TERM',      label: 'NEGATE_TERM',       recType: 'NEGATE_TERM'                     },
+  { key: 'NEGATE_TARGET',    label: 'NEGATE_TARGET',     recType: 'NEGATE_TARGET'                   },
+  { key: 'BID_ADJUST·CUT',   label: 'BID_ADJUST · CUT',  recType: 'BID_ADJUST', direction: 'CUT'   },
+  { key: 'BID_ADJUST·RAISE', label: 'BID_ADJUST · RAISE',recType: 'BID_ADJUST', direction: 'RAISE' },
+]
+const SMALL_COHORT_TYPES = ['PROMOTE_ASIN','CREATIVE_KEYWORD','CREATIVE_TARGET','PAUSE_CAMPAIGN','BUDGET_ADJUST','CREATE_STRUCTURE']
+const MAIN_REC_TYPES     = new Set(MATRIX_ROWS.map(r => r.recType))
+
+type TileDef = { key: string; label: string; recType: string; direction?: 'RAISE' | 'CUT' }
+const TILE_DEFS: TileDef[] = [
+  { key: 'REPLACE',          label: 'REPLACE',          recType: 'REPLACE_PRODUCT_AD'             },
+  { key: 'PROMOTE_TERM',     label: 'PROMOTE_TERM',     recType: 'PROMOTE_TERM'                    },
+  { key: 'NEGATE_TERM',      label: 'NEGATE_TERM',      recType: 'NEGATE_TERM'                     },
+  { key: 'NEGATE_TARGET',    label: 'NEGATE_TARGET',    recType: 'NEGATE_TARGET'                   },
+  { key: 'BID_ADJUST·RAISE', label: 'BID_ADJUST·RAISE', recType: 'BID_ADJUST', direction: 'RAISE' },
+  { key: 'BID_ADJUST·CUT',   label: 'BID_ADJUST·CUT',   recType: 'BID_ADJUST', direction: 'CUT'   },
+]
+
+function getMatrixMarkets(sections: TypeSection[], horizon: string): string[] {
+  const s = new Set<string>()
+  for (const sec of sections) {
+    if (!MAIN_REC_TYPES.has(sec.recType)) continue
+    const hGroups = horizon === 'all' ? sec.horizons : sec.horizons.filter(h => h.horizon === horizon)
+    for (const hg of hGroups) {
+      for (const m of hg.byMarket) s.add(m.market)
+      if (hg.bidSplit) for (const sp of hg.bidSplit) for (const m of sp.byMarket) s.add(m.market)
+      if (hg.perRec)   for (const r  of hg.perRec)  s.add(r.market)
+    }
+  }
+  return [...s].sort()
 }
 
-// ── Horizon group renderer ─────────────────────────────────────────────────────
-function HorizonSection({ hg, recType }: { hg: HorizonGroup; recType: string }) {
-  // Per-rec small-cohort
-  if (hg.perRec) {
-    return (
-      <div style={{ marginBottom: '0.75rem' }}>
-        <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--cdl-muted)', marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-          {hg.horizon.toUpperCase()} — n={hg.n} (per-rec; too small for rates)
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-          {hg.perRec.map((r, i) => {
-            const color = r.verdict === 'WIN' ? 'var(--cdl-ok)' : r.verdict === 'PARTIAL' ? '#a07010' : r.verdict === 'LEAK' ? 'var(--cdl-warn)' : 'var(--cdl-muted)'
-            return (
-              <div key={i} style={{ fontSize: '0.8rem', display: 'flex', gap: '0.5rem' }}>
-                <span style={{ color: 'var(--cdl-muted)', fontVariantNumeric: 'tabular-nums' }}>#{r.id}</span>
-                <span style={{ fontWeight: 600, color: 'var(--cdl-muted)' }}>[{r.market}]</span>
-                {r.direction && <span style={{ color: 'var(--cdl-blue)' }}>[{r.direction}]</span>}
-                <span style={{ fontWeight: 700, color }}>{r.verdict}</span>
-                {r.note && <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>{r.note}</span>}
-              </div>
-            )
-          })}
-        </div>
-      </div>
-    )
+function getMatrixCell(sections: TypeSection[], recType: string, direction: 'RAISE'|'CUT'|undefined, market: string, horizon: string): { dn: number; winPct: number | null } {
+  const section = sections.find(s => s.recType === recType)
+  if (!section) return { dn: 0, winPct: null }
+  const hGroups = horizon === 'all' ? section.horizons : section.horizons.filter(h => h.horizon === horizon)
+  let totalWin = 0, totalDn = 0
+  for (const hg of hGroups) {
+    if (direction) {
+      if (hg.bidSplit) { const sp = hg.bidSplit.find(s => s.direction === direction); if (sp) { const m = sp.byMarket.find(m => m.market === market); if (m) { totalWin += m.counts.WIN; totalDn += m.dn } } }
+      else if (hg.perRec) { const rel = hg.perRec.filter(r => r.direction === direction && r.market === market && r.verdict !== 'NO-DATA'); totalDn += rel.length; totalWin += rel.filter(r => r.verdict === 'WIN').length }
+    } else {
+      if (hg.byMarket.length > 0) { const m = hg.byMarket.find(m => m.market === market); if (m) { totalWin += m.counts.WIN; totalDn += m.dn } }
+      else if (hg.perRec) { const rel = hg.perRec.filter(r => r.market === market && r.verdict !== 'NO-DATA'); totalDn += rel.length; totalWin += rel.filter(r => r.verdict === 'WIN').length }
+    }
+  }
+  return { dn: totalDn, winPct: totalDn > 0 ? totalWin / totalDn * 100 : null }
+}
+
+// ── Panel data helpers ─────────────────────────────────────────────────────────
+function medianOfNonNull(vals: (number | null)[]): number | null {
+  const ns = vals.filter((x): x is number => x !== null).sort((a, b) => a - b)
+  if (ns.length === 0) return null
+  const mid = Math.floor(ns.length / 2)
+  return ns.length % 2 === 0 ? (ns[mid - 1] + ns[mid]) / 2 : ns[mid]
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseBidAcosPoints(rawRows: RawRow[], horizon: string, market?: string) {
+  const rows = rawRows.filter(r =>
+    r.rec_type === 'BID_ADJUST' &&
+    (horizon === 'all' || r.horizon === horizon) &&
+    (!market || r.country_code === market)
+  )
+  const cuts:   { before: number | null; after: number | null }[] = []
+  const raises: { before: number | null; after: number | null }[] = []
+  for (const row of rows) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ev = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence as any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const m  = typeof row.metrics  === 'string' ? JSON.parse(row.metrics)  : row.metrics  as any
+    const pushed  = Number(ev.pushed_bid ?? ev.proposed_bid)
+    let current   = Number(ev.current_bid)
+    if (isNaN(current) && Array.isArray(ev.existing_targets) && ev.existing_targets.length > 0)
+      current = Number(ev.existing_targets[0]?.bid)
+    let dir = 'UNKNOWN'
+    if (!isNaN(current) && !isNaN(pushed))
+      dir = pushed < current * 0.99 ? 'CUT' : pushed > current * 1.01 ? 'RAISE' : 'FLAT'
+    const afterSales  = Number(m.sales_14d)
+    const beforeSales = Number(m.before_sales_14d)
+    const afterAcos   = afterSales  > 0 ? Number(m.cost)        / afterSales  : null
+    const beforeAcos  = beforeSales > 0 ? Number(m.before_cost) / beforeSales : null
+    if (dir === 'CUT')   cuts.push({ before: beforeAcos, after: afterAcos })
+    if (dir === 'RAISE') raises.push({ before: beforeAcos, after: afterAcos })
+  }
+  return { cuts, raises }
+}
+
+function buildPanelData(
+  sections:  TypeSection[],
+  rawRows:   RawRow[],
+  recType:   string,
+  direction: 'CUT' | 'RAISE' | undefined,
+  market:    string | undefined,
+  horizon:   string,
+  label:     string,
+  panelKey:  string,
+): PanelData {
+  const section = sections.find(s => s.recType === recType)
+  const hGroups = !section ? [] : (horizon === 'all' ? section.horizons : section.horizons.filter(h => h.horizon === horizon))
+
+  let win = 0, partial = 0, leak = 0, nodata = 0, totalN = 0
+  const perRecEntries: PanelPerRec[] = []
+
+  for (const hg of hGroups) {
+    if (direction) {
+      if (hg.bidSplit) {
+        const sp = hg.bidSplit.find(s => s.direction === direction)
+        if (sp) {
+          if (market) {
+            const mkt = sp.byMarket.find(m => m.market === market)
+            if (mkt) { win += mkt.counts.WIN; partial += mkt.counts.PARTIAL; leak += mkt.counts.LEAK; nodata += mkt.counts['NO-DATA']; totalN += mkt.n }
+          } else { win += sp.counts.WIN; partial += sp.counts.PARTIAL; leak += sp.counts.LEAK; nodata += sp.counts['NO-DATA']; totalN += sp.n }
+        }
+      } else if (hg.perRec) {
+        const rel = hg.perRec.filter(r => r.direction === direction && (!market || r.market === market))
+        for (const r of rel) {
+          perRecEntries.push({ id: r.id, market: r.market, direction: r.direction, verdict: r.verdict, note: r.note })
+          totalN++
+          if (r.verdict === 'WIN') win++; else if (r.verdict === 'PARTIAL') partial++; else if (r.verdict === 'LEAK') leak++; else nodata++
+        }
+      }
+    } else {
+      if (hg.byMarket.length > 0) {
+        if (market) {
+          const mkt = hg.byMarket.find(m => m.market === market)
+          if (mkt) { win += mkt.counts.WIN; partial += mkt.counts.PARTIAL; leak += mkt.counts.LEAK; nodata += mkt.counts['NO-DATA']; totalN += mkt.n }
+        } else { win += hg.counts.WIN; partial += hg.counts.PARTIAL; leak += hg.counts.LEAK; nodata += hg.counts['NO-DATA']; totalN += hg.n }
+      } else if (hg.perRec) {
+        const rel = market ? hg.perRec.filter(r => r.market === market) : hg.perRec
+        for (const r of rel) {
+          perRecEntries.push({ id: r.id, market: r.market, direction: r.direction, verdict: r.verdict, note: r.note })
+          totalN++
+          if (r.verdict === 'WIN') win++; else if (r.verdict === 'PARTIAL') partial++; else if (r.verdict === 'LEAK') leak++; else nodata++
+        }
+      }
+    }
   }
 
-  // BID_ADJUST split
-  if (hg.bidSplit) {
-    return (
-      <div style={{ marginBottom: '0.75rem' }}>
-        <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--cdl-muted)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-          {hg.horizon.toUpperCase()} — n={hg.n}
-        </div>
-        {hg.bidSplit.map((split: BidDirectionGroup) => (
-          <div key={split.direction} style={{ marginBottom: '0.85rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
-              <span style={{
-                display: 'inline-block', padding: '1px 8px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 700,
-                background: split.direction === 'RAISE' ? 'rgba(26,127,78,0.13)' : 'rgba(192,57,43,0.12)',
-                color: split.direction === 'RAISE' ? 'var(--cdl-ok)' : 'var(--cdl-warn)',
-              }}>
-                {split.direction}
-              </span>
-              <span style={{ fontSize: '0.78rem', color: 'var(--cdl-muted)' }}>n={split.n}</span>
-              {split.medianAcosDelta !== null && (
-                <span style={{ fontSize: '0.75rem', color: 'var(--cdl-muted)' }}>
-                  median ACoS Δ: {(split.medianAcosDelta * 100).toFixed(1)}pp (neg=improvement)
-                </span>
-              )}
-            </div>
-            <StackedBar counts={split.counts} dn={split.dn} n={split.n} />
-            <MarketRows markets={split.byMarket} />
-          </div>
-        ))}
-      </div>
-    )
+  const counts: PanelCounts = { WIN: win, PARTIAL: partial, LEAK: leak, 'NO-DATA': nodata }
+  const dn = totalN - nodata
+
+  // Median € stopped (NEGATE types)
+  let medianEurosStopped: number | null | undefined = undefined
+  if (recType === 'NEGATE_TERM' || recType === 'NEGATE_TARGET') {
+    const stops: (number | null)[] = rawRows
+      .filter(r => r.rec_type === recType && (horizon === 'all' || r.horizon === horizon) && (!market || r.country_code === market))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .map(row => { const ev = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence as any; const m = typeof row.metrics === 'string' ? JSON.parse(row.metrics) : row.metrics as any; const ref = Number(ev.spend); const cost = Number(m.cost); return (!isNaN(ref) && !isNaN(cost)) ? ref - cost : null })
+    medianEurosStopped = medianOfNonNull(stops)
   }
 
-  // Standard
-  return (
-    <div style={{ marginBottom: '0.75rem' }}>
-      <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--cdl-muted)', marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-        {hg.horizon.toUpperCase()} — n={hg.n}
-        {hg.medianEurosStopped != null && (
-          <span style={{ fontWeight: 400, marginLeft: '0.75rem' }}>
-            median stopped: €{hg.medianEurosStopped.toFixed(2)}
-          </span>
-        )}
-      </div>
-      <StackedBar counts={hg.counts} dn={hg.dn} n={hg.n} />
-      <MarketRows markets={hg.byMarket} />
-    </div>
-  )
-}
+  // ACoS dumbbell data (BID_ADJUST only — always both directions for context)
+  let acosData: PanelAcosData | undefined = undefined
+  if (recType === 'BID_ADJUST') {
+    const { cuts, raises } = parseBidAcosPoints(rawRows, horizon, market)
+    acosData = {
+      cut:   { beforeMedian: medianOfNonNull(cuts.map(c => c.before)),   afterMedian: medianOfNonNull(cuts.map(c => c.after)),   n: cuts.length   },
+      raise: { beforeMedian: medianOfNonNull(raises.map(r => r.before)), afterMedian: medianOfNonNull(raises.map(r => r.after)), n: raises.length },
+    }
+  }
 
-// ── Type label map ─────────────────────────────────────────────────────────────
-const TYPE_LABEL: Record<string, string> = {
-  REPLACE_PRODUCT_AD: 'REPLACE',
-  PROMOTE_TERM:       'PROMOTE_TERM',
-  NEGATE_TERM:        'NEGATE_TERM',
-  NEGATE_TARGET:      'NEGATE_TARGET',
-  BID_ADJUST:         'BID_ADJUST',
-  CREATIVE_KEYWORD:   'CREATIVE_KEYWORD',
-  PROMOTE_ASIN:       'PROMOTE_ASIN',
-  CREATIVE_TARGET:    'CREATIVE_TARGET',
-  PAUSE_CAMPAIGN:     'PAUSE_CAMPAIGN',
-  BUDGET_ADJUST:      'BUDGET_ADJUST',
-  CREATE_STRUCTURE:   'CREATE_STRUCTURE',
+  return {
+    key: panelKey, label, recType, counts, n: totalN, dn,
+    medianEurosStopped,
+    acosData,
+    perRec:         perRecEntries.length > 0 ? perRecEntries : undefined,
+    adaptationNote: ADAPTATIONS[recType] ?? undefined,
+  }
 }
 
 // ── Page ───────────────────────────────────────────────────────────────────────
@@ -209,8 +259,6 @@ export default async function ScorecardPage({
   const horizon = sp.horizon ?? 'all'
 
   const sql = neon(process.env.DATABASE_URL!)
-
-  const hClause = horizon === 'all' ? sql`` : sql`AND o.horizon = ${horizon}`
 
   const rawRows = (await sql`
     SELECT
@@ -228,15 +276,69 @@ export default async function ScorecardPage({
     JOIN rec_outcomes      o ON o.rec_id     = r.id
     JOIN amazon_profiles   p ON p.profile_id = r.profile_id
     WHERE r.status = 'PUSHED'
-    ${hClause}
     ORDER BY r.rec_type, o.horizon, p.country_code, r.id
   `) as unknown as RawRow[]
 
-  const result = computeScorecard(rawRows)
-  const { hero, sections } = result
+  const { sections, hero } = computeScorecard(rawRows)
+  const matureMap           = buildMatureMap(rawRows)
+
+  // ── Tiles ──────────────────────────────────────────────────────────────────
+  const tiles: TilePayload[] = TILE_DEFS.map(def => {
+    const panelKey = `tile:${def.key}`
+    const section  = sections.find(s => s.recType === def.recType)
+    if (!section) return { ...def, winPct: null, dn: 0, usedHorizon: null, matureDate: null, panelKey }
+    const { winPct, dn, usedHorizon } = getTileStats(section, horizon, def.direction)
+    const matureDate = usedHorizon && horizon !== 'all'
+      ? matureDateLabel(matureMap, def.recType, usedHorizon, horizon) : null
+    return { ...def, winPct, dn, usedHorizon, matureDate, panelKey }
+  })
+
+  // ── Matrix ─────────────────────────────────────────────────────────────────
+  const matrixMarkets = getMatrixMarkets(sections, horizon)
+  const matrixRows: MatrixRow[] = MATRIX_ROWS.map(r => ({ key: r.key, label: r.label }))
+
+  const matrixCells: Record<string, MatrixCellData> = {}
+  for (const row of MATRIX_ROWS) {
+    for (const mkt of matrixMarkets) {
+      const cellKey  = `${row.key}:${mkt}`
+      const panelKey = `cell:${row.key}:${mkt}`
+      const { dn, winPct } = getMatrixCell(sections, row.recType, row.direction, mkt, horizon)
+      matrixCells[cellKey] = { dn, winPct, panelKey }
+    }
+  }
+
+  // ── Panel data map ─────────────────────────────────────────────────────────
+  const panelDataMap: Record<string, PanelData> = {}
+
+  // Tile panels (all markets)
+  for (const def of TILE_DEFS) {
+    const panelKey = `tile:${def.key}`
+    panelDataMap[panelKey] = buildPanelData(sections, rawRows, def.recType, def.direction, undefined, horizon, def.label, panelKey)
+  }
+  // Matrix cell panels (per market)
+  for (const row of MATRIX_ROWS) {
+    for (const mkt of matrixMarkets) {
+      const panelKey = `cell:${row.key}:${mkt}`
+      panelDataMap[panelKey] = buildPanelData(sections, rawRows, row.recType, row.direction, mkt, horizon, `${row.label} · ${mkt}`, panelKey)
+    }
+  }
+
+  // ── Small cohorts ──────────────────────────────────────────────────────────
+  const smallCohorts: SmallCohortEntry[] = SMALL_COHORT_TYPES.flatMap(rt => {
+    const sec = sections.find(s => s.recType === rt)
+    if (!sec) return []
+    const hGroups = horizon === 'all' ? sec.horizons : sec.horizons.filter(h => h.horizon === horizon)
+    if (hGroups.length === 0) return []
+    let n = 0, win = 0, partial = 0, leak = 0, nodata = 0
+    for (const hg of hGroups) { n += hg.n; win += hg.counts.WIN; partial += hg.counts.PARTIAL; leak += hg.counts.LEAK; nodata += hg.counts['NO-DATA'] }
+    if (n === 0) return []
+    const parts = [win > 0 ? `${win} WIN` : '', partial > 0 ? `${partial} PARTIAL` : '', leak > 0 ? `${leak} LEAK` : '', nodata > 0 ? `${nodata} NO-DATA` : ''].filter(Boolean)
+    return [{ rt, n, summary: parts.join(' · ') || '—' }]
+  })
 
   return (
     <div>
+      {/* ── Header ── */}
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.5rem' }}>
         <h1 style={{ marginBottom: 0 }}>Scorecard</h1>
         <span style={{ fontSize: '0.8rem', color: 'var(--cdl-muted)' }}>
@@ -247,104 +349,19 @@ export default async function ScorecardPage({
       {/* ── Horizon toggle ── */}
       <HorizonFilter current={horizon} />
 
-      {/* ── HERO strip ── */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
-        gap: '1rem',
-        marginBottom: '2rem',
-      }}>
-        <HeroCard
-          label="REPLACE WIN"
-          value={fmtPct(hero.replaceWinPct)}
-          sub="B0 dark + HC serving"
-          color="var(--cdl-ok)"
-        />
-        <HeroCard
-          label="PROMOTE_TERM SERVING"
-          value={fmtPct(hero.promoteTermServingPct)}
-          sub="clicks > 0 proxy"
-          color="var(--cdl-blue)"
-        />
-        <HeroCard
-          label="NEGATE MEDIAN €"
-          value={hero.negateMedianEurosStopped !== null
-            ? `€${hero.negateMedianEurosStopped.toFixed(0)}`
-            : '—'}
-          sub="spend stopped"
-          color="var(--cdl-ok)"
-        />
-        <HeroCard
-          label="RAISE WIN"
-          value={fmtPct(hero.raiseWinPct)}
-          sub={`CUT WIN ${fmtPct(hero.cutWinPct)} ← inversion`}
-          color="var(--cdl-ok)"
-          subColor="var(--cdl-warn)"
-        />
-      </div>
-
-      {/* ── Per-type sections ── */}
-      {sections.map(sec => {
-        const adaptation = ADAPTATIONS[sec.recType]
-        return (
-          <div key={sec.recType} className="table-card" style={{ padding: '1rem 1.25rem', marginBottom: '1.25rem' }}>
-            <h2 style={{ marginBottom: '0.85rem' }}>
-              {TYPE_LABEL[sec.recType] ?? sec.recType}
-              {sec.isSmallCohort && (
-                <span style={{ fontWeight: 400, fontSize: '0.78rem', color: 'var(--cdl-muted)', marginLeft: '0.5rem' }}>
-                  small cohort
-                </span>
-              )}
-            </h2>
-            {sec.horizons.map(hg => (
-              <HorizonSection key={hg.horizon} hg={hg} recType={sec.recType} />
-            ))}
-            {adaptation && <HonestyNote text={adaptation} />}
-          </div>
-        )
-      })}
+      {/* ── Interactive layer (client) ── */}
+      <ScorecardClient
+        tiles={tiles}
+        matrixRows={matrixRows}
+        matrixMarkets={matrixMarkets}
+        matrixCells={matrixCells}
+        panelDataMap={panelDataMap}
+        smallCohorts={smallCohorts}
+      />
 
       {rawRows.length === 0 && (
         <p style={{ color: 'var(--cdl-muted)' }}>No graded outcomes yet for horizon: {horizon}.</p>
       )}
-    </div>
-  )
-}
-
-// ── Hero card sub-component ────────────────────────────────────────────────────
-function HeroCard({
-  label,
-  value,
-  sub,
-  color,
-  subColor,
-}: {
-  label:     string
-  value:     string
-  sub:       string
-  color:     string
-  subColor?: string
-}) {
-  return (
-    <div style={{
-      border: '1px solid #c8dfe9',
-      borderRadius: '8px',
-      padding: '0.85rem 1rem',
-      background: '#fff',
-      boxShadow: '0 1px 4px rgba(0,0,0,.06)',
-    }}>
-      <div style={{
-        fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
-        letterSpacing: '0.06em', color: 'var(--cdl-muted)', marginBottom: '0.3rem',
-      }}>
-        {label}
-      </div>
-      <div style={{ fontSize: '1.8rem', fontWeight: 800, color, lineHeight: 1, marginBottom: '0.25rem', fontVariantNumeric: 'tabular-nums' }}>
-        {value}
-      </div>
-      <div style={{ fontSize: '0.72rem', color: subColor ?? 'var(--cdl-muted)' }}>
-        {sub}
-      </div>
     </div>
   )
 }
