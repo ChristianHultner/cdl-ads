@@ -39,7 +39,137 @@ async function safe(label, fn) {
 }
 
 // ---------------------------------------------------------------------------
-// a. QUEUE — DRAFT recs by type
+// a. ESTATE — yesterday's totals across all profiles, per currency + 7d avg
+// ---------------------------------------------------------------------------
+const estateLine = await safe('Estate', async () => {
+  const pool = mkPool();
+  try {
+    const [perfResult, avgResult] = await Promise.all([
+      pool.query(`
+        SELECT
+          CASE
+            WHEN p.country_code = 'US' THEN 'USD'
+            WHEN p.country_code = 'MX' THEN 'MXN'
+            ELSE 'EUR'
+          END                           AS currency,
+          sum(d.cost)::numeric(10,2)    AS cost,
+          sum(d.clicks)::bigint         AS clicks,
+          sum(d.purchases_14d)::int     AS orders
+        FROM amazon_campaign_daily d
+        JOIN amazon_profiles p ON p.profile_id = d.profile_id
+        WHERE d.date = current_date - 1
+        GROUP BY 1
+        ORDER BY 1
+      `),
+      pool.query(`
+        SELECT round(sum(d.purchases_14d)::numeric / 7, 1) AS avg_orders
+        FROM amazon_campaign_daily d
+        WHERE d.date >= current_date - 7
+          AND d.date <  current_date
+      `),
+    ]);
+
+    if (perfResult.rows.length === 0) return 'Estate: no data for yesterday';
+
+    const byCur = {};
+    let totalClicks = 0;
+    let totalOrders = 0;
+    for (const r of perfResult.rows) {
+      byCur[r.currency] = parseFloat(r.cost);
+      totalClicks += parseInt(r.clicks  || 0);
+      totalOrders += parseInt(r.orders  || 0);
+    }
+
+    const costParts = [];
+    if (byCur.EUR != null) costParts.push(`\u20ac${byCur.EUR.toFixed(2)}`);
+    if (byCur.USD != null) costParts.push(`$${byCur.USD.toFixed(2)}`);
+    if (byCur.MXN != null) costParts.push(`MX$${byCur.MXN.toFixed(2)}`);
+
+    const avgOrders = parseFloat(avgResult.rows[0]?.avg_orders ?? 0);
+    return `Estate: ${costParts.join(' + ')} | ${totalClicks} clicks | ${totalOrders} orders (early) (7d avg: ${avgOrders}/day)`;
+  } finally {
+    await pool.end().catch(() => {});
+  }
+});
+
+// ---------------------------------------------------------------------------
+// b. TOP MARKETS — ES, US, MX always; others only if spend > 15 EUR-equiv
+// ---------------------------------------------------------------------------
+const topMarketsLines = await safe('Top markets', async () => {
+  const pool = mkPool();
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        p.country_code,
+        sum(d.cost)::numeric(10,2)  AS cost,
+        sum(d.clicks)::bigint       AS clicks,
+        sum(d.purchases_14d)::int   AS orders
+      FROM amazon_campaign_daily d
+      JOIN amazon_profiles p ON p.profile_id = d.profile_id
+      WHERE d.date = current_date - 1
+      GROUP BY p.country_code
+      ORDER BY p.country_code
+    `);
+
+    function sym(code) {
+      if (code === 'US') return '$';
+      if (code === 'MX') return 'MX$';
+      return '\u20ac';
+    }
+    function fmt(r) {
+      const cost = parseFloat(r.cost).toFixed(2);
+      return `${r.country_code}: ${sym(r.country_code)}${cost} \u00b7 ${r.clicks} clicks \u00b7 ${r.orders} orders`;
+    }
+
+    const named = ['ES', 'US', 'MX'];
+    const lines = [];
+
+    for (const code of named) {
+      const r = rows.find(r => r.country_code === code);
+      if (r) lines.push(fmt(r));
+    }
+
+    for (const r of rows) {
+      if (named.includes(r.country_code)) continue;
+      if (parseFloat(r.cost) > 15) lines.push(fmt(r));
+    }
+
+    return lines.join('\n');
+  } finally {
+    await pool.end().catch(() => {});
+  }
+});
+
+// ---------------------------------------------------------------------------
+// c. CLUSTER ROOMS — yesterday's totals for campaigns named *CLUSTER*
+// ---------------------------------------------------------------------------
+const clusterLine = await safe('Cluster rooms', async () => {
+  const pool = mkPool();
+  try {
+    const { rows } = await pool.query(`
+      SELECT sum(d.impressions)::bigint    AS impr,
+             sum(d.clicks)::bigint        AS clicks,
+             sum(d.cost)::numeric(10,2)   AS cost,
+             sum(d.purchases_14d)::int    AS orders
+        FROM amazon_campaign_daily d
+        JOIN amazon_campaigns c ON c.campaign_id = d.campaign_id
+       WHERE c.name ilike '%CLUSTER%'
+         AND d.date = current_date - 1`,
+    );
+    const r = rows[0];
+    if (!r || r.impr === null) return 'Cluster rooms: no data for yesterday';
+    const imprFmt = parseInt(r.impr) >= 1000
+      ? (parseInt(r.impr) / 1000).toFixed(1) + 'k'
+      : String(r.impr);
+    const orders = r.orders ?? 0;
+    return `Cluster rooms: ${imprFmt} impr, ${r.clicks} clicks, \u20ac${r.cost}, ${orders} order${orders === 1 ? '' : 's'}`;
+  } finally {
+    await pool.end().catch(() => {});
+  }
+});
+
+// ---------------------------------------------------------------------------
+// d. QUEUE — DRAFT recs by type
 // ---------------------------------------------------------------------------
 const queueLine = await safe('Queue', async () => {
   const pool = mkPool();
@@ -59,7 +189,7 @@ const queueLine = await safe('Queue', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// b. STAMPS — rec_outcomes captured in last 24h, by horizon (t7 first)
+// e. STAMPS — rec_outcomes captured in last 24h, by horizon (t7 first)
 // ---------------------------------------------------------------------------
 const stampsLine = await safe('Graded overnight', async () => {
   const pool = mkPool();
@@ -79,7 +209,7 @@ const stampsLine = await safe('Graded overnight', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// c. SYNC — list only profiles stale > 30h
+// f. SYNC — list only profiles stale > 30h
 // ---------------------------------------------------------------------------
 const syncLine = await safe('Sync', async () => {
   const pool = mkPool();
@@ -105,7 +235,9 @@ const syncLine = await safe('Sync', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// d. RUNS — grep last nightly run for Killed / FAILED
+// g. RUNS — grep last nightly run region for Killed / FAILED
+//    Scoped to the region after the last nightly-sync start marker;
+//    no per-line timestamps in the log so marker-based scoping is used.
 // ---------------------------------------------------------------------------
 const runsLine = await safe('Runs', async () => {
   if (!existsSync(LOG_FILE)) return 'Runs: log missing';
@@ -138,11 +270,11 @@ const runsLine = await safe('Runs', async () => {
   const parts = [];
   if (killedN > 0)          parts.push(`${killedN} Killed`);
   if (failedIds.length > 0) parts.push(`FAILED: ${failedIds.join(', ')}`);
-  return 'Runs: ' + parts.join(' · ');
+  return 'Runs: ' + parts.join(' \u00b7 ');
 });
 
 // ---------------------------------------------------------------------------
-// e. WATCHDOG — status file first; DB fallback
+// h. WATCHDOG — status file first; DB fallback
 // ---------------------------------------------------------------------------
 const watchdogLine = await safe('Watchdog', async () => {
   let s;
@@ -170,35 +302,7 @@ const watchdogLine = await safe('Watchdog', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// f. CLUSTER ROOMS — yesterday's totals for campaigns named *CLUSTER*
-// ---------------------------------------------------------------------------
-const clusterLine = await safe('Cluster rooms', async () => {
-  const pool = mkPool();
-  try {
-    const { rows } = await pool.query(`
-      SELECT sum(d.impressions)::bigint    AS impr,
-             sum(d.clicks)::bigint        AS clicks,
-             sum(d.cost)::numeric(10,2)   AS cost,
-             sum(d.purchases_14d)::int    AS orders
-        FROM amazon_campaign_daily d
-        JOIN amazon_campaigns c ON c.campaign_id = d.campaign_id
-       WHERE c.name ilike '%CLUSTER%'
-         AND d.date = current_date - 1`,
-    );
-    const r = rows[0];
-    if (!r || r.impr === null) return 'Cluster rooms: no data for yesterday';
-    const imprFmt = parseInt(r.impr) >= 1000
-      ? (parseInt(r.impr) / 1000).toFixed(1) + 'k'
-      : String(r.impr);
-    const orders = r.orders ?? 0;
-    return `Cluster rooms: ${imprFmt} impr, ${r.clicks} clicks, \u20ac${r.cost}, ${orders} order${orders === 1 ? '' : 's'}`;
-  } finally {
-    await pool.end().catch(() => {});
-  }
-});
-
-// ---------------------------------------------------------------------------
-// g. LEDGER — all-time stamp totals + PUSHED count
+// i. LEDGER — all-time stamp totals + PUSHED count
 // ---------------------------------------------------------------------------
 const ledgerLine = await safe('Ledger', async () => {
   const pool = mkPool();
@@ -222,17 +326,23 @@ const ledgerLine = await safe('Ledger', async () => {
 
 // ---------------------------------------------------------------------------
 // Compose + send
+// Order: date → Estate → top markets → Cluster rooms →
+//        Queue → Graded → Sync → Runs → Watchdog → Ledger
 // ---------------------------------------------------------------------------
-const SEP     = '\u2500'.repeat(30);
+const SEP = '\u2500'.repeat(30);
+
 const message = [
   `cdl-ads morning brief \u00b7 ${dateStr}`,
+  SEP,
+  estateLine,
+  topMarketsLines,
+  clusterLine,
   SEP,
   queueLine,
   stampsLine,
   syncLine,
   runsLine,
   watchdogLine,
-  clusterLine,
   SEP,
   ledgerLine,
 ].join('\n');
