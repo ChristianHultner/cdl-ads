@@ -450,11 +450,13 @@ const countsByType  = { NEGATE_TERM: 0, NEGATE_TARGET: 0, PROMOTE_TERM: 0, PROMO
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
   const termList = candidates.map((c) => c.searchTerm);
+  // Doctrine supersessions re-propose; human rejections stay suppressed.
   const { rows: existingRows } = await pool.query(
     `SELECT rec_type, target_text, status
        FROM recommendations
       WHERE profile_id = $1
-        AND target_text = ANY($2)`,
+        AND target_text = ANY($2)
+        AND NOT (status = 'REJECTED' AND evidence->>'reject_reason' = 'superseded\u2014surgical doctrine')`,
     [profileId, termList],
   );
 
