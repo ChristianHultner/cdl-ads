@@ -84,10 +84,35 @@ export default function VerdictStrip({ rows }: { rows: MarketVerdictRow[] }) {
   }
 
   return (
+    <div style={{ marginBottom: '1.5rem' }}>
     <div style={{
       background: 'var(--cdl-sky)', border: '1px solid #c8dfe9', borderRadius: 8,
-      padding: '0.15rem 1.5rem 0.5rem', marginBottom: '1.5rem',
+      padding: '0.15rem 1.5rem 0.5rem', marginBottom: '0.2rem',
     }}>
+
+      {/* AD GP — first row: this-week GP per currency vs 4wk avg */}
+      <div style={rowStyle}>
+        <span style={labelStyle}>Ad GP</span>
+        <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '0 1.1rem' }}>
+          {material.map((c, i) => {
+            const gpThis  = byCur[c].salesThis  - byCur[c].spendThis
+            const gpPrior = byCur[c].salesPrior - byCur[c].spendPrior
+            const p = pctDelta(gpThis, gpPrior)
+            return (
+              <span key={c} style={{ display: 'inline-flex', alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+                {i > 0 && <span style={{ color: 'var(--cdl-muted)', marginRight: '0.75rem' }}>+</span>}
+                <strong style={{ fontSize: '1.25rem' }}>{fmt(gpThis, c)}</strong>
+                {p != null && <SalesArrow pct={p} />}
+              </span>
+            )
+          })}
+          {minor.length > 0 && (
+            <span style={{ fontSize: '0.78rem', color: 'var(--cdl-muted)', alignSelf: 'center' }}>
+              + minor
+            </span>
+          )}
+        </div>
+      </div>
 
       {/* SALES — arrows inline, green/red */}
       <div style={rowStyle}>
@@ -151,6 +176,10 @@ export default function VerdictStrip({ rows }: { rows: MarketVerdictRow[] }) {
           ))}
         </div>
       </div>
+    </div>
+    <p style={{ fontSize: '0.62rem', color: 'var(--cdl-muted)', margin: 0, textAlign: 'right', fontStyle: 'italic' }}>
+      Ad GP = ad-attributed sales − ad spend (pre-COGS/royalties)
+    </p>
     </div>
   )
 }

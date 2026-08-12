@@ -85,7 +85,9 @@ export default async function DashboardPage() {
         p.country_code,
         p.currency_code,
         COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.sales_14d ELSE 0 END),0)::float AS sales_this,
-        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d ELSE 0 END),0)::float AS sales_last
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d ELSE 0 END),0)::float AS sales_last,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.cost ELSE 0 END),0)::float AS spend_this,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.cost ELSE 0 END),0)::float AS spend_last
       FROM amazon_campaign_daily d
       JOIN amazon_profiles    p ON p.profile_id  = d.profile_id
       LEFT JOIN amazon_campaigns c ON c.campaign_id = d.campaign_id AND c.profile_id = d.profile_id
@@ -95,8 +97,10 @@ export default async function DashboardPage() {
       HAVING COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.sales_14d ELSE 0 END),0) > 0
           OR COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d ELSE 0 END),0) > 0
       ORDER BY (
-        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.sales_14d ELSE 0 END),0) -
-        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d ELSE 0 END),0)
+        (COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.sales_14d ELSE 0 END),0) -
+         COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.cost ELSE 0 END),0)) -
+        (COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d ELSE 0 END),0) -
+         COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.cost ELSE 0 END),0))
       ) DESC
       LIMIT 50
     `,
@@ -164,14 +168,17 @@ export default async function DashboardPage() {
 
   // ── Shape movers ─────────────────────────────────────────────────────────
   const allMovers: MoverRow[] = (moverRows as {
-    name: string; country_code: string; currency_code: string; sales_this: number; sales_last: number
+    name: string; country_code: string; currency_code: string;
+    sales_this: number; sales_last: number; spend_this: number; spend_last: number
   }[]).map(r => ({
     name:      r.name,
     country:   r.country_code,
     currency:  r.currency_code,
     salesThis: r.sales_this,
     salesLast: r.sales_last,
-    delta:     r.sales_this - r.sales_last,
+    spendThis: r.spend_this,
+    spendLast: r.spend_last,
+    delta:     (r.sales_this - r.spend_this) - (r.sales_last - r.spend_last),
   }))
   const gainers   = allMovers.slice(0, 3)
   const decliners = [...allMovers].sort((a, b) => a.delta - b.delta).slice(0, 3)

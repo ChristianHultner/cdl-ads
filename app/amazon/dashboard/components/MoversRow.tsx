@@ -19,7 +19,9 @@ export interface MoverRow {
   currency:  string
   salesThis: number
   salesLast: number
-  delta:     number
+  spendThis: number
+  spendLast: number
+  delta:     number   // GP delta = (salesThis-spendThis) - (salesLast-spendLast)
 }
 
 const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
@@ -57,7 +59,7 @@ function clusterLine(c: ClusterStats): string {
 function MoverTable({ rows, kind }: { rows: MoverRow[]; kind: 'up' | 'down' }) {
   const isUp = kind === 'up'
   const col  = isUp ? 'var(--cdl-ok)' : 'var(--cdl-warn)'
-  const hdr  = isUp ? '↑ Top gainers this week' : '↓ Top decliners this week'
+  const hdr  = isUp ? '↑ Top GP gainers this week' : '↓ Top GP decliners this week'
 
   return (
     <div style={{ border: '1px solid #c8dfe9', borderRadius: 8, overflow: 'hidden' }}>
@@ -69,14 +71,22 @@ function MoverTable({ rows, kind }: { rows: MoverRow[]; kind: 'up' | 'down' }) {
         {hdr}
       </div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
+        <thead>
+          <tr>
+            <th colSpan={2} style={{ padding: '0.25rem 0.75rem 0.25rem 1rem', fontSize: '0.67rem', fontWeight: 600, color: 'var(--cdl-muted)', textAlign: 'left', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #edf3f7' }}>Campaign</th>
+            <th style={{ padding: '0.25rem 1rem 0.25rem 0', fontSize: '0.67rem', fontWeight: 600, color: 'var(--cdl-muted)', textAlign: 'right', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid #edf3f7' }}>GP Δ</th>
+          </tr>
+        </thead>
         <tbody>
           {rows.length === 0 ? (
             <tr><td colSpan={3} style={{ padding: '0.7rem 1rem', color: 'var(--cdl-muted)' }}>—</td></tr>
           ) : rows.map((r, i) => {
             const sym   = SYM[r.currency] ?? r.currency
-            const amt   = `${sym}${Math.abs(r.delta).toFixed(0)}`
-            const sign  = isUp ? '+' : '−'
-            const pct   = pctLabel(r.salesThis, r.salesLast)
+            const gpThis = r.salesThis - r.spendThis
+            const gpLast = r.salesLast - r.spendLast
+            const amt    = `${sym}${Math.abs(r.delta).toFixed(0)}`
+            const sign   = isUp ? '+' : '−'
+            const pct    = pctLabel(gpThis, gpLast)
             return (
               <tr key={i} style={{ borderTop: '1px solid #edf3f7' }}>
                 <td style={{ padding: '0.45rem 0.75rem 0.45rem 1rem' }}>{trunc(r.name)}</td>

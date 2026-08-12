@@ -70,6 +70,15 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
   // Rolling bold points
   const rollSalePts   = rSalesPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
   const rollSpendPts  = rSpendPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
+  const rGPPlot       = rSalesPlot.map((s, i) => s - rSpendPlot[i])
+  const rollGPPts     = rGPPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
+
+  // GP shaded fill path: forward along rolling sales, backward along rolling spend
+  const gpFillPath = [
+    ...rollSalePts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`),
+    ...[...rollSpendPts].reverse().map(p => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`),
+    'Z',
+  ].join(' ')
 
   // Weekly x-ticks
   const xTicks: { x: number; label: string }[] = []
@@ -109,6 +118,9 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
       <line x1={L} y1={T} x2={L} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
       <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
 
+      {/* GP shaded fill — the gap between sales and spend IS the Ad GP */}
+      <path d={gpFillPath} fill="#16a34a" fillOpacity={0.15} stroke="none" />
+
       {/* Daily faint lines (behind rolling) */}
       <path d={polyline(dailySpendPts)} fill="none" stroke="#e8825c" strokeWidth={1}   strokeOpacity={0.25} />
       <path d={polyline(dailySalePts)}  fill="none" stroke="#0093d0" strokeWidth={1}   strokeOpacity={0.25} />
@@ -117,12 +129,17 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
       <path d={polyline(rollSpendPts)} fill="none" stroke="#e8825c" strokeWidth={2}   strokeOpacity={0.85} />
       <path d={polyline(rollSalePts)}  fill="none" stroke="#0093d0" strokeWidth={2.5} />
 
-      {/* Inline legend */}
-      <g transform={`translate(${L + PW - 200}, ${T + 6})`}>
+      {/* Ad GP (30d) — rolling sales minus rolling spend, bold deep-green line */}
+      <path d={polyline(rollGPPts)} fill="none" stroke="#15803d" strokeWidth={2.5} />
+
+      {/* Inline legend — 3 items */}
+      <g transform={`translate(${L + PW - 328}, ${T + 6})`}>
         <line x1={0} y1={5} x2={16} y2={5} stroke="#0093d0" strokeWidth={2.5} />
         <text x={20} y={9} fontSize={10} fill="#1a2b3c">Sales (30d avg)</text>
-        <line x1={110} y1={5} x2={126} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
-        <text x={130} y={9} fontSize={10} fill="#1a2b3c">Spend (30d avg)</text>
+        <line x1={112} y1={5} x2={128} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
+        <text x={132} y={9} fontSize={10} fill="#1a2b3c">Spend (30d avg)</text>
+        <line x1={224} y1={5} x2={240} y2={5} stroke="#15803d" strokeWidth={2.5} />
+        <text x={244} y={9} fontSize={10} fill="#1a2b3c">Ad GP (30d)</text>
       </g>
     </svg>
   )
