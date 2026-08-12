@@ -56,7 +56,24 @@ for (const r of acosRows) {
     marketRollingAcos[r.country_code] = r.cost_30d / r.sales_30d;
 }
 
+// Per-profile target_acos → per-market band (#4 fix — 2026-08-12: replaces hardcoded 25/35).
+const { rows: profileAcosRows } = await pool.query(`
+  SELECT country_code, target_acos::float AS target_acos
+  FROM amazon_profiles
+  WHERE target_acos IS NOT NULL
+`);
+const profileTargetAcos = {};
+for (const r of profileAcosRows) {
+  if (r.target_acos != null) profileTargetAcos[r.country_code] = Number(r.target_acos);
+}
+
 await pool.end();
+
+// Per-market band helper: derives from amazon_profiles.target_acos, fallback 0.30.
+function marketBand(mkt) {
+  const ta = profileTargetAcos[mkt] ?? 0.30;
+  return { bandLow: ta - 0.05, bandHigh: ta + 0.05 };
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function safeN(x) { return (x == null) ? NaN : Number(x); }
@@ -168,6 +185,9 @@ function judgeBidAdjust(ev, m, countryCode) {
   let   current = safeN(ev.current_bid);
   if (isNaN(current) && Array.isArray(ev.existing_targets) && ev.existing_targets.length > 0)
     current = safeN(ev.existing_targets[0].bid);
+  // REVIVE: current_bid not top-level; resolve from evidence.current_max (#8 fix — 2026-08-12).
+  if (isNaN(current) && ev.kind === 'REVIVE' && ev.current_max != null)
+    current = safeN(ev.current_max);
 
   const targetAcos = safeN(ev.params_used?.target_acos ?? 0.30);
   const bandHigh   = targetAcos + 0.05;
@@ -342,10 +362,26 @@ function judgeBudgetAdjust(ev, m) {
   const salesChg = (safeN(m.before_sales_14d) > 0)
     ? (safeN(m.sales_14d) - safeN(m.before_sales_14d)) / safeN(m.before_sales_14d)
     : null;
+  // GP delta (L3.1-parity; campaign_daily before/after always present for BUDGET_ADJUST).
+  const gp_delta = (!isNaN(safeN(m.cost)) && !isNaN(safeN(m.before_cost)))
+    ? (safeN(m.sales_14d) - safeN(m.cost)) - (safeN(m.before_sales_14d) - safeN(m.before_cost))
+    : null;
+  // WIN  = spend rose (raise took) AND gp_delta ≥ 0.
+  // LEAK = spend rose but GP fell (volume gained at a loss).
+  // PARTIAL = spend flat/fell (raise did not take; no directional signal).
+  // BUDGET_ADJUST is raise-only by generation — no direction inversion needed (#3 fix — 2026-08-12).
+  let verdict;
+  if (spendChg === null) {
+    verdict = 'PARTIAL'; // no baseline — cannot judge
+  } else if (spendChg > 0) {
+    verdict = (gp_delta !== null && gp_delta >= 0) ? 'WIN' : 'LEAK';
+  } else {
+    verdict = 'PARTIAL'; // raise did not take
+  }
   return {
-    verdict: spendChg !== null ? (spendChg > 0 ? 'PARTIAL' : 'WIN') : 'PARTIAL',
+    verdict,
     note: `spend_chg=${spendChg !== null ? (spendChg*100).toFixed(0)+'%' : '?'} sales_chg=${salesChg !== null ? (salesChg*100).toFixed(0)+'%' : '?'}`,
-    spend_change_pct: spendChg, sales_change_pct: salesChg,
+    spend_change_pct: spendChg, sales_change_pct: salesChg, gp_delta,
   };
 }
 
@@ -404,18 +440,18 @@ function rateStr(counts, dn) {
 }
 
 // ── Market ACoS band summary ──────────────────────────────────────────────────
-const BAND_LOW = 0.25; const BAND_HIGH = 0.35;
 console.log(SEP1);
 console.log('  CdL Ads SCORECARD — Layer 3.1 GP-Derived Outcomes');
 console.log(`  Horizon: ${horizonFilter}   Stamps loaded: ${judged.length}   Generated: ${new Date().toISOString()}`);
 console.log(SEP1);
 
-console.log('\n  Market rolling ACoS (30d) vs band 25-35%:');
+console.log('\n  Market rolling ACoS (30d) vs per-profile band (target_acos ± 5pp):');
 const mktAcosKeys = Object.keys(marketRollingAcos).sort();
 for (const mkt of mktAcosKeys) {
   const ra = marketRollingAcos[mkt];
-  const zone = ra < BAND_LOW ? 'push zone' : ra <= BAND_HIGH ? 'in band' : 'repair zone';
-  console.log(`    ${mkt.padEnd(4)} ${(ra * 100).toFixed(1).padStart(6)}%  ·  ${zone}`);
+  const { bandLow, bandHigh } = marketBand(mkt);
+  const zone = ra < bandLow ? 'push zone' : ra <= bandHigh ? 'in band' : 'repair zone';
+  console.log(`    ${mkt.padEnd(4)} ${(ra * 100).toFixed(1).padStart(6)}%  ·  ${zone}  (band ${(bandLow*100).toFixed(0)}–${(bandHigh*100).toFixed(0)}%)`);
 }
 if (mktAcosKeys.length === 0) console.log('    (no data)');
 
@@ -553,8 +589,9 @@ for (const recType of TYPE_ORDER) {
       const { n: mn, dn: mdn, counts: mc } = aggRows(mr);
       // Band position annotation for market
       const ra = marketRollingAcos[mkt];
+      const { bandLow: _bl, bandHigh: _bh } = marketBand(mkt);
       const bandStr = ra != null
-        ? `  [${(ra*100).toFixed(1)}% ${ra < BAND_LOW ? 'push' : ra <= BAND_HIGH ? 'in band' : 'repair'}]`
+        ? `  [${(ra*100).toFixed(1)}% ${ra < _bl ? 'push' : ra <= _bh ? 'in band' : 'repair'}]`
         : '';
       console.log(`  ${mkt.padEnd(5)} ${String(mn).padStart(4)}  ${String(mdn).padStart(7)}  ${rateStr(mc, mdn)}${bandStr}`);
       byMkt[mkt] = { n: mn, dn: mdn, counts: mc };

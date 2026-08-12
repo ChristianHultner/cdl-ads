@@ -246,6 +246,9 @@ function judgeBidAdjust(
   let   current = safeN(ev.current_bid)
   if (isNaN(current) && Array.isArray(ev.existing_targets) && ev.existing_targets.length > 0)
     current = safeN(ev.existing_targets[0].bid)
+  // REVIVE: current_bid not top-level; resolve from evidence.current_max (#8 fix — 2026-08-12).
+  if (isNaN(current) && ev.kind === 'REVIVE' && ev.current_max != null)
+    current = safeN(ev.current_max)
 
   const targetAcos = safeN(ev.params_used?.target_acos ?? 0.30)
   const bandHigh   = targetAcos + 0.05
@@ -450,11 +453,28 @@ function judgeBudgetAdjust(ev: any, m: any): Judgment {
   const salesChg = (safeN(m.before_sales_14d) > 0)
     ? (safeN(m.sales_14d) - safeN(m.before_sales_14d)) / safeN(m.before_sales_14d)
     : null
+  // GP delta (L3.1-parity; campaign_daily before/after always present for BUDGET_ADJUST).
+  const gp_delta = (!isNaN(safeN(m.cost)) && !isNaN(safeN(m.before_cost)))
+    ? (safeN(m.sales_14d) - safeN(m.cost)) - (safeN(m.before_sales_14d) - safeN(m.before_cost))
+    : null
+  // WIN  = spend rose (raise took) AND gp_delta ≥ 0.
+  // LEAK = spend rose but GP fell (volume gained at a loss).
+  // PARTIAL = spend flat/fell (raise did not take; no directional signal).
+  // BUDGET_ADJUST is raise-only by generation — no direction inversion needed (#3 fix — 2026-08-12).
+  let verdict: Verdict
+  if (spendChg === null) {
+    verdict = 'PARTIAL' // no baseline — cannot judge
+  } else if (spendChg > 0) {
+    verdict = (gp_delta !== null && gp_delta >= 0) ? 'WIN' : 'LEAK'
+  } else {
+    verdict = 'PARTIAL' // raise did not take
+  }
   return {
-    verdict: spendChg !== null ? (spendChg > 0 ? 'PARTIAL' : 'WIN') : 'PARTIAL',
+    verdict,
     note: `spend_chg=${spendChg !== null ? (spendChg * 100).toFixed(0) + '%' : '?'} sales_chg=${salesChg !== null ? (salesChg * 100).toFixed(0) + '%' : '?'}`,
     spend_change_pct: spendChg,
     sales_change_pct: salesChg,
+    gp_delta,
   }
 }
 
@@ -693,8 +713,9 @@ export function computeAcosContribution(
   judged: JudgedRow[],
   marketMonthSales: MarketMonthSales,
   marketRollingAcos: Record<string, number> = {},
-  bandLow  = 0.25,
-  bandHigh = 0.35,
+  // Per-market target_acos from amazon_profiles — replaces hardcoded 25/35 constants
+  // (#4 fix — 2026-08-12). Callers must pass this; defaults to empty (band falls back to 0.30±0.05).
+  marketTargetAcos: Record<string, number> = {},
 ): AcosContributionResult {
   const getMonth = (r: JudgedRow): string | null => {
     if (!r.pushed_at) return null
@@ -749,10 +770,13 @@ export function computeAcosContribution(
       const spend_stopped = d.spendStoppedList.reduce((a, b) => a + b, 0)
       const sales         = marketMonthSales[mkt]?.[month] ?? null
       const rolling_acos  = marketRollingAcos[mkt] ?? null
+      const _ta   = marketTargetAcos[mkt] ?? 0.30
+      const _bLow = _ta - 0.05
+      const _bHigh = _ta + 0.05
       const band_position: 'below' | 'in' | 'above' | null =
         rolling_acos == null ? null
-        : rolling_acos < bandLow  ? 'below'
-        : rolling_acos <= bandHigh ? 'in'
+        : rolling_acos < _bLow  ? 'below'
+        : rolling_acos <= _bHigh ? 'in'
         : 'above'
       byMarket[mkt][month] = {
         spend_stopped,

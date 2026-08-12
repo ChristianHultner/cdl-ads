@@ -382,8 +382,6 @@ for (const row of termRows) {
 
   let recType = null;
 
-  let salesAtRisk = false;
-
   if (spend >= negate_min_spend && clicks >= negate_min_clicks) {
     // Surgical doctrine: per-placement evaluation.
     // Placements with orders > 0 are excluded from negation scope — only zero-order
@@ -394,9 +392,7 @@ for (const row of termRows) {
       (ASIN_SHAPE.test(row.search_term)  && orders >= promote_asin_min_orders && acos !== null && acos < target_acos);
     if (_negPlacs.length > 0 && !_qualPromote) {
       // At least one zero-order placement → surgical negate card.
-      recType     = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
-      // [REVIEW] tripwire: to-be-negated placement has orders — shouldn't happen by construction.
-      salesAtRisk = _negPlacs.some((p) => p.orders > 0);
+      recType = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
     }
     // _negPlacs.length === 0 → all placements convert → no negate card → fall through to promote.
   }
@@ -436,7 +432,6 @@ for (const row of termRows) {
             ...(p.orders > 0 ? { kept_reason: 'converting' } : {}),
           }))
         : row.placements,
-      salesAtRisk,
     });
   }
 }
@@ -465,11 +460,11 @@ if (candidates.length > 0) {
   // v6 fix: match on lower(target_text) and include HELD in terminal statuses
   //         so re-born terms (any case) are suppressed across all terminal states.
   const openSet     = new Set(); // DRAFT | APPROVED | PUSHED → skip
-  const rejectedSet = new Set(); // REJECTED | HELD → skip (not placement-scoped)
+  const rejectedSet = new Set(); // REJECTED | HELD | RETIRED → skip (not placement-scoped)
   for (const row of existingRows) {
     const key = `${row.rec_type}|${row.target_text.toLowerCase()}`;
     if (['DRAFT', 'APPROVED', 'PUSHED'].includes(row.status)) openSet.add(key);
-    else if (['REJECTED', 'HELD'].includes(row.status))        rejectedSet.add(key);
+    else if (['REJECTED', 'HELD', 'RETIRED'].includes(row.status)) rejectedSet.add(key); // RETIRED = satisfied duplicate — never re-propose
   }
 
   // Detect auto ad groups: any group whose ENABLED targets include expression_type='AUTO'.
@@ -712,12 +707,10 @@ if (candidates.length > 0) {
       const _ntNegSpend  = _ntNegPlacs.reduce((s, p) => s + p.spend, 0);
       const _ntKeepSales = _ntKeepPlacs.reduce((s, p) => s + p.sales, 0);
       const _ntIsSurgical = _ntKeepPlacs.length > 0;
-      // [REVIEW] tripwire: fires only if a to-be-negated placement has orders (shouldn't happen by construction).
-      const _negPrefix = c.salesAtRisk ? '[REVIEW] ' : '';
       if (_ntIsSurgical) {
-        proposal = `${_negPrefix}Negate '${c.searchTerm}': negate in ${_ntNegPlacs.length} placement(s) (${currSym}${_ntNegSpend.toFixed(2)} waste); keeping ${_ntKeepPlacs.length} converting placement(s) (${currSym}${_ntKeepSales.toFixed(2)} sales) in ${win}.`;
+        proposal = `Negate '${c.searchTerm}': negate in ${_ntNegPlacs.length} placement(s) (${currSym}${_ntNegSpend.toFixed(2)} waste); keeping ${_ntKeepPlacs.length} converting placement(s) (${currSym}${_ntKeepSales.toFixed(2)} sales) in ${win}.`;
       } else {
-        proposal = `${_negPrefix}Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, 0 orders in ${win}.`;
+        proposal = `Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, 0 orders in ${win}.`;
       }
       const _ntNegBase = _ntNegPlacs.length > 0 ? _ntNegPlacs : c.placements;
       const primaryPlacement = _ntNegBase.reduce(
@@ -735,7 +728,6 @@ if (candidates.length > 0) {
         placements:         c.placements,  // annotated: negate:bool, kept_reason on converters
         primary_placement:  primaryPlacement,
         params_used:        params,
-        ...(c.salesAtRisk ? { sales_at_risk: c.sales } : {}),
         rule_track_record:  getTrackRecord('NEGATE_TERM', null, countryCode) ?? undefined,
       };
     } else if (finalRecType === 'NEGATE_TARGET') {
@@ -746,12 +738,10 @@ if (candidates.length > 0) {
       const _ntaNegSpend  = _ntaNegPlacs.reduce((s, p) => s + p.spend, 0);
       const _ntaKeepSales = _ntaKeepPlacs.reduce((s, p) => s + p.sales, 0);
       const _ntaIsSurgical = _ntaKeepPlacs.length > 0;
-      // [REVIEW] tripwire: fires only if a to-be-negated placement has orders (shouldn't happen by construction).
-      const _ntPrefix = c.salesAtRisk ? '[REVIEW] ' : '';
       if (_ntaIsSurgical) {
-        proposal = `${_ntPrefix}Negative product target for ${c.searchTerm.toUpperCase()}: negate in ${_ntaNegPlacs.length} placement(s) (${currSym}${_ntaNegSpend.toFixed(2)} waste); keeping ${_ntaKeepPlacs.length} converting placement(s) (${currSym}${_ntaKeepSales.toFixed(2)} sales) — keyword negation cannot block product-targeting traffic.`;
+        proposal = `Negative product target for ${c.searchTerm.toUpperCase()}: negate in ${_ntaNegPlacs.length} placement(s) (${currSym}${_ntaNegSpend.toFixed(2)} waste); keeping ${_ntaKeepPlacs.length} converting placement(s) (${currSym}${_ntaKeepSales.toFixed(2)} sales) — keyword negation cannot block product-targeting traffic.`;
       } else {
-        proposal = `${_ntPrefix}Negative product target for ${c.searchTerm.toUpperCase()} — keyword negation cannot block product-targeting traffic.`;
+        proposal = `Negative product target for ${c.searchTerm.toUpperCase()} — keyword negation cannot block product-targeting traffic.`;
       }
       const _ntaNegBase = _ntaNegPlacs.length > 0 ? _ntaNegPlacs : c.placements;
       const primaryPlacement = _ntaNegBase.reduce(
@@ -769,7 +759,6 @@ if (candidates.length > 0) {
         placements:         c.placements,  // annotated: negate:bool, kept_reason on converters
         primary_placement:  primaryPlacement,
         params_used:        params,
-        ...(c.salesAtRisk ? { sales_at_risk: c.sales } : {}),
         rule_track_record:  getTrackRecord('NEGATE_TARGET', null, countryCode) ?? undefined,
       };
     } else if (finalRecType === 'PROMOTE_TERM') {
@@ -1068,6 +1057,11 @@ for (const entity of bidEligible) {
       ` (${currSym}${amzRec.amazon_range_start.toFixed(2)}–${currSym}${amzRec.amazon_range_end.toFixed(2)}).`
     : '';
 
+  // Declare before proposal to avoid TDZ (#2 fix — 2026-08-12).
+  const _bidDir        = direction?.toUpperCase() ?? null;   // 'CUT' | 'RAISE' | null
+  const _estSavedSpend = direction === 'Cut' && entity.clicks > 0
+    ? Math.round((currentBid - proposedBid) * entity.clicks * 100) / 100 : null;
+
   let proposal;
   if (isDefuse) {
     proposal =
@@ -1095,9 +1089,6 @@ for (const entity of bidEligible) {
   }
 
   // Build evidence.
-  const _bidDir = direction?.toUpperCase() ?? null;   // 'CUT' | 'RAISE' | null
-  const _estSavedSpend = direction === 'Cut' && entity.clicks > 0
-    ? Math.round((currentBid - proposedBid) * entity.clicks * 100) / 100 : null;
   const bidEvidence = {
     entity_kind:       entity.entity_kind,
     entity_id:         entity.entity_id,
