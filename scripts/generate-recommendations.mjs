@@ -17,7 +17,8 @@ const { values } = parseArgs({
     profile:          { type: 'string' },
     'cluster-rooms':  { type: 'boolean', default: false },
     'cluster-lang':   { type: 'string',  default: 'spa'  },
-    'cluster-names':  { type: 'string',  default: ''     }, // comma-separated; empty = all
+    'cluster-names':  { type: 'string',  default: ''     }, // pipe-separated (|); empty = all
+    'max-rooms':      { type: 'string',  default: ''     }, // positive int; spend-ranked top N auto rooms
   },
 });
 if (!values.profile) throw new Error('--profile <id> required');
@@ -2077,6 +2078,7 @@ console.log('─'.repeat(70));
 const CLUSTER_LANG_MAP = {
   '2263723137827296': 'spa',  // ES profile (Spain)
   '139446882235960':  'eng',  // US profile
+  '1711934819800765': 'eng',  // UK profile
 };
 
 // ── cluster_auto_room entry guard ────────────────────────────────────────────
@@ -2107,14 +2109,39 @@ if (!values['cluster-rooms']) {
 
   // CR-1b. Optional cluster-names filter (comma-separated; empty = all)
   const crNameFilter = (values['cluster-names'] ?? '')
-    .split(',')
+    .split('|')
     .map(s => s.trim())
     .filter(Boolean);
-  const crFiltered = crNameFilter.length > 0
+  let crFiltered = crNameFilter.length > 0
     ? crClusters.filter(r => crNameFilter.includes(r.cluster_name))
     : crClusters;
   if (crNameFilter.length > 0) {
     console.log(`  --cluster-names filter: ${crNameFilter.length} name(s) → ${crFiltered.length} match(es)`);
+  }
+
+  // CR-1c. Optional --max-rooms cap: spend-ranked top N (resolves comma-in-name issues with --cluster-names)
+  const crMaxRooms = parseInt(values['max-rooms'] ?? '0', 10);
+  if (crMaxRooms > 0 && crFiltered.length > crMaxRooms) {
+    const crAllNames = crFiltered.map(r => r.cluster_name);
+    const { rows: crSpendRank } = await pool.query(
+      `SELECT bc.cluster_name, COALESCE(SUM(d.cost), 0)::float AS spend_60d
+         FROM book_clusters bc
+         LEFT JOIN title_cache tc ON tc.isbn13 = bc.isbn13
+         LEFT JOIN amazon_product_ads pa
+               ON pa.profile_id = $1 AND pa.state = 'ENABLED' AND pa.asin = tc.asin
+         LEFT JOIN amazon_campaign_daily d
+               ON d.profile_id = $1 AND d.campaign_id = pa.campaign_id
+              AND d.date >= CURRENT_DATE - INTERVAL '60 days'
+        WHERE bc.language     = $2
+          AND bc.cluster_name = ANY($3)
+        GROUP BY bc.cluster_name
+        ORDER BY spend_60d DESC, bc.cluster_name
+        LIMIT $4`,
+      [profileId, crLang, crAllNames, crMaxRooms],
+    );
+    const crTopNames = new Set(crSpendRank.map(r => r.cluster_name));
+    crFiltered = crFiltered.filter(r => crTopNames.has(r.cluster_name));
+    console.log(`  --max-rooms ${crMaxRooms}: spend-ranked top ${crFiltered.length}: ${[...crTopNames].join(', ')}`);
   }
 
   // CR-2. ENABLED CLUSTER AUTO campaigns (room-exists check)
