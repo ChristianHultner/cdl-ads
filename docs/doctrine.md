@@ -1,4 +1,3 @@
-<!-- doc-date: 2026-08-12 -->
 <!-- FRAME RULE: Any frame that touches generation/push/grading logic MUST update this file in the same commit. -->
 
 # doctrine.md — CdL Ads Engine Decision-Tree Spec

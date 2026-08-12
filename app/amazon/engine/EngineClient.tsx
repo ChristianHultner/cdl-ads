@@ -351,10 +351,9 @@ const TAB_LABELS: Record<string, string> = {
 
 interface Props {
   sections: DocSection[]
-  docDate: string
 }
 
-export default function EngineClient({ sections, docDate }: Props) {
+export default function EngineClient({ sections }: Props) {
   const [activeId, setActiveId] = useState<string>(sections[0]?.id ?? 'a')
   const activeSection = sections.find(s => s.id === activeId) ?? sections[0]
   const isFinding = activeSection?.id === 'findings'
@@ -371,8 +370,7 @@ export default function EngineClient({ sections, docDate }: Props) {
           background: '#f0f4f6', display: 'inline-block',
           padding: '0.3rem 0.75rem', borderRadius: 20,
         }}>
-          📄 Thresholds shown reflect <strong>doctrine.md</strong> as of{' '}
-          <strong>{docDate || 'unknown'}</strong> — live params may be tuned in{' '}
+          📄 Thresholds shown reflect <strong>doctrine.md</strong> — live params may be tuned in{' '}
           <code style={{ fontFamily: 'monospace', fontSize: '0.9em' }}>engine_parameters</code>.
         </p>
       </div>
