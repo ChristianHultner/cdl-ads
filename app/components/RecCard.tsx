@@ -70,6 +70,7 @@ export interface Evidence {
   existing_targets?: ExistingTarget[]
   chosen_target?: ChosenTarget
   chosen_target_share?: { spend: number; clicks: number; orders: number; sales: number }
+  current_bid?:  number
   proposed_bid?: number
   observed_cpc?: number
   approved_bid?: number
@@ -84,6 +85,18 @@ export interface Evidence {
   quote_age_days?:     number
   /** HC/print ISBN13 for cover display (REPLACE rec type). */
   hc_isbn13?: string
+  /** L3.2: GP-derived track record for this rule+direction+market at generation time. */
+  rule_track_record?: {
+    win_rate:        number | null
+    n:               number
+    median_gp_delta: number | null
+    scope:           'market' | 'estate'
+  }
+  /** L3.2: sales value at risk for [REVIEW]-prefixed negations. */
+  sales_at_risk?: number
+  /** L3.2: CUT GP math — estimated spend saved vs at-risk sales. */
+  est_saved_spend?:   number | null
+  est_at_risk_sales?: number | null
 }
 
 export interface RecRow {
@@ -643,6 +656,25 @@ export function RecCard({ rec: r, ctx }: { rec: RecRow; ctx: RecCardContext }) {
         <AppliesTo ev={rec.evidence} profileId={rec.profile_id} currency={rec.currency_code} />
         {rec.rec_type === 'NEGATE_TERM' && <PushReceipts ev={rec.evidence} />}
         {rec.status === 'PUSHED' && <OutcomesBlock rec={rec} />}
+        {/* L3.2: Rule track record — one small line per card */}
+        {rec.evidence.rule_track_record && (() => {
+          const tr  = rec.evidence.rule_track_record!
+          const dir = rec.rec_type === 'BID_ADJUST' && rec.evidence.entity_kind
+            ? (rec.evidence.proposed_bid != null && rec.evidence.current_bid != null
+                ? (rec.evidence.proposed_bid < rec.evidence.current_bid * 0.99 ? ' CUT' : ' RAISE')
+                : '')
+            : ''
+          const wpStr = tr.win_rate != null ? `${(tr.win_rate * 100).toFixed(0)}% WIN` : '—'
+          const gpStr = tr.median_gp_delta != null
+            ? ` · median GP ${tr.median_gp_delta >= 0 ? '+' : ''}${tr.median_gp_delta.toFixed(2)}`
+            : ''
+          const scopeTag = tr.scope === 'estate' ? ' (estate)' : ''
+          return (
+            <div style={{ marginTop: '0.5rem', fontSize: '0.76rem', color: 'var(--cdl-muted)', fontStyle: 'italic' }}>
+              This rule{dir} here: {wpStr}{gpStr} (n={tr.n}{scopeTag})
+            </div>
+          )
+        })()}
       </div>
     )
   }

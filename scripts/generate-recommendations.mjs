@@ -1,7 +1,7 @@
 // scripts/generate-recommendations.mjs
 // Usage: node --env-file=.env.local scripts/generate-recommendations.mjs --profile <id>
 import { parseArgs }       from 'node:util';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath }    from 'node:url';
 import { join, dirname }    from 'node:path';
 import { Pool, neonConfig } from '@neondatabase/serverless';
@@ -88,6 +88,72 @@ const countryCode  = profileRows[0].country_code ?? 'US';
 params.target_acos = Number(profileRows[0].target_acos);
 const CURRENCY_SYMBOL = { EUR: '€', USD: '$', GBP: '£', CAD: 'CA$', MXN: 'MX$' };
 const currSym = CURRENCY_SYMBOL[currencyCode] ?? `${currencyCode}\u202f`;
+
+// ── L3.2: Market rolling ACoS + band computation ────────────────────────────
+const { rows: mktAcosRows } = await pool.query(
+  `SELECT (SUM(cost) / NULLIF(SUM(sales_14d), 0))::float AS rolling_acos
+     FROM amazon_campaign_daily
+    WHERE profile_id = $1
+      AND date >= CURRENT_DATE - INTERVAL '30 days'`,
+  [profileId],
+);
+const marketRollingAcos = mktAcosRows[0]?.rolling_acos != null
+  ? Number(mktAcosRows[0].rolling_acos) : null;
+const bandLow  = params.target_acos - 0.05;
+const bandHigh = params.target_acos + 0.05;
+const marketZone = marketRollingAcos == null ? 'in'
+  : marketRollingAcos < bandLow   ? 'below'
+  : marketRollingAcos <= bandHigh ? 'in'
+  : 'above';
+console.log(
+  `Market 30d ACoS: ${marketRollingAcos != null ? (marketRollingAcos * 100).toFixed(1) + '%' : 'unknown'}` +
+  ` — zone: ${marketZone} (band ${(bandLow*100).toFixed(0)}–${(bandHigh*100).toFixed(0)}%)`,
+);
+
+// ── L3.2: Track-record from most-recent scorecard artifact ───────────────────
+const __scriptDir = dirname(fileURLToPath(import.meta.url));
+const __repoRoot  = join(__scriptDir, '..');
+let _trackMap     = {};
+try {
+  const _artDir = join(__repoRoot, 'artifacts');
+  const _files  = readdirSync(_artDir)
+    .filter(f => f.startsWith('scorecard-') && f.endsWith('.json'))
+    .sort().reverse();
+  if (_files.length > 0) {
+    const _data = JSON.parse(readFileSync(join(_artDir, _files[0]), 'utf8'));
+    for (const r of (_data.per_rec ?? [])) {
+      if (r.verdict === 'NO-DATA') continue;
+      const dir = r.judgment?.direction ?? '';
+      for (const mkt of [r.market, '']) {
+        const key = r.rec_type + '|' + dir + '|' + mkt;
+        if (!_trackMap[key]) _trackMap[key] = { wins: 0, n: 0, gpDs: [] };
+        _trackMap[key].n++;
+        if (r.verdict === 'WIN') _trackMap[key].wins++;
+        if (r.gp_delta != null)  _trackMap[key].gpDs.push(r.gp_delta);
+      }
+    }
+    console.log('Track-record artifact loaded: ' + _files[0]);
+  }
+} catch (_e) { /* artifact optional */ }
+
+function getTrackRecord(recType, direction, mkt) {
+  const dir    = direction ?? '';
+  const mktKey = recType + '|' + dir + '|' + mkt;
+  const estKey = recType + '|' + dir + '|';
+  const compute = (b) => {
+    if (!b || b.n === 0) return null;
+    const sorted = [...b.gpDs].sort((a, c) => a - c);
+    const mid = Math.floor(sorted.length / 2);
+    const med = sorted.length === 0 ? null
+      : sorted.length % 2 === 0 ? (sorted[mid-1] + sorted[mid]) / 2 : sorted[mid];
+    return { win_rate: b.wins / b.n, n: b.n, median_gp_delta: med };
+  };
+  const mktB = _trackMap[mktKey];
+  if (mktB && mktB.n >= 10) return { ...compute(mktB), scope: 'market' };
+  const estB = _trackMap[estKey];
+  const tr   = compute(estB);
+  return tr ? { ...tr, scope: 'estate' } : null;
+}
 
 // ── 3. AGGREGATE ─────────────────────────────────────────────────────────────
 // One pass over amazon_search_term_daily for this profile + window,
@@ -315,10 +381,20 @@ for (const row of termRows) {
 
   let recType = null;
 
+  let salesAtRisk = false;
+
   if (orders === 0 && spend >= negate_min_spend && clicks >= negate_min_clicks) {
-    // ASIN-shaped terms need a campaign-level negative product target, not a keyword negation.
-    // Keyword negation cannot block product-targeting traffic (learned lesson from t7 cohort).
+    // Zero-order negations — clean negate, flow as today
     recType = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
+  } else if (
+    orders > 0 && spend >= negate_min_spend && clicks >= negate_min_clicks &&
+    !((!ASIN_SHAPE.test(row.search_term) && orders >= harvest_min_orders && acos !== null && acos < target_acos) ||
+      (ASIN_SHAPE.test(row.search_term)  && orders >= promote_asin_min_orders && acos !== null && acos < target_acos))
+  ) {
+    // L3.2 [REVIEW]: meets negate thresholds, has orders, but doesn't qualify for promote.
+    // Christian sees the sales risk before ruling — status DRAFT, proposal prefixed '[REVIEW]'.
+    recType    = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
+    salesAtRisk = true;
   } else if (
     !ASIN_SHAPE.test(row.search_term) &&
     orders >= harvest_min_orders &&
@@ -344,7 +420,8 @@ for (const row of termRows) {
       orders,
       sales,
       acos,
-      placements: row.placements,
+      placements:  row.placements,
+      salesAtRisk,
     });
   }
 }
@@ -612,47 +689,55 @@ if (candidates.length > 0) {
     let evidence;
 
     if (finalRecType === 'NEGATE_TERM') {
-      // Unchanged from v4.
-      proposal =
-        `Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, ` +
-        `0 orders in ${win}.`;
+      // L3.2: [REVIEW] prefix for salesAtRisk; zero-order path unchanged.
+      const _negPrefix = c.salesAtRisk
+        ? `[REVIEW] ` : '';
+      const _negOrders = c.salesAtRisk
+        ? `${c.orders} order(s) — saves ~${spendFmt} spend, risks ~${currSym}${c.sales.toFixed(2)} sales`
+        : '0 orders';
+      proposal = `${_negPrefix}Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, ${_negOrders} in ${win}.`;
       const primaryPlacement = c.placements.reduce(
         (max, p) => (p.spend > max.spend ? p : max),
         c.placements[0],
       );
       evidence = {
-        window_start:      windowStart,
-        window_end:        windowEnd,
-        spend:             c.spend,
-        clicks:            c.clicks,
-        orders:            c.orders,
-        sales:             c.sales,
-        acos:              c.acos,
-        placements:        c.placements,
-        primary_placement: primaryPlacement,
-        params_used:       params,
+        window_start:       windowStart,
+        window_end:         windowEnd,
+        spend:              c.spend,
+        clicks:             c.clicks,
+        orders:             c.orders,
+        sales:              c.sales,
+        acos:               c.acos,
+        placements:         c.placements,
+        primary_placement:  primaryPlacement,
+        params_used:        params,
+        ...(c.salesAtRisk ? { sales_at_risk: c.sales } : {}),
+        rule_track_record:  getTrackRecord('NEGATE_TERM', null, countryCode) ?? undefined,
       };
     } else if (finalRecType === 'NEGATE_TARGET') {
       // ASIN-shaped term: keyword negation cannot block product-targeting traffic.
-      // Must be pushed as a campaign-level negative product target (push-negative-targets.mjs).
-      proposal =
-        `Negative product target for ${c.searchTerm.toUpperCase()} — ` +
-        `keyword negation cannot block product-targeting traffic.`;
+      // L3.2: [REVIEW] prefix for salesAtRisk.
+      const _ntPrefix  = c.salesAtRisk ? '[REVIEW] ' : '';
+      const _ntRiskStr = c.salesAtRisk
+        ? ` — saves ~${spendFmt} spend, risks ~${currSym}${c.sales.toFixed(2)} sales` : '';
+      proposal = `${_ntPrefix}Negative product target for ${c.searchTerm.toUpperCase()}${_ntRiskStr} — keyword negation cannot block product-targeting traffic.`;
       const primaryPlacement = c.placements.reduce(
         (max, p) => (p.spend > max.spend ? p : max),
         c.placements[0],
       );
       evidence = {
-        window_start:      windowStart,
-        window_end:        windowEnd,
-        spend:             c.spend,
-        clicks:            c.clicks,
-        orders:            c.orders,
-        sales:             c.sales,
-        acos:              c.acos,
-        placements:        c.placements,
-        primary_placement: primaryPlacement,
-        params_used:       params,
+        window_start:       windowStart,
+        window_end:         windowEnd,
+        spend:              c.spend,
+        clicks:             c.clicks,
+        orders:             c.orders,
+        sales:              c.sales,
+        acos:               c.acos,
+        placements:         c.placements,
+        primary_placement:  primaryPlacement,
+        params_used:        params,
+        ...(c.salesAtRisk ? { sales_at_risk: c.sales } : {}),
+        rule_track_record:  getTrackRecord('NEGATE_TARGET', null, countryCode) ?? undefined,
       };
     } else if (finalRecType === 'PROMOTE_TERM') {
       // Unchanged from v4. v5.1: compute observed_cpc/proposed_bid and add to evidence when clicks > 0.
@@ -692,6 +777,7 @@ if (candidates.length > 0) {
         ...(proposedBid  != null ? { proposed_bid:  proposedBid  } : {}),
         resolved_destination: resolvedDestination,
         params_used:          params,
+        rule_track_record:    getTrackRecord('PROMOTE_TERM', null, countryCode) ?? undefined,
       };
     } else {
       // PROMOTE_ASIN — UNHARVESTED (new target, destination = highest-spend placement).
@@ -722,6 +808,7 @@ if (candidates.length > 0) {
         ...(observedCpc != null ? { observed_cpc: observedCpc } : {}),
         ...(proposedBid  != null ? { proposed_bid:  proposedBid  } : {}),
         params_used:       params,
+        rule_track_record: getTrackRecord('PROMOTE_ASIN', null, countryCode) ?? undefined,
       };
     }
 
@@ -816,11 +903,13 @@ const { rows: openBidRows } = await pool.query(
 const openBidSet = new Set(openBidRows.map((r) => r.target_text));
 
 // Volume filter: entity must meet v6_min_clicks OR v6_min_orders, and have a bid.
+// L3.2: below-band markets use half the click floor for RAISE candidates.
 const bidMinClicks = params.v6_min_clicks ?? 30;
 const bidMinOrders = params.v6_min_orders ?? 3;
+const effectiveBidMinClicks = marketZone === 'below' ? Math.floor(bidMinClicks / 2) : bidMinClicks;
 const bidEligible  = bidEntities.filter(
   (e) => e.current_bid !== null &&
-         (e.clicks >= bidMinClicks || e.orders >= bidMinOrders),
+         (e.clicks >= effectiveBidMinClicks || e.orders >= bidMinOrders),
 );
 console.log(`  Eligible for bid review (volume filter): ${bidEligible.length}`);
 
@@ -876,10 +965,16 @@ for (const entity of bidEligible) {
     vpc = Math.round((entity.sales / entity.clicks) * params.target_acos * 100) / 100;
 
     if (entity.acos < params.target_acos && vpc > currentBid) {
-      // RAISE
+      // RAISE — L3.2 band-aware gates
+      if (marketZone === 'above') {
+        // Repair market: proven winners only — ACoS ≤ 30% AND orders ≥ 3
+        if (entity.acos > 0.30 || entity.orders < 3) continue;
+      }
+      // Below-band: loosened step cap 1.75×; in-band: current gates
+      const raiseStepCap = marketZone === 'below' ? 1.75 : (params.raise_max_step ?? 1.5);
       const step    = entity.entity_kind === 'AUTO_STRATEGY'
         ? (params.auto_strategy_raise_step ?? 1.3)
-        : (params.raise_max_step           ?? 1.5);
+        : raiseStepCap;
       const stepBid = Math.round(currentBid * step * 100) / 100;
       const capBid  = params.raise_bid_max ?? 0.75;
       proposedBid   = Math.min(vpc, stepBid, capBid);
@@ -887,7 +982,16 @@ for (const entity of bidEligible) {
       if      (proposedBid === capBid  && capBid  <= vpc && capBid  <= stepBid) boundBy = 'cap';
       else if (proposedBid === stepBid && stepBid <= vpc)                        boundBy = 'step';
     } else if (entity.acos > params.target_acos && vpc < currentBid) {
-      // CUT
+      // CUT — L3.2 band-aware gate
+      // Gate 1: entity ACoS must exceed band ceiling (market-zone adjusted)
+      //   in/below-band markets: only extraordinary waste (ACoS > 2× ceiling = 70%)
+      //   above-band (repair) markets: entity ACoS > ceiling (35%)
+      const cutMinAcos = (marketZone === 'in' || marketZone === 'below')
+        ? bandHigh * 2   // 70% extraordinary waste
+        : bandHigh;      // 35% standard repair-zone cut
+      if (entity.acos <= cutMinAcos) continue;
+      // Gate 2: clicks >= 2× v6 click floor (high confidence required)
+      if (entity.clicks < bidMinClicks * 2) continue;
       const step    = entity.entity_kind === 'AUTO_STRATEGY'
         ? (params.auto_strategy_cut_step ?? 0.7)
         : (params.cut_max_step           ?? 0.6);
@@ -945,13 +1049,22 @@ for (const entity of bidEligible) {
     const vpcFmt  = `${currSym}${vpc.toFixed(2)}`;
     const tgtPct  = (params.target_acos * 100).toFixed(0);
     proposal =
-      `${direction} bid on ${kindPhrase} ` +
-      `from ${curFmt} to ${propFmt}: ` +
-      `its clicks are worth ${vpcFmt} at your ${tgtPct}% target ` +
-      `(60d: ${entity.orders} orders, ${acosPct}% ACoS, ${cpcFmt}/click).${boundSuffix}${amzSuffix}`;
+      direction === 'Cut'
+      ? `${direction} bid on ${kindPhrase} ` +
+        `from ${curFmt} to ${propFmt}: ` +
+        `its clicks are worth ${vpcFmt} at your ${tgtPct}% target ` +
+        `(60d: ${entity.orders} orders, ${acosPct}% ACoS, ${cpcFmt}/click) — ` +
+        `saves ~${currSym}${(_estSavedSpend ?? 0).toFixed(2)} spend, risks ~${currSym}${entity.sales.toFixed(2)} sales.${boundSuffix}${amzSuffix}`
+      : `${direction} bid on ${kindPhrase} ` +
+        `from ${curFmt} to ${propFmt}: ` +
+        `its clicks are worth ${vpcFmt} at your ${tgtPct}% target ` +
+        `(60d: ${entity.orders} orders, ${acosPct}% ACoS, ${cpcFmt}/click).${boundSuffix}${amzSuffix}`;
   }
 
   // Build evidence.
+  const _bidDir = direction?.toUpperCase() ?? null;   // 'CUT' | 'RAISE' | null
+  const _estSavedSpend = direction === 'Cut' && entity.clicks > 0
+    ? Math.round((currentBid - proposedBid) * entity.clicks * 100) / 100 : null;
   const bidEvidence = {
     entity_kind:       entity.entity_kind,
     entity_id:         entity.entity_id,
@@ -971,6 +1084,12 @@ for (const entity of bidEligible) {
     window_end:        windowEnd,
     params_used:       params,
     bound_by:          boundBy,
+    market_zone:       marketZone,
+    market_rolling_acos: marketRollingAcos,
+    ...(direction === 'Cut' ? {
+      est_saved_spend:    _estSavedSpend,
+      est_at_risk_sales:  entity.sales,
+    } : {}),
     ...(entity.match_type ? { match_type: entity.match_type } : {}),
     ...(amzRec ? {
       amazon_suggested:   amzRec.amazon_suggested,
@@ -978,6 +1097,7 @@ for (const entity of bidEligible) {
       amazon_range_end:   amzRec.amazon_range_end,
       quote_age_days:     amzRec.quote_age_days,
     } : {}),
+    rule_track_record: getTrackRecord('BID_ADJUST', _bidDir, countryCode) ?? undefined,
   };
 
   await pool.query(
