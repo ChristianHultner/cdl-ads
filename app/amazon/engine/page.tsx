@@ -4,7 +4,6 @@
 
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { execSync } from 'child_process'
 import EngineClient from './EngineClient'
 
 export const dynamic = 'force-dynamic'
@@ -68,25 +67,11 @@ function parseDoctrine(raw: string): DocSection[] {
   return sections
 }
 
-// ── Git date of last doctrine.md commit ──────────────────────────────────────
-
-function getDocDate(): string {
-  try {
-    const out = execSync('git log -1 --format=%ci -- docs/doctrine.md', {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim()
-    return out.split(' ')[0] ?? '' // 'YYYY-MM-DD'
-  } catch {
-    try {
-      const { statSync } = require('fs') as typeof import('fs')
-      return statSync(join(process.cwd(), 'docs', 'doctrine.md'))
-        .mtime.toISOString().slice(0, 10)
-    } catch {
-      return ''
-    }
-  }
+// ── Doc date — read from <!-- doc-date: YYYY-MM-DD --> in doctrine.md itself.
+// git log is unavailable on Vercel; statSync mtime is pinned to 2018-10-20
+// by Vercel's deterministic build timestamps. The comment is the only reliable source.
+function getDocDate(raw: string): string {
+  return raw.match(/<!--\s*doc-date:\s*(\d{4}-\d{2}-\d{2})\s*-->/)?.[1] ?? ''
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
@@ -95,7 +80,7 @@ export default function EnginePage() {
   const docPath = join(process.cwd(), 'docs', 'doctrine.md')
   const raw = readFileSync(docPath, 'utf8')
   const sections = parseDoctrine(raw)
-  const docDate = getDocDate()
+  const docDate = getDocDate(raw)
 
   return <EngineClient sections={sections} docDate={docDate} />
 }

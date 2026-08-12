@@ -1,3 +1,4 @@
+<!-- doc-date: 2026-08-12 -->
 <!-- FRAME RULE: Any frame that touches generation/push/grading logic MUST update this file in the same commit. -->
 
 # doctrine.md — CdL Ads Engine Decision-Tree Spec
@@ -17,24 +18,25 @@ Sources: `scripts/generate-recommendations.mjs` · `scripts/stamp-outcomes.mjs` 
 
 ```mermaid
 flowchart TD
-    A([amazon_search_term_daily\nprofile_id, date ∈ window]) -->|GROUP BY search_term,\ncampaign_id, ad_group_id| B[Aggregate rows]
-    B -->|Roll up to term-level| C[termRow:\nspend · clicks · orders · sales\nisTargeting · placements list]
+    A([amazon_search_term_daily\nprofile_id, date in window]) -->|GROUP BY search_term,\ncampaign_id, ad_group_id| B[Aggregate rows]
+    B -->|Roll up to term-level| C[termRow:\nspend , clicks , orders , sales\nisTargeting , placements list]
 
-    C --> D{Negate gate:\nspend ≥ negate_min_spend\nAND clicks ≥ negate_min_clicks}
+    C --> D{Negate gate:\nspend >= negate_min_spend\nAND clicks >= negate_min_clicks}
     D -- MISS --> G
-    D -- HIT --> E[Surgical split:\n_negPlacs = placements where orders = 0\n_qualPromote = would term qualify to promote?\n  text: orders ≥ harvest_min_orders AND acos < target_acos\n  ASIN: orders ≥ promote_asin_min_orders AND acos < target_acos]
+    D -- HIT --> E[Surgical split:\n_negPlacs = placements where orders = 0\n_qualPromote = would term qualify to promote?\n  text: orders >= harvest_min_orders AND acos < target_acos\n  ASIN: orders >= promote_asin_min_orders AND acos < target_acos]
 
     E --> F{_negPlacs.length > 0\nAND NOT _qualPromote?}
     F -- NO: all convert\nor promote-eligible --> G
-    F -- YES --> F1{ASIN_SHAPE?\n/^\u202809\u2028{9\u2028}[0-9xX]\n|b0[a-z0-9]{8\u2028}$/i}
-    F1 -- YES --> NEGTGT[recType = NEGATE_TARGET\n⚠ salesAtRisk tripwire set here\nsee FINDINGS #1]
-    F1 -- NO --> NEGTERM[recType = NEGATE_TERM\n⚠ salesAtRisk tripwire set here\nsee FINDINGS #1]
+    F -- YES --> F1{ASIN_SHAPE?
+9-digit ISBN-10 / B0-ASIN}
+    F1 -- YES --> NEGTGT[recType = NEGATE_TARGET] salesAtRisk tripwire set here\nsee FINDINGS Findings 1]
+    F1 -- NO --> NEGTERM[recType = NEGATE_TERM] salesAtRisk tripwire set here\nsee FINDINGS Findings 1]
 
-    G{recType still null?\nPromote gate} --> H{NOT ASIN shape\nAND orders ≥ harvest_min_orders\nAND acos ≠ null\nAND acos < target_acos}
+    G{recType still null?\nPromote gate} --> H{NOT ASIN shape\nAND orders >= harvest_min_orders\nAND acos != null\nAND acos < target_acos}
     H -- YES --> PROMTERM[recType = PROMOTE_TERM]
-    H -- NO --> I{ASIN shape\nAND orders ≥ promote_asin_min_orders\nAND acos ≠ null\nAND acos < target_acos}
+    H -- NO --> I{ASIN shape\nAND orders >= promote_asin_min_orders\nAND acos != null\nAND acos < target_acos}
     I -- YES --> PROMASIN[recType = PROMOTE_ASIN]
-    I -- NO --> NOCANDIDATE([no candidate — skip term])
+    I -- NO --> NOCANDIDATE([no candidate -- skip term])
 
     NEGTERM & NEGTGT & PROMTERM & PROMASIN --> J[candidate assembled]
 
@@ -42,12 +44,12 @@ flowchart TD
     K -- YES --> SKIPTAR([skip: already targeted])
     K -- NO-or-not-ASIN --> L{PROMOTE_TERM:\nterm already EXACT ENABLED keyword\nin resolved destination group?}
     L -- YES --> SKIPEXACT([skip: already exact in destination])
-    L -- NO-or-not-PT --> M[Idempotency fetch:\nrecommendations WHERE profile_id + target_text\nEXCLUDING REJECTED with\nreject_reason = 'superseded—surgical doctrine']
+    L -- NO-or-not-PT --> M[Idempotency fetch:\nrecommendations WHERE profile_id + target_text\nEXCLUDING REJECTED with\nreject_reason = 'superseded--surgical doctrine']
 
     M --> N{status in DRAFT\nAPPROVED PUSHED?}
-    N -- YES → openSet --> SKIPOPEN([skip: existing open rec])
+    N -- YES -> openSet --> SKIPOPEN([skip: existing open rec])
     N -- NO --> O{status in REJECTED\nor HELD?}
-    O -- YES → rejectedSet --> SKIPREJ([skip: rejected/held])
+    O -- YES -> rejectedSet --> SKIPREJ([skip: rejected/held])
     O -- NO --> P([INSERT recommendations\nstatus = DRAFT])
 ```
 
@@ -85,11 +87,11 @@ The idempotency query excludes `REJECTED` rows where `evidence->>'reject_reason'
 
 ```mermaid
 flowchart TD
-    A([Market rolling ACoS\nSUM cost ÷ SUM sales_14d\nlast 30 d from amazon_campaign_daily]) --> B{ACoS\nresolvable?}
+    A([Market rolling ACoS\nSUM cost / SUM sales_14d\nlast 30 d from amazon_campaign_daily]) --> B{ACoS\nresolvable?}
     B -- NULL / no data --> ZONEIN[zone = 'in' by default]
-    B -- YES --> C{rollingAcos\n< bandLow?\nbandLow = target_acos − 0.05}
+    B -- YES --> C{rollingAcos\n< bandLow?\nbandLow = target_acos - 0.05}
     C -- YES --> BELOW[zone = 'below'\nPush zone]
-    C -- NO --> D{rollingAcos\n≤ bandHigh?\nbandHigh = target_acos + 0.05}
+    C -- NO --> D{rollingAcos\n<= bandHigh?\nbandHigh = target_acos + 0.05}
     D -- YES --> IN[zone = 'in'\nOn target]
     D -- NO --> ABOVE[zone = 'above'\nRepair zone]
 ```
@@ -104,17 +106,17 @@ flowchart TD
 flowchart TD
     A([Entity qualifies for CUT:\nentity.acos > target_acos\nAND vpc < currentBid\nAND entity.sales > 0]) --> B{marketZone?}
 
-    B -- in or below --> C{entity.acos\n> bandHigh × 2\ne.g. > 70 % at default}
+    B -- in or below --> C{entity.acos\n> bandHigh x 2\ne.g. > 70 % at default}
     B -- above / repair --> D{entity.acos\n> bandHigh\ne.g. > 35 % at default}
 
     C -- NO: not extraordinary waste --> SKIPC([skip entity])
     D -- NO: not above ceiling --> SKIPD([skip entity])
 
     C -- YES --> E
-    D -- YES --> E{entity.clicks\n≥ bidMinClicks × 2\nbidMinClicks = params.v6_min_clicks ?? 30\nso gate = clicks ≥ 60}
+    D -- YES --> E{entity.clicks\n>= bidMinClicks x 2\nbidMinClicks = params.v6_min_clicks ?? 30\nso gate = clicks >= 60}
 
     E -- NO: low confidence --> SKIPV([skip entity])
-    E -- YES --> F[step:\nAUTO_STRATEGY → auto_strategy_cut_step ?? 0.7\nother → cut_max_step ?? 0.6\nstepBid = currentBid × step\nproposedBid = max vpc, stepBid, 0.05\nskip if abs delta < 0.02]
+    E -- YES --> F[step:\nAUTO_STRATEGY -> auto_strategy_cut_step ?? 0.7\nother -> cut_max_step ?? 0.6\nstepBid = currentBid x step\nproposedBid = max vpc, stepBid, 0.05\nskip if abs delta < 0.02]
     F --> EMITCUT([EMIT BID_ADJUST CUT])
 ```
 
@@ -124,14 +126,14 @@ flowchart TD
 flowchart TD
     A([Entity qualifies for RAISE:\nentity.acos < target_acos\nAND vpc > currentBid\nAND entity.sales > 0\nAND entity.clicks > 0]) --> B{marketZone = 'above'?}
 
-    B -- YES: repair zone --> C{Proven winner rule:\nentity.acos ≤ 0.30\nAND entity.orders ≥ 3}
+    B -- YES: repair zone --> C{Proven winner rule:\nentity.acos <= 0.30\nAND entity.orders >= 3}
     C -- NO --> SKIPA([skip entity])
     C -- YES --> VOLCHK
 
-    B -- NO: in or below --> VOLCHK{Volume floor:\neffectiveMinClicks = below\n  ? floor v6_min_clicks ÷ 2\n  : v6_min_clicks ?? 30\nentity.clicks ≥ effectiveMinClicks\nOR entity.orders ≥ v6_min_orders ?? 3}
+    B -- NO: in or below --> VOLCHK{Volume floor:\neffectiveMinClicks = below\n  ? floor v6_min_clicks / 2\n  : v6_min_clicks ?? 30\nentity.clicks >= effectiveMinClicks\nOR entity.orders >= v6_min_orders ?? 3}
 
     VOLCHK -- NO --> SKIPV([skip entity])
-    VOLCHK -- YES --> F[raiseStepCap:\nbelow-band → 1.75\nin-band → raise_max_step ?? 1.50\nAUTO_STRATEGY → auto_strategy_raise_step ?? 1.30\ncapBid = raise_bid_max ?? 0.75\nstepBid = currentBid × step\nproposedBid = min vpc, stepBid, capBid\nskip if abs delta < 0.02]
+    VOLCHK -- YES --> F[raiseStepCap:\nbelow-band -> 1.75\nin-band -> raise_max_step ?? 1.50\nAUTO_STRATEGY -> auto_strategy_raise_step ?? 1.30\ncapBid = raise_bid_max ?? 0.75\nstepBid = currentBid x step\nproposedBid = min vpc, stepBid, capBid\nskip if abs delta < 0.02]
     F --> EMITRAISE([EMIT BID_ADJUST RAISE])
 ```
 
@@ -168,34 +170,34 @@ Age guard skipped — creation date unavailable (see Findings #10).
 ```mermaid
 flowchart TD
 
-    subgraph NT["NEGATE_TERM → push-negatives.mjs"]
+    subgraph NT["NEGATE_TERM -> push-negatives.mjs"]
     NT1([APPROVED NEGATE_TERM\nlimit: push_max_per_run ?? 20]) --> NT2{Eligibility filter}
     NT2 -- evidence.is_targeting = true --> NTS1([skip: needs neg targeting clause])
     NT2 -- ISBN-10 shape /^0-9...9xX$/ --> NTS2([skip: ISBN-10 belt-and-braces])
     NT2 -- no campaigns in evidence --> NTS3([skip: no campaigns])
     NT2 -- pass --> NT3[Scope resolution:\ncampaign_ids from negate:true placements only\nconverting placements excluded surgically]
-    NT3 --> NT4[POST /sp/campaignNegativeKeywords\nmatchType: NEGATIVE_EXACT\nstate: ENABLED\ncampaign-level — no adGroupId sent\nreceipt: SP v3 multi-status JSON]
+    NT3 --> NT4[POST /sp/campaignNegativeKeywords\nmatchType: NEGATIVE_EXACT\nstate: ENABLED\ncampaign-level -- no adGroupId sent\nreceipt: SP v3 multi-status JSON]
     end
 
-    subgraph NTA["NEGATE_TARGET → push-negative-targets.mjs"]
+    subgraph NTA["NEGATE_TARGET -> push-negative-targets.mjs"]
     NTA1([APPROVED NEGATE_TARGET\nlimit: push_max_per_run ?? 20]) --> NTA2{Eligibility:\nmatch ASIN_SHAPE?}
     NTA2 -- NO --> NTAS([skip: not ASIN shape])
     NTA2 -- YES --> NTA3[Scope: campaigns from\nnegate:true placements only]
-    NTA3 --> NTA4[POST /sp/campaignNegativeTargets\nexpression: ASIN_SAME_AS target_text.toUpperCase\n⚠ resource + expression type\nto confirm on first live response]
+    NTA3 --> NTA4[POST /sp/campaignNegativeTargets\nexpression: ASIN_SAME_AS target_text.toUpperCase\n[warn] resource + expression type\nto confirm on first live response]
     end
 
-    subgraph PT["PROMOTE_TERM / CREATIVE_KEYWORD → push-keywords.mjs"]
-    PT1([APPROVED PROMOTE_TERM\nor CREATIVE_KEYWORD\nlimit: push_max_per_run ?? 20]) --> PT2[Load orphan route map\nfrom PUSHED CREATE_STRUCTURE evidences\nevidence.orphan_rec_ids → ad_group_id]
+    subgraph PT["PROMOTE_TERM / CREATIVE_KEYWORD -> push-keywords.mjs"]
+    PT1([APPROVED PROMOTE_TERM\nor CREATIVE_KEYWORD\nlimit: push_max_per_run ?? 20]) --> PT2[Load orphan route map\nfrom PUSHED CREATE_STRUCTURE evidences\nevidence.orphan_rec_ids -> ad_group_id]
     PT2 --> PT3{Destination resolution}
     PT3 -- rec id in orphanRouteMap --> PT3A[Route to structure room\nevidence.created_ad_group_id]
     PT3 -- CREATIVE_KEYWORD with destination_ad_group_id --> PT3B[Use explicit destination\nbypass tier logic]
-    PT3 -- standard tier --> PT3C[Tier A: placement where\nexactKws ≥ 1\nAND hasAuto = 0\nAND NOT autoCampaign\nsorted by spend desc\nTier B: same but anyKws ≥ 1\nNo tier → skip]
+    PT3 -- standard tier --> PT3C[Tier A: placement where\nexactKws >= 1\nAND hasAuto = 0\nAND NOT autoCampaign\nsorted by spend desc\nTier B: same but anyKws >= 1\nNo tier -> skip]
     PT3A & PT3B & PT3C --> PT4{Duplicate:\nalready EXACT ENABLED\nin destination group?}
-    PT4 -- YES → terminal --> PT5([self-retire RETIRED in execute mode\ndry-run: print and skip])
+    PT4 -- YES -> terminal --> PT5([self-retire RETIRED in execute mode\ndry-run: print and skip])
     PT4 -- NO --> PT6[Bid: evidence.approved_bid\nOR evidence.proposed_bid\nPOST /sp/keywords\ncampaignId + adGroupId\nkeywordText matchType:EXACT\nstate: ENABLED\nBorn ENABLED not PAUSED]
     end
 
-    subgraph BA["BID_ADJUST → push-bid-adjustments.mjs"]
+    subgraph BA["BID_ADJUST -> push-bid-adjustments.mjs"]
     BA1([APPROVED BID_ADJUST\nlimit: push_max_per_run ?? 20]) --> BA2{evidence.kind\n= 'REVIVE'?}
     BA2 -- YES --> BA3[Fetch ALL ENABLED targets+keywords\nin evidence.campaign_id\nv2: per-entity bid from evidence.per_entity\nelse uniform proposed_bid\nPUT /sp/targets\nPUT /sp/keywords\none call per entity batch]
     BA2 -- NO --> BA4{entity_kind}
@@ -203,8 +205,8 @@ flowchart TD
     BA4 -- KEYWORD --> BA6[PUT /sp/keywords\nkeywordId: evidence.entity_id\nbid: approved_bid ?? proposed_bid]
     end
 
-    subgraph CS["CREATE_STRUCTURE → push-structure.mjs"]
-    CS1([APPROVED CREATE_STRUCTURE\nHARD CAP: 2 per run\nnot a param — hardcoded const]) --> CS2[1 POST /sp/campaigns\nstate: PAUSED deliberately\ntargetingType from evidence.targeting_type\nbudget from evidence.budget or 3.00/day\nstartDate: today ISO date]
+    subgraph CS["CREATE_STRUCTURE -> push-structure.mjs"]
+    CS1([APPROVED CREATE_STRUCTURE\nHARD CAP: 2 per run\nnot a param -- hardcoded const]) --> CS2[1 POST /sp/campaigns\nstate: PAUSED deliberately\ntargetingType from evidence.targeting_type\nbudget from evidence.budget or 3.00/day\nstartDate: today ISO date]
     CS2 --> CS3[2 POST /sp/adGroups]
     CS3 --> CS4[3 POST /sp/productAds\nseed_asins from evidence.seed_asins]
     CS4 --> CS5([Born PAUSED\nChristian enables in console\nor later frame flips state])
@@ -231,11 +233,11 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A([PUSHED rec with resolvable pushed_at:\nCOALESCE pushed_at,\nevidence->pushed_at ::timestamptz]) --> B[Horizons: t7 7d · t14 14d · t30 30d]
-    B --> C{For each horizon:\ndueMs = pushedAt + horizon_days × 86400 s\ndueMs ≤ now?\nNOT already in rec_outcomes?}
+    A([PUSHED rec with resolvable pushed_at:\nCOALESCE pushed_at,\nevidence->pushed_at ::timestamptz]) --> B[Horizons: t7 7d , t14 14d , t30 30d]
+    B --> C{For each horizon:\ndueMs = pushedAt + horizon_days x 86400 s\ndueMs <= now?\nNOT already in rec_outcomes?}
     C -- NO --> SKIP([skip horizon])
-    C -- YES --> D[after-window:\npushed_at_date → pushed_at_date + horizon_days exclusive\nbefore-window:\npushed_at_date − horizon_days → pushed_at_date]
-    D --> E[Query source table\nby rec_type per handler\nSUM cost · sales · clicks · purchases · impressions\nfor both windows separately]
+    C -- YES --> D[after-window:\npushed_at_date -> pushed_at_date + horizon_days exclusive\nbefore-window:\npushed_at_date - horizon_days -> pushed_at_date]
+    D --> E[Query source table\nby rec_type per handler\nSUM cost , sales , clicks , purchases , impressions\nfor both windows separately]
     E --> F([INSERT rec_outcomes\nON CONFLICT DO NOTHING])
 ```
 
@@ -251,20 +253,20 @@ flowchart TD
     A([metrics m, evidence ev]) --> B{m.rows_found = 0?}
     B -- YES --> NODATA([NO-DATA])
     B -- NO --> C{m.before_rows_found\nnot null?\nL3.1 GP stamp}
-    C -- NO: legacy stamp --> D[pre_gp_grading: true\nratio = m.cost ÷ ev.spend]
-    D --> D1{ratio ≤ 0.05?}
+    C -- NO: legacy stamp --> D[pre_gp_grading: true\nratio = m.cost / ev.spend]
+    D --> D1{ratio <= 0.05?}
     D1 -- YES --> WL([WIN legacy])
-    D1 -- NO --> D2{ratio ≤ 0.50?}
+    D1 -- NO --> D2{ratio <= 0.50?}
     D2 -- YES --> PL([PARTIAL legacy])
     D2 -- NO --> LL([LEAK legacy])
-    C -- YES: GP stamp --> E[gp_delta = salesAfter − cost − beforeSales − beforeCost\nspendStopped:\n  ev.spend > 0 → cost ÷ ev.spend ≤ 0.05\n  ev.spend unknown → cost < 0.10]
+    C -- YES: GP stamp --> E[gp_delta = salesAfter - cost - beforeSales - beforeCost\nspendStopped:\n  ev.spend > 0 -> cost / ev.spend <= 0.05\n  ev.spend unknown -> cost < 0.10]
     E --> F{spendStopped?}
-    F -- YES --> G{gp_delta ≥ 0?}
+    F -- YES --> G{gp_delta >= 0?}
     G -- YES --> WIN([WIN])
-    G -- NO --> REVIEW([REVIEW\nspend stopped but GP Δ < 0\nnegation may have killed converting traffic])
-    F -- NO --> H{ratio = cost ÷ ev.spend\nev.spend known?}
+    G -- NO --> REVIEW([REVIEW\nspend stopped but GP delta < 0\nnegation may have killed converting traffic])
+    F -- NO --> H{ratio = cost / ev.spend\nev.spend known?}
     H -- NO --> PARTIAL_FB([PARTIAL: refSpend unknown fallback])
-    H -- YES --> H2{ratio ≤ 0.50?}
+    H -- YES --> H2{ratio <= 0.50?}
     H2 -- YES --> PARTIAL([PARTIAL])
     H2 -- NO --> LEAK([LEAK])
 ```
@@ -275,26 +277,26 @@ flowchart TD
 flowchart TD
     A([metrics m, evidence ev, countryCode]) --> D{m.rows_found = 0?}
     D -- YES --> NODATA([NO-DATA + direction tag])
-    D -- NO --> E[direction inferred:\npushed = ev.pushed_bid ?? ev.proposed_bid\ncurrent = ev.current_bid ?? ev.existing_targets0.bid\nCUT if pushed < current × 0.99\nRAISE if pushed > current × 1.01\nFLAT or UNKNOWN otherwise\ngp_delta = afterSales−afterCost − beforeSales−beforeCost]
+    D -- NO --> E[direction inferred:\npushed = ev.pushed_bid ?? ev.proposed_bid\ncurrent = ev.current_bid ?? ev.existing_targets0.bid\nCUT if pushed < current x 0.99\nRAISE if pushed > current x 1.01\nFLAT or UNKNOWN otherwise\ngp_delta = afterSales-afterCost - beforeSales-beforeCost]
     E --> F{direction}
 
     F -- CUT --> C1{gp_delta > 0?}
     C1 -- YES --> WINC([WIN])
     C1 -- NO --> C2{afterAcos < beforeAcos?}
-    C2 -- YES --> PC1([PARTIAL: ACoS improved but GP Δ ≤ 0])
-    C2 -- NO --> C3{afterCost < beforeCost × 0.90?}
-    C3 -- YES --> PC2([PARTIAL: spend fell but GP Δ ≤ 0])
+    C2 -- YES --> PC1([PARTIAL: ACoS improved but GP delta <= 0])
+    C2 -- NO --> C3{afterCost < beforeCost x 0.90?}
+    C3 -- YES --> PC2([PARTIAL: spend fell but GP delta <= 0])
     C3 -- NO --> LC([LEAK])
 
     F -- RAISE --> R1{gp_delta > 0?}
-    R1 -- YES --> R2{market ACoS\n≤ bandHigh OR unknown?\nbandHigh = targetAcos + 0.05\nfrom ev.params_used.target_acos ?? 0.30}
+    R1 -- YES --> R2{market ACoS\n<= bandHigh OR unknown?\nbandHigh = targetAcos + 0.05\nfrom ev.params_used.target_acos ?? 0.30}
     R2 -- YES: in or below band --> WINR([WIN])
-    R2 -- NO: above-band market --> R3{entity afterAcos\n≤ bandHigh?}
+    R2 -- NO: above-band market --> R3{entity afterAcos\n<= bandHigh?}
     R3 -- YES --> WINR2([WIN: entity within ceiling])
-    R3 -- NO --> PR1([PARTIAL: GP Δ > 0 but entity above ceiling in repair market])
+    R3 -- NO --> PR1([PARTIAL: GP delta > 0 but entity above ceiling in repair market])
     R1 -- NO --> R4{afterClicks > beforeClicks?}
-    R4 -- YES --> PR2([PARTIAL: clicks rose but GP Δ ≤ 0])
-    R4 -- NO --> LR([LEAK: clicks did not rise and GP Δ ≤ 0])
+    R4 -- YES --> PR2([PARTIAL: clicks rose but GP delta <= 0])
+    R4 -- NO --> LR([LEAK: clicks did not rise and GP delta <= 0])
 
     F -- FLAT or UNKNOWN --> NODATA2([NO-DATA])
 ```
@@ -343,11 +345,11 @@ stateDiagram-v2
     APPROVED --> HELD : manual or operational hold\nmechanism not in reviewed code\nacts as REJECTED for suppression
     APPROVED --> RETIRED : push-keywords.mjs terminal duplicate skip\nin --execute mode\nPROMOTE_TERM only observed path
 
-    PUSHED --> [*] : terminal — graded by stamp-outcomes.mjs + scorecard.mjs
+    PUSHED --> [*] : terminal -- graded by stamp-outcomes.mjs + scorecard.mjs
 
-    REJECTED --> [*] : terminal — in rejectedSet → suppressed\nEXCEPTION: reject_reason = 'superseded—surgical doctrine'\n→ excluded from fetch → re-proposable
-    HELD --> [*] : terminal — same suppression as REJECTED\nno programmatic path sets HELD in reviewed code
-    RETIRED --> [*] : terminal — NOT in rejectedSet or openSet\n→ re-proposable (see Findings #7)
+    REJECTED --> [*] : terminal -- in rejectedSet -> suppressed\nEXCEPTION: reject_reason = 'superseded--surgical doctrine'\n-> excluded from fetch -> re-proposable
+    HELD --> [*] : terminal -- same suppression as REJECTED\nno programmatic path sets HELD in reviewed code
+    RETIRED --> [*] : terminal -- NOT in rejectedSet or openSet\n-> re-proposable (see Findings Findings 7)
 ```
 
 ### Legend
