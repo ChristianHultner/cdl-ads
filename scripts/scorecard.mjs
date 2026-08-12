@@ -1,10 +1,7 @@
 // scripts/scorecard.mjs
+// Layer 3.1: GP-derived judgment, ACoS band 25-35, REVIEW state.
 // Usage: node --env-file=.env.local scripts/scorecard.mjs [--horizon t7|t14|all]
-//
 // READ-ONLY analysis of rec_outcomes.
-// Judges every PUSHED rec with stamps per the Layer 2 spec.
-// Writes artifacts/scorecard-<date>.json with full per-rec judgments.
-// All DB access is SELECT only.
 
 import { parseArgs }      from 'node:util';
 import { Pool, neonConfig } from '@neondatabase/serverless';
@@ -17,35 +14,24 @@ neonConfig.webSocketConstructor = WebSocket;
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT  = join(__dirname, '..');
 
-// ── Args ──────────────────────────────────────────────────────────────────────
 const { values: args } = parseArgs({
   args: process.argv.slice(2),
   options: { horizon: { type: 'string', default: 'all' } },
 });
 const horizonFilter = args.horizon;
-if (!['t7', 't14', 'all'].includes(horizonFilter)) {
+if (!['t7', 't14', 'all'].includes(horizonFilter))
   throw new Error(`--horizon must be t7|t14|all, got: ${horizonFilter}`);
-}
 
-// ── DB ────────────────────────────────────────────────────────────────────────
 const { DATABASE_URL } = process.env;
 if (!DATABASE_URL) throw new Error('DATABASE_URL not set');
 const pool = new Pool({ connectionString: DATABASE_URL });
 
-// ── Fetch all PUSHED recs with stamps ─────────────────────────────────────────
+// ── Fetch stamps ─────────────────────────────────────────────────────────────
 const hClause = horizonFilter === 'all' ? '' : `AND o.horizon = '${horizonFilter}'`;
 const { rows: rawRows } = await pool.query(`
-  SELECT
-    r.id,
-    r.rec_type,
-    r.target_text,
-    r.campaign_id,
-    r.evidence,
-    p.country_code,
-    p.currency_code,
-    o.horizon,
-    o.metrics,
-    o.captured_at
+  SELECT r.id, r.rec_type, r.target_text, r.campaign_id, r.evidence,
+         p.country_code, p.currency_code,
+         o.horizon, o.metrics, o.captured_at
   FROM recommendations   r
   JOIN rec_outcomes      o ON o.rec_id     = r.id
   JOIN amazon_profiles   p ON p.profile_id = r.profile_id
@@ -53,16 +39,31 @@ const { rows: rawRows } = await pool.query(`
   ${hClause}
   ORDER BY r.rec_type, o.horizon, p.country_code, r.id
 `);
+
+// ── Market rolling ACoS (last 30 days from campaign_daily) ───────────────────
+const { rows: acosRows } = await pool.query(`
+  SELECT p.country_code,
+         SUM(acd.cost)::float                                  AS cost_30d,
+         NULLIF(SUM(acd.sales_14d), 0)::float                  AS sales_30d
+  FROM amazon_campaign_daily acd
+  JOIN amazon_profiles       p ON p.profile_id = acd.profile_id
+  WHERE acd.date >= CURRENT_DATE - INTERVAL '30 days'
+  GROUP BY p.country_code
+`);
+const marketRollingAcos = {};
+for (const r of acosRows) {
+  if (r.sales_30d != null && r.sales_30d > 0)
+    marketRollingAcos[r.country_code] = r.cost_30d / r.sales_30d;
+}
+
 await pool.end();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function safeN(x) { return (x == null) ? NaN : Number(x); }
-
 function pct(n, total) {
   if (total === 0 || isNaN(total)) return '—';
   return (n / total * 100).toFixed(1) + '%';
 }
-
 function median(arr) {
   if (arr.length === 0) return null;
   const s = [...arr].sort((a, b) => a - b);
@@ -71,67 +72,110 @@ function median(arr) {
 }
 
 // ── Judgment functions ────────────────────────────────────────────────────────
-//
-// Four-state: WIN / PARTIAL / LEAK / NO-DATA
-// Spec rule: rows_found === 0  →  NO-DATA (never LOSS/LEAK)
 
 function judgeNegateTerm(ev, m) {
-  // Adaptation: reference spend = ev.spend (window spend that triggered rec)
-  // WIN  : stamp cost ≈ 0 (< 0.10)
-  // PARTIAL: cost < 50% of ev.spend
-  // LEAK : else
   if (m.rows_found === 0) return { verdict: 'NO-DATA' };
   const cost     = safeN(m.cost);
   const refSpend = safeN(ev.spend);
-  const stopped  = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
-  // WIN bar: window spend ≤ 5% of ev.spend (pre-negation spend)
-  // PARTIAL: ≤ 50% of ev.spend; LEAK: else
-  // (Previous bar was cost < 0.10 absolute — unreachable when window overlaps
-  //  pre-push days or attribution lag; changed 2026-08-11)
+  const hasBefore = m.before_rows_found != null;
+
+  if (!hasBefore) {
+    // Legacy stamp: old definition + pre_gp_grading tag
+    const stopped = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
+    if (!isNaN(refSpend) && refSpend > 0) {
+      const ratio = cost / refSpend;
+      if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true };
+      if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, pre_gp_grading: true };
+      return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true };
+    }
+    if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true };
+    return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true };
+  }
+
+  // GP grading (L3.1)
+  const salesAfter  = safeN(m.sales_14d      ?? 0);
+  const beforeCost  = safeN(m.before_cost    ?? 0);
+  const beforeSales = safeN(m.before_sales_14d ?? 0);
+  const gp_delta    = (salesAfter - cost) - (beforeSales - beforeCost);
+  const stopped     = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
+
+  const spendStopped = !isNaN(refSpend) && refSpend > 0
+    ? (cost / refSpend) <= 0.05
+    : cost < 0.10;
+
+  if (spendStopped) {
+    if (gp_delta >= 0)
+      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta,
+               pct_of_ref: !isNaN(refSpend) && refSpend > 0 ? cost / refSpend : undefined };
+    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta,
+               note: 'spend stopped but GP Δ<0: negation may have killed converting traffic' };
+  }
+
   if (!isNaN(refSpend) && refSpend > 0) {
     const ratio = cost / refSpend;
-    if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio };
-    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio };
-    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio };
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta };
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta };
   }
-  // refSpend unknown or zero — fall back to near-zero absolute
-  if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
-  return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
+  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta };
 }
 
 function judgeNegateTarget(ev, m) {
-  // Metrics: spend/clicks for target ASIN in amazon_search_term_daily post-negation.
-  // WIN bar mirrors NEGATE_TERM: window spend ≤ 5% of ev.spend; PARTIAL ≤ 50%; else LEAK.
   if (m.rows_found === 0) return { verdict: 'NO-DATA' };
   const cost     = safeN(m.cost);
   const refSpend = safeN(ev.spend);
-  const stopped  = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
+  const hasBefore = m.before_rows_found != null;
+
+  if (!hasBefore) {
+    const stopped = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
+    if (!isNaN(refSpend) && refSpend > 0) {
+      const ratio = cost / refSpend;
+      if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true };
+      if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, pre_gp_grading: true };
+      return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true };
+    }
+    if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true };
+    return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true };
+  }
+
+  const salesAfter  = safeN(m.sales_14d      ?? 0);
+  const beforeCost  = safeN(m.before_cost    ?? 0);
+  const beforeSales = safeN(m.before_sales_14d ?? 0);
+  const gp_delta    = (salesAfter - cost) - (beforeSales - beforeCost);
+  const stopped     = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null;
+
+  const spendStopped = !isNaN(refSpend) && refSpend > 0
+    ? (cost / refSpend) <= 0.05
+    : cost < 0.10;
+
+  if (spendStopped) {
+    if (gp_delta >= 0)
+      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta,
+               pct_of_ref: !isNaN(refSpend) && refSpend > 0 ? cost / refSpend : undefined };
+    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta,
+               note: 'spend stopped but GP Δ<0: negation may have killed converting traffic' };
+  }
+
   if (!isNaN(refSpend) && refSpend > 0) {
     const ratio = cost / refSpend;
-    if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio };
-    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio };
-    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio };
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta };
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta };
   }
-  if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
-  return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' };
+  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta };
 }
 
-function judgeBidAdjust(ev, m) {
-  // Direction: pushed_bid vs current_bid (evidence field, added in v2 push).
-  // Fallback: existing_targets[0].bid for older recs.
-  // Adaptation: proposed_bid == approved_bid == pushed_bid for all 227 stamps;
-  //   direction cannot be read from proposed vs approved.
-  const pushed     = safeN(ev.pushed_bid ?? ev.proposed_bid);
-  let   current    = safeN(ev.current_bid);
+function judgeBidAdjust(ev, m, countryCode) {
+  const pushed  = safeN(ev.pushed_bid ?? ev.proposed_bid);
+  let   current = safeN(ev.current_bid);
   if (isNaN(current) && Array.isArray(ev.existing_targets) && ev.existing_targets.length > 0)
     current = safeN(ev.existing_targets[0].bid);
 
   const targetAcos = safeN(ev.params_used?.target_acos ?? 0.30);
+  const bandHigh   = targetAcos + 0.05;
 
   let direction;
   if (!isNaN(current) && !isNaN(pushed)) {
-    direction = pushed < current * 0.99  ? 'CUT'
-              : pushed > current * 1.01  ? 'RAISE'
+    direction = pushed < current * 0.99 ? 'CUT'
+              : pushed > current * 1.01 ? 'RAISE'
               : 'FLAT';
   } else {
     direction = 'UNKNOWN';
@@ -150,28 +194,48 @@ function judgeBidAdjust(ev, m) {
   const beforeAcos = beforeSales > 0 ? beforeCost / beforeSales : null;
   const acosDelta  = (afterAcos !== null && beforeAcos !== null) ? afterAcos - beforeAcos : null;
 
+  const gp_delta = (!isNaN(afterCost) && !isNaN(beforeCost))
+    ? (afterSales - afterCost) - (beforeSales - beforeCost)
+    : null;
+
   if (direction === 'CUT') {
+    if (gp_delta !== null && gp_delta > 0)
+      return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta };
     const acosBetter = afterAcos !== null && beforeAcos !== null && afterAcos < beforeAcos;
-    const spendFell  = afterCost < beforeCost * 0.90;
-    const ordersHeld = afterSales >= beforeSales * 0.80;
-    if (acosBetter || (spendFell && ordersHeld))
-      return { verdict: 'WIN',     direction, acos_delta: acosDelta };
+    if (acosBetter)
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+               note: 'ACoS improved but GP Δ≤0' };
+    const spendFell = afterCost < beforeCost * 0.90;
     if (spendFell)
-      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta,
-               note: 'spend fell but sales also fell' };
-    return { verdict: 'LEAK',    direction, acos_delta: acosDelta };
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+               note: 'spend fell but GP Δ≤0 (sales fell more)' };
+    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta };
   }
 
   if (direction === 'RAISE') {
+    if (gp_delta !== null && gp_delta > 0) {
+      const marketAcos  = marketRollingAcos[countryCode];
+      const marketAbove = marketAcos != null && marketAcos > bandHigh;
+      if (!marketAbove) {
+        const note = marketAcos != null
+          ? `market ${(marketAcos * 100).toFixed(1)}% in/below band`
+          : undefined;
+        return { verdict: 'WIN', direction, acos_delta: acosDelta, gp_delta, note };
+      }
+      if (afterAcos == null || afterAcos <= bandHigh)
+        return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta,
+                 note: `market ${(marketAcos * 100).toFixed(1)}% above band; entity ACoS within ceiling` };
+      return   { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+                 note: `GP Δ>0 but market ${(marketAcos * 100).toFixed(1)}% above band; entity ACoS ${(afterAcos * 100).toFixed(1)}%>ceiling` };
+    }
     const clicksRose = afterClicks > beforeClks;
-    const acosOk     = afterAcos === null || afterAcos <= targetAcos * 1.20;
-    if (clicksRose && acosOk)  return { verdict: 'WIN',     direction, acos_delta: acosDelta };
-    if (clicksRose && !acosOk) return { verdict: 'PARTIAL', direction, acos_delta: acosDelta,
-                                         note: 'clicks rose but ACoS > target+20%' };
-    return { verdict: 'LEAK',    direction, acos_delta: acosDelta, note: 'clicks did not rise' };
+    if (clicksRose)
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+               note: 'clicks rose but GP Δ≤0' };
+    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta,
+             note: 'clicks did not rise and GP Δ≤0' };
   }
 
-  // FLAT or UNKNOWN
   return {
     verdict: 'NO-DATA', direction,
     note: direction === 'FLAT'
@@ -181,17 +245,7 @@ function judgeBidAdjust(ev, m) {
 }
 
 function judgeReplaceProductAd(ev, m) {
-  // Metrics: B0 and HC ad-pair daily rows from amazon_advertised_product_daily,
-  // scoped to campaign_id (grain: asin+campaign_id).
-  // WIN:     B0 dark (b0_impressions=0) AND HC serving (hc_impressions>0 or hc_clicks>0)
-  // PARTIAL: B0 dark but HC not yet serving, OR HC serving but B0 still active
-  // LEAK:    B0 still serving and HC not serving
-  if (m.rows_found === 0) return {
-    verdict: 'NO-DATA',
-    note: 'no daily rows for B0 or HC in window',
-    b0_asin: ev.b0_asin,
-    hc_asin: ev.hc_isbn10,
-  };
+  if (m.rows_found === 0) return { verdict: 'NO-DATA', note: 'no daily rows for B0 or HC in window' };
   const b0Impr   = safeN(m.b0_impressions ?? 0);
   const hcImpr   = safeN(m.hc_impressions ?? 0);
   const hcClicks = safeN(m.hc_clicks      ?? 0);
@@ -199,62 +253,88 @@ function judgeReplaceProductAd(ev, m) {
   const hcOrders = safeN(m.hc_orders      ?? 0);
   const b0Dark   = b0Impr === 0;
   const hcServe  = hcImpr > 0 || hcClicks > 0;
-  if (b0Dark && hcServe)
-    return { verdict: 'WIN',     note: 'B0 dark, HC serving', b0_spend: b0Spend, hc_orders: hcOrders };
-  if (b0Dark)
-    return { verdict: 'PARTIAL', note: 'B0 dark but HC not yet serving', b0_spend: b0Spend };
-  if (hcServe)
-    return { verdict: 'PARTIAL', note: 'HC serving but B0 still active', b0_spend: b0Spend };
-  return   { verdict: 'LEAK',    note: 'B0 still active, HC not serving', b0_spend: b0Spend };
+
+  let gp_delta = null;
+  if (m.before_b0_spend != null && m.before_hc_spend != null) {
+    const afterGP  = safeN(m.hc_sales  ?? 0) + safeN(m.b0_sales  ?? 0)
+                   - safeN(m.hc_spend  ?? 0) - safeN(m.b0_spend  ?? 0);
+    const beforeGP = safeN(m.before_hc_sales ?? 0) + safeN(m.before_b0_sales ?? 0)
+                   - safeN(m.before_hc_spend ?? 0) - safeN(m.before_b0_spend ?? 0);
+    gp_delta = afterGP - beforeGP;
+  }
+
+  if (b0Dark && hcServe) return { verdict: 'WIN',     note: 'B0 dark, HC serving', b0_spend: b0Spend, hc_orders: hcOrders, gp_delta };
+  if (b0Dark)             return { verdict: 'PARTIAL', note: 'B0 dark but HC not yet serving', b0_spend: b0Spend, gp_delta };
+  if (hcServe)            return { verdict: 'PARTIAL', note: 'HC serving but B0 still active', b0_spend: b0Spend, gp_delta };
+  return                         { verdict: 'LEAK',    note: 'B0 still active, HC not serving', b0_spend: b0Spend, gp_delta };
 }
 
 function judgePromoteTerm(ev, m, horizon) {
-  // Adaptation: stamp metrics lack impressions.
-  //   Using clicks > 0 as serving proxy (clicks ≥ 1 implies impressions ≥ 1).
   if (m.rows_found === 0) return { verdict: 'NO-DATA' };
   const clicks    = safeN(m.clicks);
   const purchases = safeN(m.purchases_14d ?? 0);
   if (isNaN(clicks)) return { verdict: 'NO-DATA', note: 'no clicks field in metrics' };
-  if (horizon === 't14' && purchases > 0)
-    return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases };
-  if (clicks > 0)
-    return { verdict: 'WIN', note: 'serving at ' + horizon + ' (clicks>0; impression proxy)', clicks };
-  return { verdict: 'LEAK', note: 'rows found but zero clicks — keyword dark', clicks: 0 };
+
+  let gp_delta = null;
+  if (m.before_rows_found != null) {
+    const afterSales  = safeN(m.sales_14d  ?? 0);
+    const afterCost   = safeN(m.cost       ?? 0);
+    const beforeSales = safeN(m.before_sales_14d ?? 0);
+    const beforeCost  = safeN(m.before_cost ?? 0);
+    gp_delta = (afterSales - afterCost) - (beforeSales - beforeCost);
+  }
+
+  if (clicks > 0) {
+    if (gp_delta != null && gp_delta > 0)
+      return { verdict: 'WIN', note: 'STRONG: gp_delta>0',
+               clicks, purchases: purchases > 0 ? purchases : undefined, gp_delta };
+    if (horizon === 't14' && purchases > 0)
+      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta };
+    return { verdict: 'WIN', note: 'serving at ' + horizon + ' (clicks>0; impression proxy)', clicks, gp_delta };
+  }
+  return { verdict: 'LEAK', note: 'rows found but zero clicks — keyword dark', clicks: 0, gp_delta };
 }
 
-function judgeCreativeKeyword(ev, m, horizon) {
-  // Same shape as PROMOTE_TERM
-  return judgePromoteTerm(ev, m, horizon);
-}
+function judgeCreativeKeyword(ev, m, horizon) { return judgePromoteTerm(ev, m, horizon); }
 
 function judgePromoteAsin(ev, m, horizon) {
   if (m.rows_found === 0) return { verdict: 'NO-DATA' };
   const clicks    = safeN(m.clicks);
   const purchases = safeN(m.purchases ?? m.purchases_14d ?? 0);
-  if (horizon === 't14' && purchases > 0)
-    return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases };
-  if (clicks > 0) return { verdict: 'WIN', note: 'serving (clicks>0)', clicks };
-  return { verdict: 'LEAK', note: 'target dark (rows found, zero clicks)', clicks: 0 };
+
+  let gp_delta = null;
+  if (m.before_rows_found != null) {
+    const afterSales  = safeN(m.sales  ?? m.sales_14d  ?? 0);
+    const afterCost   = safeN(m.cost   ?? 0);
+    const beforeSales = safeN(m.before_sales ?? m.before_sales_14d ?? 0);
+    const beforeCost  = safeN(m.before_cost ?? 0);
+    gp_delta = (afterSales - afterCost) - (beforeSales - beforeCost);
+  }
+
+  if (clicks > 0) {
+    if (gp_delta != null && gp_delta > 0)
+      return { verdict: 'WIN', note: 'STRONG: gp_delta>0', clicks,
+               purchases: purchases > 0 ? purchases : undefined, gp_delta };
+    if (horizon === 't14' && purchases > 0)
+      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta };
+    return { verdict: 'WIN', note: 'serving (clicks>0)', clicks, gp_delta };
+  }
+  return { verdict: 'LEAK', note: 'target dark (rows found, zero clicks)', clicks: 0, gp_delta };
 }
 
-function judgeCreativeTarget(ev, m, horizon) {
-  // Metrics shape: { cost, sales, clicks, purchases, rows_found }
-  return judgePromoteAsin(ev, m, horizon);
-}
+function judgeCreativeTarget(ev, m, horizon) { return judgePromoteAsin(ev, m, horizon); }
 
 function judgePauseCampaign(ev, m) {
-  if (m.rows_found === 0 && (!m.before_rows_found || m.before_rows_found === 0))
-    return { verdict: 'NO-DATA' };
+  if (m.rows_found === 0 && (!m.before_rows_found || m.before_rows_found === 0)) return { verdict: 'NO-DATA' };
   const afterCost  = safeN(m.cost);
   const beforeCost = safeN(m.before_cost);
-  if (afterCost < 0.10) return { verdict: 'WIN', before_cost: beforeCost, after_cost: afterCost };
+  if (afterCost < 0.10) return { verdict: 'WIN',     before_cost: beforeCost, after_cost: afterCost };
   if (!isNaN(beforeCost) && beforeCost > 0 && afterCost < beforeCost * 0.50)
     return { verdict: 'PARTIAL', before_cost: beforeCost, after_cost: afterCost };
   return { verdict: 'LEAK', before_cost: beforeCost, after_cost: afterCost };
 }
 
 function judgeBudgetAdjust(ev, m) {
-  // Small cohort (n=2 t7 only) — per-rec one-liner; no rate computation
   if (m.rows_found === 0) return { verdict: 'NO-DATA' };
   const spendChg = (safeN(m.before_cost) > 0)
     ? (safeN(m.cost) - safeN(m.before_cost)) / safeN(m.before_cost)
@@ -265,36 +345,33 @@ function judgeBudgetAdjust(ev, m) {
   return {
     verdict: spendChg !== null ? (spendChg > 0 ? 'PARTIAL' : 'WIN') : 'PARTIAL',
     note: `spend_chg=${spendChg !== null ? (spendChg*100).toFixed(0)+'%' : '?'} sales_chg=${salesChg !== null ? (salesChg*100).toFixed(0)+'%' : '?'}`,
-    spend_change_pct: spendChg,
-    sales_change_pct: salesChg,
+    spend_change_pct: spendChg, sales_change_pct: salesChg,
   };
 }
 
 function judgeCreateStructure(ev, m) {
-  // Small cohort — per-rec one-liner
   if (m.rows_found === 0) return { verdict: 'NO-DATA' };
   const impr = safeN(m.impressions);
   if (impr > 0) return { verdict: 'WIN',     note: `campaign serving (impr=${impr})` };
   return       { verdict: 'PARTIAL', note: 'campaign exists but impressions=0' };
 }
 
-// ── Dispatch ──────────────────────────────────────────────────────────────────
 function judge(row) {
   const ev = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence;
   const m  = typeof row.metrics  === 'string' ? JSON.parse(row.metrics)  : row.metrics;
   let j;
   switch (row.rec_type) {
-    case 'NEGATE_TERM':        j = judgeNegateTerm(ev, m);                  break;
-    case 'NEGATE_TARGET':      j = judgeNegateTarget(ev, m);                break;
-    case 'BID_ADJUST':         j = judgeBidAdjust(ev, m);                   break;
-    case 'REPLACE_PRODUCT_AD': j = judgeReplaceProductAd(ev, m);            break;
-    case 'PROMOTE_TERM':       j = judgePromoteTerm(ev, m, row.horizon);    break;
-    case 'CREATIVE_KEYWORD':   j = judgeCreativeKeyword(ev, m, row.horizon);break;
-    case 'PROMOTE_ASIN':       j = judgePromoteAsin(ev, m, row.horizon);    break;
-    case 'CREATIVE_TARGET':    j = judgeCreativeTarget(ev, m, row.horizon); break;
-    case 'PAUSE_CAMPAIGN':     j = judgePauseCampaign(ev, m);               break;
-    case 'BUDGET_ADJUST':      j = judgeBudgetAdjust(ev, m);                break;
-    case 'CREATE_STRUCTURE':   j = judgeCreateStructure(ev, m);             break;
+    case 'NEGATE_TERM':        j = judgeNegateTerm(ev, m);                       break;
+    case 'NEGATE_TARGET':      j = judgeNegateTarget(ev, m);                     break;
+    case 'BID_ADJUST':         j = judgeBidAdjust(ev, m, row.country_code);      break;
+    case 'REPLACE_PRODUCT_AD': j = judgeReplaceProductAd(ev, m);                 break;
+    case 'PROMOTE_TERM':       j = judgePromoteTerm(ev, m, row.horizon);         break;
+    case 'CREATIVE_KEYWORD':   j = judgeCreativeKeyword(ev, m, row.horizon);     break;
+    case 'PROMOTE_ASIN':       j = judgePromoteAsin(ev, m, row.horizon);         break;
+    case 'CREATIVE_TARGET':    j = judgeCreativeTarget(ev, m, row.horizon);      break;
+    case 'PAUSE_CAMPAIGN':     j = judgePauseCampaign(ev, m);                    break;
+    case 'BUDGET_ADJUST':      j = judgeBudgetAdjust(ev, m);                     break;
+    case 'CREATE_STRUCTURE':   j = judgeCreateStructure(ev, m);                  break;
     default:                   j = { verdict: 'NO-DATA', note: `unhandled type: ${row.rec_type}` };
   }
   return { ...row, ev, m, judgment: j };
@@ -302,12 +379,12 @@ function judge(row) {
 
 const judged = rawRows.map(judge);
 
-// ── Aggregation helper ────────────────────────────────────────────────────────
+// ── Aggregation ───────────────────────────────────────────────────────────────
 function aggRows(rows) {
-  const counts = { WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0 };
+  const counts = { WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0, REVIEW: 0 };
   for (const r of rows) counts[r.judgment.verdict] = (counts[r.judgment.verdict] ?? 0) + 1;
   const n  = rows.length;
-  const dn = n - (counts['NO-DATA'] ?? 0);
+  const dn = n - (counts['NO-DATA'] ?? 0);   // REVIEW counts in dn
   return { n, dn, counts };
 }
 
@@ -319,40 +396,39 @@ function rateStr(counts, dn) {
   if (dn === 0) return '(all NO-DATA)';
   const parts = [];
   if (counts.WIN    > 0) parts.push(`WIN=${pct(counts.WIN, dn)}`);
+  if (counts.REVIEW > 0) parts.push(`REVIEW=${counts.REVIEW} (${pct(counts.REVIEW, dn)}) ⚠`);
   if (counts.PARTIAL > 0) parts.push(`PARTIAL=${pct(counts.PARTIAL, dn)}`);
   if (counts.LEAK    > 0) parts.push(`LEAK=${pct(counts.LEAK, dn)}`);
   const nd = counts['NO-DATA'] ?? 0;
   return parts.join('  ') + (nd > 0 ? `  NO-DATA=${nd}` : '');
 }
 
-// ── Header ────────────────────────────────────────────────────────────────────
+// ── Market ACoS band summary ──────────────────────────────────────────────────
+const BAND_LOW = 0.25; const BAND_HIGH = 0.35;
 console.log(SEP1);
-console.log('  CdL Ads SCORECARD — Layer 2 Outcomes Analysis');
+console.log('  CdL Ads SCORECARD — Layer 3.1 GP-Derived Outcomes');
 console.log(`  Horizon: ${horizonFilter}   Stamps loaded: ${judged.length}   Generated: ${new Date().toISOString()}`);
 console.log(SEP1);
 
-console.log(`
-⚠  ADAPTATIONS (stamp reality vs spec):
-  1. NEGATE_TARGET  — handler added 2026-08-11; metrics: clicks+cost from
-     amazon_search_term_daily WHERE search_term = target ASIN.
-     WIN bar mirrors NEGATE_TERM (≤5% of ev.spend).
+console.log('\n  Market rolling ACoS (30d) vs band 25-35%:');
+const mktAcosKeys = Object.keys(marketRollingAcos).sort();
+for (const mkt of mktAcosKeys) {
+  const ra = marketRollingAcos[mkt];
+  const zone = ra < BAND_LOW ? 'push zone' : ra <= BAND_HIGH ? 'in band' : 'repair zone';
+  console.log(`    ${mkt.padEnd(4)} ${(ra * 100).toFixed(1).padStart(6)}%  ·  ${zone}`);
+}
+if (mktAcosKeys.length === 0) console.log('    (no data)');
 
-  2. REPLACE_PRODUCT_AD — handler added 2026-08-11; metrics: B0+HC ad-pair
-     rows from amazon_advertised_product_daily scoped by campaign_id.
-     HC ASIN = ev.hc_isbn10. Grain: asin+campaign_id (approximate if ASIN
-     rides other campaigns).
-
-  3. PROMOTE_TERM / CREATIVE_KEYWORD — stamp metrics lack impressions.
-     Using clicks>0 as serving proxy (clicks ≥ 1 ⟹ impressions ≥ 1).
-
-  4. BID_ADJUST direction — proposed_bid == approved_bid == pushed_bid
-     for all 227 stamps; cannot use proposed-vs-approved delta.
-     Direction resolved from evidence.current_bid vs pushed_bid
-     (fallback: existing_targets[0].bid for 56 older recs).
-
-  5. NEGATE_TERM WIN bar — changed 2026-08-11: was cost<0.10 (absolute,
-     unreachable vs attribution lag); now ≤5% of ev.spend = WIN,
-     ≤50% = PARTIAL, else LEAK.
+console.log(`\n⚠  ADAPTATIONS (L3.1 vs spec):
+  1. NEGATE_TERM/TARGET (new stamps): WIN = spend stopped (≤5% ev.spend) AND gp_delta≥0.
+     Spend stopped + gp_delta<0 → REVIEW. Legacy stamps tagged pre_gp_grading.
+  2. BID_ADJUST CUT: WIN = gp_delta>0. ACoS improvement alone = PARTIAL.
+  3. BID_ADJUST RAISE: WIN = gp_delta>0 + market ACoS in/below band (target_acos±5pp);
+     above-band market: also requires entity ACoS ≤ ceiling.
+  4. REPLACE: execution bar unchanged; gp_delta informational (pair-level).
+  5. PROMOTE_TERM/ASIN: WIN=serving unchanged; STRONG = gp_delta>0; gp_delta informational.
+  6. BID_ADJUST always had before/after → GP grading applies to all existing stamps.
+  7. NEGATE/PROMOTE before-window only on NEW stamps; old stamps → pre_gp_grading.
 `);
 
 // ── Per rec_type sections ─────────────────────────────────────────────────────
@@ -364,12 +440,9 @@ const TYPE_ORDER = [
   'PROMOTE_ASIN', 'CREATIVE_TARGET',
   'PAUSE_CAMPAIGN', 'BUDGET_ADJUST', 'CREATE_STRUCTURE',
 ];
-
-// Small-cohort types: list per-rec instead of rates
 const SMALL_TYPES = new Set(['PAUSE_CAMPAIGN', 'BUDGET_ADJUST', 'PROMOTE_ASIN',
                               'CREATIVE_TARGET', 'CREATE_STRUCTURE']);
 
-const jsonPerRec = [];
 const jsonSummary = {};
 
 for (const recType of TYPE_ORDER) {
@@ -385,26 +458,30 @@ for (const recType of TYPE_ORDER) {
 
   jsonSummary[recType] = {};
 
+  // Count pre_gp_grading stamps
+  const preGp = typeRows.filter(r => r.judgment.pre_gp_grading).length;
+  if (preGp > 0) console.log(`  ⚠ ${preGp} stamp(s) on legacy definition (pre_gp_grading; no before-window)`);
+
   for (const h of horizons) {
     const hRows = typeRows.filter(r => r.horizon === h);
     const { n, dn, counts } = aggRows(hRows);
 
     console.log(`\n  ${h.toUpperCase()}  (n=${n})`);
 
-    // ── Small-cohort or n<5 ────────────────────────────────────────────────
     if (n < 5 || SMALL_TYPES.has(recType)) {
-      console.log(`  ↳ n<5 or small-cohort type — insufficient for rates; per-rec listing:`);
+      console.log(`  ↳ n<5 or small-cohort — per-rec:`);
       for (const row of hRows) {
         const j = row.judgment;
         const dir  = j.direction ? ` [${j.direction}]` : '';
-        const note = j.note      ? ` | ${j.note}`      : '';
-        console.log(`    rec ${String(row.id).padStart(6)} [${row.country_code}]${dir}  ${j.verdict}${note}`);
+        const gpStr = j.gp_delta != null ? `  GP Δ=${j.gp_delta >= 0 ? '+' : ''}${j.gp_delta.toFixed(2)}` : '';
+        const note = j.note ? ` | ${j.note}` : '';
+        const pre  = j.pre_gp_grading ? ' [pre_gp]' : '';
+        console.log(`    rec ${String(row.id).padStart(6)} [${row.country_code}]${dir}  ${j.verdict}${pre}${gpStr}${note}`);
       }
       jsonSummary[recType][h] = { n, counts, perRec: true };
       continue;
     }
 
-    // ── BID_ADJUST: split CUTs vs RAISEs ──────────────────────────────────
     if (recType === 'BID_ADJUST') {
       const cuts   = hRows.filter(r => r.judgment.direction === 'CUT');
       const raises = hRows.filter(r => r.judgment.direction === 'RAISE');
@@ -418,16 +495,17 @@ for (const recType of TYPE_ORDER) {
         console.log(`\n  ${label} (n=${sn})`);
         console.log(`  Rates (graded n=${sdn}): ${rateStr(sc, sdn)}`);
 
-        // Median ACoS delta for graded rows
-        const deltas = subset
-          .filter(r => r.judgment.acos_delta != null)
-          .map(r => r.judgment.acos_delta);
+        const deltas = subset.filter(r => r.judgment.acos_delta != null).map(r => r.judgment.acos_delta);
         if (deltas.length > 0) {
           const med = median(deltas);
-          console.log(`  Median ACoS delta: ${(med * 100).toFixed(1)}pp  (n=${deltas.length}; neg=improvement)`);
+          console.log(`  Median ACoS Δ: ${(med * 100).toFixed(1)}pp  (n=${deltas.length}; neg=improvement)`);
+        }
+        const gpDs = subset.filter(r => r.judgment.gp_delta != null).map(r => r.judgment.gp_delta);
+        if (gpDs.length > 0) {
+          const medGP = median(gpDs);
+          console.log(`  Median GP Δ:   ${medGP >= 0 ? '+' : ''}${medGP.toFixed(2)} (local ccy, n=${gpDs.length})`);
         }
 
-        // Per-market
         console.log(`  By market:`);
         console.log(`  ${'Mkt'.padEnd(5)} ${'n'.padStart(4)}  ${'graded'.padStart(7)}  rates`);
         console.log(`  ${'─'.repeat(60)}`);
@@ -439,10 +517,7 @@ for (const recType of TYPE_ORDER) {
         }
       }
 
-      if (other.length > 0) {
-        console.log(`\n  FLAT/UNKNOWN (n=${other.length}) — all NO-DATA (no directional change recorded)`);
-      }
-
+      if (other.length > 0) console.log(`\n  FLAT/UNKNOWN (n=${other.length}) — all NO-DATA`);
       jsonSummary[recType][h] = {
         n,
         cuts:   { n: cuts.length,   counts: aggRows(cuts).counts },
@@ -452,21 +527,22 @@ for (const recType of TYPE_ORDER) {
       continue;
     }
 
-    // ── Standard table ─────────────────────────────────────────────────────
     console.log(`  Rates (graded n=${dn}): ${rateStr(counts, dn)}`);
 
-    // Median effect sizes
-    if (recType === 'NEGATE_TERM') {
-      const stops = hRows
-        .filter(r => r.judgment.euros_stopped != null && !isNaN(r.judgment.euros_stopped))
-        .map(r => r.judgment.euros_stopped);
-      if (stops.length > 0) {
-        const med = median(stops);
-        console.log(`  Median spend stopped vs ev.spend: ${med.toFixed(2)} (n=${stops.length})`);
+    if (recType === 'NEGATE_TERM' || recType === 'NEGATE_TARGET') {
+      const stops = hRows.filter(r => r.judgment.euros_stopped != null && !isNaN(r.judgment.euros_stopped))
+                        .map(r => r.judgment.euros_stopped);
+      if (stops.length > 0) console.log(`  Median spend stopped: ${median(stops).toFixed(2)} (n=${stops.length})`);
+
+      const gpDs = hRows.filter(r => r.judgment.gp_delta != null).map(r => r.judgment.gp_delta);
+      if (gpDs.length > 0) {
+        const medGP = median(gpDs);
+        console.log(`  Median GP Δ:          ${medGP >= 0 ? '+' : ''}${medGP.toFixed(2)} (local ccy, n=${gpDs.length})`);
       }
+      const reviewN = counts['REVIEW'] ?? 0;
+      if (reviewN > 0) console.log(`  ⚠ REVIEW count: ${reviewN} (spend stopped but GP Δ<0 — check converting terms)`);
     }
 
-    // Per-market breakdown
     console.log(`  By market:`);
     console.log(`  ${'Mkt'.padEnd(5)} ${'n'.padStart(4)}  ${'graded'.padStart(7)}  rates`);
     console.log(`  ${'─'.repeat(60)}`);
@@ -475,7 +551,12 @@ for (const recType of TYPE_ORDER) {
       const mr = hRows.filter(r => r.country_code === mkt);
       if (mr.length === 0) continue;
       const { n: mn, dn: mdn, counts: mc } = aggRows(mr);
-      console.log(`  ${mkt.padEnd(5)} ${String(mn).padStart(4)}  ${String(mdn).padStart(7)}  ${rateStr(mc, mdn)}`);
+      // Band position annotation for market
+      const ra = marketRollingAcos[mkt];
+      const bandStr = ra != null
+        ? `  [${(ra*100).toFixed(1)}% ${ra < BAND_LOW ? 'push' : ra <= BAND_HIGH ? 'in band' : 'repair'}]`
+        : '';
+      console.log(`  ${mkt.padEnd(5)} ${String(mn).padStart(4)}  ${String(mdn).padStart(7)}  ${rateStr(mc, mdn)}${bandStr}`);
       byMkt[mkt] = { n: mn, dn: mdn, counts: mc };
     }
 
@@ -490,11 +571,11 @@ console.log(SEP1);
 console.log('  ESTATE SUMMARY');
 console.log(SEP1);
 
-const estateVerdicts = { WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0 };
+const estateVerdicts = { WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0, REVIEW: 0 };
 const estateByType   = {};
 for (const row of judged) {
   estateVerdicts[row.judgment.verdict] = (estateVerdicts[row.judgment.verdict] ?? 0) + 1;
-  if (!estateByType[row.rec_type]) estateByType[row.rec_type] = { n: 0, WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0 };
+  if (!estateByType[row.rec_type]) estateByType[row.rec_type] = { n: 0, WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0, REVIEW: 0 };
   estateByType[row.rec_type].n++;
   estateByType[row.rec_type][row.judgment.verdict]++;
 }
@@ -502,55 +583,61 @@ for (const row of judged) {
 const total     = judged.length;
 const totalND   = estateVerdicts['NO-DATA'];
 const totalData = total - totalND;
+const totalRev  = estateVerdicts['REVIEW'];
 
 console.log(`\nTotal stamps:  ${total}`);
 console.log(`Graded:        ${totalData}  (${pct(totalData, total)} of total)`);
 console.log(`NO-DATA:       ${totalND}  (${pct(totalND, total)})`);
-console.log(`\nOverall (graded only):  WIN=${pct(estateVerdicts.WIN, totalData)}  PARTIAL=${pct(estateVerdicts.PARTIAL, totalData)}  LEAK=${pct(estateVerdicts.LEAK, totalData)}`);
+if (totalRev > 0) console.log(`⚠ REVIEW:      ${totalRev}  (${pct(totalRev, totalData)} of graded)`);
+console.log(`\nOverall (graded only):  WIN=${pct(estateVerdicts.WIN, totalData)}  REVIEW=${totalRev}  PARTIAL=${pct(estateVerdicts.PARTIAL, totalData)}  LEAK=${pct(estateVerdicts.LEAK, totalData)}`);
 console.log('');
-console.log(`${'Type'.padEnd(22)} ${'n'.padStart(5)}  ${'graded'.padStart(7)}  ${'WIN%'.padStart(6)}  ${'PART%'.padStart(6)}  ${'LEAK%'.padStart(6)}  ${'NO-DATA'.padStart(8)}`);
+console.log(`${'Type'.padEnd(22)} ${'n'.padStart(5)}  ${'graded'.padStart(7)}  ${'WIN%'.padStart(6)}  ${'REV'.padStart(5)}  ${'PART%'.padStart(6)}  ${'LEAK%'.padStart(6)}  ${'NO-DATA'.padStart(8)}`);
 console.log(SEP2);
 for (const rt of TYPE_ORDER) {
   const s = estateByType[rt];
   if (!s) continue;
-  const dn = s.n - s['NO-DATA'];
-  const wp = pct(s.WIN,     dn);
-  const pp = pct(s.PARTIAL, dn);
-  const lp = pct(s.LEAK,    dn);
-  console.log(`${rt.padEnd(22)} ${String(s.n).padStart(5)}  ${String(dn).padStart(7)}  ${wp.padStart(6)}  ${pp.padStart(6)}  ${lp.padStart(6)}  ${String(s['NO-DATA']).padStart(8)}`);
+  const dn  = s.n - s['NO-DATA'];
+  const wp  = pct(s.WIN,     dn);
+  const pp  = pct(s.PARTIAL, dn);
+  const lp  = pct(s.LEAK,    dn);
+  const rev = String(s.REVIEW ?? 0);
+  console.log(`${rt.padEnd(22)} ${String(s.n).padStart(5)}  ${String(dn).padStart(7)}  ${wp.padStart(6)}  ${rev.padStart(5)}  ${pp.padStart(6)}  ${lp.padStart(6)}  ${String(s['NO-DATA']).padStart(8)}`);
 }
 console.log(SEP2);
 console.log('');
 
-// ── Write JSON artifact ───────────────────────────────────────────────────────
+// ── Write artifact ────────────────────────────────────────────────────────────
 const today        = new Date().toISOString().slice(0, 10);
 const artifactsDir = join(REPO_ROOT, 'artifacts');
 await mkdir(artifactsDir, { recursive: true });
 const artifactPath = join(artifactsDir, `scorecard-${today}.json`);
 
 const artifact = {
-  generated_at:    new Date().toISOString(),
-  horizon_filter:  horizonFilter,
-  total_stamps:    total,
-  verdict_totals:  estateVerdicts,
+  generated_at:   new Date().toISOString(),
+  horizon_filter: horizonFilter,
+  total_stamps:   total,
+  verdict_totals: estateVerdicts,
+  market_rolling_acos: marketRollingAcos,
   adaptations: [
-    'NEGATE_TARGET: handler added 2026-08-11; search_term ASIN spend/clicks; WIN=≤5% of ev.spend',
-    'REPLACE_PRODUCT_AD: handler added 2026-08-11; B0+HC ad-pair from amazon_advertised_product_daily; grain=asin+campaign_id',
-    'PROMOTE_TERM/CREATIVE_KEYWORD: impressions absent; clicks>0 as serving proxy',
-    'BID_ADJUST direction: resolved from evidence.current_bid vs pushed_bid (fallback: existing_targets[0].bid)',
-    'NEGATE_TERM WIN bar: changed 2026-08-11 from cost<0.10 to ≤5% of ev.spend',
+    'L3.1 NEGATE WIN: spend stopped (≤5% ev.spend) AND gp_delta≥0; spend stopped + gp_delta<0 → REVIEW',
+    'L3.1 BID_ADJUST CUT WIN: gp_delta>0; ACoS improvement alone = PARTIAL',
+    'L3.1 BID_ADJUST RAISE WIN: gp_delta>0 + market ACoS in/below band (target±5pp); above-band: entity ACoS ≤ ceiling',
+    'REPLACE/PROMOTE: gp_delta informational; execution bars unchanged',
+    'Legacy stamps (no before-window for NEGATE/PROMOTE): pre_gp_grading tag, old definition applies',
   ],
   summary:  jsonSummary,
-  per_rec:  judged.map(r => ({
-    id:          Number(r.id),
-    rec_type:    r.rec_type,
-    horizon:     r.horizon,
-    market:      r.country_code,
-    currency:    r.currency_code,
-    target_text: r.target_text,
-    verdict:     r.judgment.verdict,
-    judgment:    r.judgment,
-    captured_at: r.captured_at,
+  per_rec: judged.map(r => ({
+    id:             Number(r.id),
+    rec_type:       r.rec_type,
+    horizon:        r.horizon,
+    market:         r.country_code,
+    currency:       r.currency_code,
+    target_text:    r.target_text,
+    verdict:        r.judgment.verdict,
+    gp_delta:       r.judgment.gp_delta ?? null,
+    pre_gp_grading: r.judgment.pre_gp_grading ?? false,
+    judgment:       r.judgment,
+    captured_at:    r.captured_at,
   })),
 };
 

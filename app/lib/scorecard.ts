@@ -1,50 +1,51 @@
 // app/lib/scorecard.ts
-// Server-side scorecard logic — ported from scripts/scorecard.mjs
-// Same judgment definitions; no deviations. See ADAPTATIONS export for honesty notes.
-//
-// DEVIATIONS FROM scorecard.mjs: none.
+// Layer 3.1: GP-derived judgment, ACoS band 25-35, REVIEW state.
+// Server-side scorecard logic — ported from scripts/scorecard.mjs; no deviations.
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type Verdict = 'WIN' | 'PARTIAL' | 'LEAK' | 'NO-DATA'
+export type Verdict = 'WIN' | 'PARTIAL' | 'LEAK' | 'NO-DATA' | 'REVIEW'
 
 export interface VerdictCounts {
   WIN:       number
   PARTIAL:   number
   LEAK:      number
   'NO-DATA': number
+  REVIEW:    number
 }
 
 export interface RawScorecardRow {
-  id:           string | number
-  rec_type:     string
-  target_text:  string
-  campaign_id:  string | null
-  evidence:     unknown
-  country_code: string
+  id:            string | number
+  rec_type:      string
+  target_text:   string
+  campaign_id:   string | null
+  evidence:      unknown
+  country_code:  string
   currency_code: string
-  horizon:      string
-  metrics:      unknown
-  captured_at:  string
-  pushed_at?:   string | null
+  horizon:       string
+  metrics:       unknown
+  captured_at:   string
+  pushed_at?:    string | null
 }
 
 export interface Judgment {
-  verdict:          Verdict
-  direction?:       string
-  euros_stopped?:   number | null
-  pct_of_ref?:      number
-  pct_reduced?:     number
-  acos_delta?:      number | null
-  b0_spend?:        number | null
-  hc_orders?:       number | null
-  before_cost?:     number | null
-  after_cost?:      number | null
+  verdict:           Verdict
+  direction?:        string
+  euros_stopped?:    number | null
+  pct_of_ref?:       number
+  pct_reduced?:      number
+  acos_delta?:       number | null
+  gp_delta?:         number | null
+  pre_gp_grading?:   boolean
+  b0_spend?:         number | null
+  hc_orders?:        number | null
+  before_cost?:      number | null
+  after_cost?:       number | null
   spend_change_pct?: number | null
   sales_change_pct?: number | null
-  clicks?:          number
-  purchases?:       number
-  note?:            string
+  clicks?:           number
+  purchases?:        number
+  note?:             string
 }
 
 export interface JudgedRow extends RawScorecardRow {
@@ -100,6 +101,7 @@ export interface HeroStats {
   cutWinPct:                number | null
   totalStamps:              number
   totalGraded:              number
+  reviewCount:              number
 }
 
 export interface ScorecardResult {
@@ -122,64 +124,136 @@ function median(arr: number[]): number | null {
 }
 
 function zeroVerdicts(): VerdictCounts {
-  return { WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0 }
+  return { WIN: 0, PARTIAL: 0, LEAK: 0, 'NO-DATA': 0, REVIEW: 0 }
 }
 
 function aggCounts(rows: JudgedRow[]): { n: number; dn: number; counts: VerdictCounts } {
   const counts = zeroVerdicts()
   for (const r of rows) counts[r.judgment.verdict]++
   const n  = rows.length
-  const dn = n - counts['NO-DATA']
+  const dn = n - counts['NO-DATA']   // REVIEW counts in dn (graded data)
   return { n, dn, counts }
 }
 
-// ── Judgment functions — direct port from scripts/scorecard.mjs ───────────────
+// ── Judgment functions ────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function judgeNegateTerm(ev: any, m: any): Judgment {
   if (m.rows_found === 0) return { verdict: 'NO-DATA' }
+
   const cost     = safeN(m.cost)
   const refSpend = safeN(ev.spend)
-  const stopped  = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+
+  // L3.1 GP grading requires before-window (before_rows_found present)
+  const hasBefore = m.before_rows_found != null
+
+  if (!hasBefore) {
+    // Legacy stamp: grade on old definition, tag pre_gp_grading
+    const stopped = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+    if (!isNaN(refSpend) && refSpend > 0) {
+      const ratio = cost / refSpend
+      if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true }
+      if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, pre_gp_grading: true }
+      return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true }
+    }
+    if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true }
+    return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true }
+  }
+
+  // GP grading (L3.1): gp_delta = (sales_after − spend_after) − (sales_before − spend_before)
+  const salesAfter  = safeN(m.sales_14d  ?? 0)
+  const beforeCost  = safeN(m.before_cost ?? 0)
+  const beforeSales = safeN(m.before_sales_14d ?? 0)
+  const gp_delta    = (salesAfter - cost) - (beforeSales - beforeCost)
+  const stopped     = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+
+  // Spend-stopped test (existing bar: ≤5% of ref spend)
+  const spendStopped = !isNaN(refSpend) && refSpend > 0
+    ? (cost / refSpend) <= 0.05
+    : cost < 0.10
+
+  if (spendStopped) {
+    if (gp_delta >= 0)
+      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta,
+               pct_of_ref: !isNaN(refSpend) && refSpend > 0 ? cost / refSpend : undefined }
+    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta,
+               note: 'spend stopped but GP Δ<0: negation may have killed converting traffic' }
+  }
+
+  // Spend not fully stopped → PARTIAL / LEAK (unchanged logic)
   if (!isNaN(refSpend) && refSpend > 0) {
     const ratio = cost / refSpend
-    if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio }
-    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio }
-    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio }
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta }
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta }
   }
-  if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' }
-  return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' }
+  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function judgeNegateTarget(ev: any, m: any): Judgment {
+  // Same logic as NEGATE_TERM (search_term ASIN as target)
   if (m.rows_found === 0) return { verdict: 'NO-DATA' }
+
   const cost     = safeN(m.cost)
   const refSpend = safeN(ev.spend)
-  const stopped  = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+  const hasBefore = m.before_rows_found != null
+
+  if (!hasBefore) {
+    const stopped = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+    if (!isNaN(refSpend) && refSpend > 0) {
+      const ratio = cost / refSpend
+      if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true }
+      if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, pre_gp_grading: true }
+      return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, pre_gp_grading: true }
+    }
+    if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true }
+    return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true }
+  }
+
+  const salesAfter  = safeN(m.sales_14d  ?? 0)
+  const beforeCost  = safeN(m.before_cost ?? 0)
+  const beforeSales = safeN(m.before_sales_14d ?? 0)
+  const gp_delta    = (salesAfter - cost) - (beforeSales - beforeCost)
+  const stopped     = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+
+  const spendStopped = !isNaN(refSpend) && refSpend > 0
+    ? (cost / refSpend) <= 0.05
+    : cost < 0.10
+
+  if (spendStopped) {
+    if (gp_delta >= 0)
+      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta,
+               pct_of_ref: !isNaN(refSpend) && refSpend > 0 ? cost / refSpend : undefined }
+    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta,
+               note: 'spend stopped but GP Δ<0: negation may have killed converting traffic' }
+  }
+
   if (!isNaN(refSpend) && refSpend > 0) {
     const ratio = cost / refSpend
-    if (ratio <= 0.05) return { verdict: 'WIN',     euros_stopped: stopped, pct_of_ref: ratio }
-    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio }
-    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio }
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta }
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta }
   }
-  if (cost < 0.10) return { verdict: 'WIN',    euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' }
-  return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback' }
+  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function judgeBidAdjust(ev: any, m: any): Judgment {
+function judgeBidAdjust(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ev: any, m: any,
+  countryCode: string,
+  marketRollingAcos: Record<string, number>,
+): Judgment {
   const pushed  = safeN(ev.pushed_bid ?? ev.proposed_bid)
   let   current = safeN(ev.current_bid)
   if (isNaN(current) && Array.isArray(ev.existing_targets) && ev.existing_targets.length > 0)
     current = safeN(ev.existing_targets[0].bid)
 
   const targetAcos = safeN(ev.params_used?.target_acos ?? 0.30)
+  const bandHigh   = targetAcos + 0.05
 
   let direction: string
   if (!isNaN(current) && !isNaN(pushed)) {
-    direction = pushed < current * 0.99  ? 'CUT'
-              : pushed > current * 1.01  ? 'RAISE'
+    direction = pushed < current * 0.99 ? 'CUT'
+              : pushed > current * 1.01 ? 'RAISE'
               : 'FLAT'
   } else {
     direction = 'UNKNOWN'
@@ -198,24 +272,55 @@ function judgeBidAdjust(ev: any, m: any): Judgment {
   const beforeAcos = beforeSales > 0 ? beforeCost / beforeSales : null
   const acosDelta  = (afterAcos !== null && beforeAcos !== null) ? afterAcos - beforeAcos : null
 
+  // GP delta — BID_ADJUST always has before/after (from Layer 2 onward)
+  const gp_delta = (!isNaN(afterCost) && !isNaN(beforeCost))
+    ? (afterSales - afterCost) - (beforeSales - beforeCost)
+    : null
+
   if (direction === 'CUT') {
+    // WIN = gp_delta > 0 (saved spend exceeded any lost sales)
+    if (gp_delta !== null && gp_delta > 0)
+      return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta }
+    // ACoS improvement alone without GP gain = PARTIAL
     const acosBetter = afterAcos !== null && beforeAcos !== null && afterAcos < beforeAcos
-    const spendFell  = afterCost < beforeCost * 0.90
-    const ordersHeld = afterSales >= beforeSales * 0.80
-    if (acosBetter || (spendFell && ordersHeld))
-      return { verdict: 'WIN',     direction, acos_delta: acosDelta }
+    if (acosBetter)
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+               note: 'ACoS improved but GP Δ≤0' }
+    const spendFell = afterCost < beforeCost * 0.90
     if (spendFell)
-      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, note: 'spend fell but sales also fell' }
-    return { verdict: 'LEAK',    direction, acos_delta: acosDelta }
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+               note: 'spend fell but GP Δ≤0 (sales fell more)' }
+    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta }
   }
 
   if (direction === 'RAISE') {
+    if (gp_delta !== null && gp_delta > 0) {
+      // Check market band: rolling ACoS vs target_acos + 5pp ceiling
+      const marketAcos    = marketRollingAcos[countryCode]
+      const marketAbove   = marketAcos != null && marketAcos > bandHigh
+
+      if (!marketAbove) {
+        // Market in/below band: WIN
+        const note = marketAcos != null
+          ? `market ${(marketAcos * 100).toFixed(1)}% in/below band`
+          : undefined
+        return { verdict: 'WIN', direction, acos_delta: acosDelta, gp_delta, note }
+      }
+      // Above-band market: entity's own ACoS must also be ≤ band ceiling
+      if (afterAcos == null || afterAcos <= bandHigh) {
+        return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta,
+                 note: `market ${(marketAcos! * 100).toFixed(1)}% above band; entity ACoS within ceiling` }
+      }
+      return   { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+                 note: `GP Δ>0 but market ${(marketAcos! * 100).toFixed(1)}% above band; entity ACoS ${(afterAcos * 100).toFixed(1)}%>ceiling` }
+    }
+    // gp_delta ≤ 0
     const clicksRose = afterClicks > beforeClks
-    const acosOk     = afterAcos === null || afterAcos <= targetAcos * 1.20
-    if (clicksRose && acosOk)  return { verdict: 'WIN',     direction, acos_delta: acosDelta }
-    if (clicksRose && !acosOk) return { verdict: 'PARTIAL', direction, acos_delta: acosDelta,
-                                         note: 'clicks rose but ACoS > target+20%' }
-    return { verdict: 'LEAK',    direction, acos_delta: acosDelta, note: 'clicks did not rise' }
+    if (clicksRose)
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+               note: 'clicks rose but GP Δ≤0' }
+    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta,
+             note: 'clicks did not rise and GP Δ≤0' }
   }
 
   return {
@@ -239,13 +344,24 @@ function judgeReplaceProductAd(ev: any, m: any): Judgment {
   const hcOrders = safeN(m.hc_orders      ?? 0)
   const b0Dark   = b0Impr === 0
   const hcServe  = hcImpr > 0 || hcClicks > 0
+
+  // GP delta informational — pair-level (L3.1 stamps only)
+  let gp_delta: number | null = null
+  if (m.before_b0_spend != null && m.before_hc_spend != null) {
+    const afterGP  = safeN(m.hc_sales  ?? 0) + safeN(m.b0_sales  ?? 0)
+                   - safeN(m.hc_spend  ?? 0) - safeN(m.b0_spend  ?? 0)
+    const beforeGP = safeN(m.before_hc_sales ?? 0) + safeN(m.before_b0_sales ?? 0)
+                   - safeN(m.before_hc_spend ?? 0) - safeN(m.before_b0_spend ?? 0)
+    gp_delta = afterGP - beforeGP
+  }
+
   if (b0Dark && hcServe)
-    return { verdict: 'WIN',     note: 'B0 dark, HC serving', b0_spend: b0Spend, hc_orders: hcOrders }
+    return { verdict: 'WIN',     note: 'B0 dark, HC serving', b0_spend: b0Spend, hc_orders: hcOrders, gp_delta }
   if (b0Dark)
-    return { verdict: 'PARTIAL', note: 'B0 dark but HC not yet serving', b0_spend: b0Spend }
+    return { verdict: 'PARTIAL', note: 'B0 dark but HC not yet serving', b0_spend: b0Spend, gp_delta }
   if (hcServe)
-    return { verdict: 'PARTIAL', note: 'HC serving but B0 still active', b0_spend: b0Spend }
-  return   { verdict: 'LEAK',    note: 'B0 still active, HC not serving', b0_spend: b0Spend }
+    return { verdict: 'PARTIAL', note: 'HC serving but B0 still active', b0_spend: b0Spend, gp_delta }
+  return   { verdict: 'LEAK',    note: 'B0 still active, HC not serving', b0_spend: b0Spend, gp_delta }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -254,11 +370,27 @@ function judgePromoteTerm(ev: any, m: any, horizon: string): Judgment {
   const clicks    = safeN(m.clicks)
   const purchases = safeN(m.purchases_14d ?? 0)
   if (isNaN(clicks)) return { verdict: 'NO-DATA', note: 'no clicks field in metrics' }
-  if (horizon === 't14' && purchases > 0)
-    return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases }
-  if (clicks > 0)
-    return { verdict: 'WIN', note: 'serving at ' + horizon + ' (clicks>0; impression proxy)', clicks }
-  return { verdict: 'LEAK', note: 'rows found but zero clicks — keyword dark', clicks: 0 }
+
+  // GP delta informational (L3.1 stamps only)
+  let gp_delta: number | null = null
+  if (m.before_rows_found != null) {
+    const afterSales  = safeN(m.sales_14d  ?? 0)
+    const afterCost   = safeN(m.cost       ?? 0)
+    const beforeSales = safeN(m.before_sales_14d ?? 0)
+    const beforeCost  = safeN(m.before_cost ?? 0)
+    gp_delta = (afterSales - afterCost) - (beforeSales - beforeCost)
+  }
+
+  // WIN: serving (unchanged); STRONG = gp_delta > 0
+  if (clicks > 0) {
+    if (gp_delta != null && gp_delta > 0)
+      return { verdict: 'WIN', note: 'STRONG: gp_delta>0',
+               clicks, purchases: purchases > 0 ? purchases : undefined, gp_delta }
+    if (horizon === 't14' && purchases > 0)
+      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta }
+    return { verdict: 'WIN', note: 'serving at ' + horizon + ' (clicks>0; impression proxy)', clicks, gp_delta }
+  }
+  return { verdict: 'LEAK', note: 'rows found but zero clicks — keyword dark', clicks: 0, gp_delta }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -271,10 +403,25 @@ function judgePromoteAsin(ev: any, m: any, horizon: string): Judgment {
   if (m.rows_found === 0) return { verdict: 'NO-DATA' }
   const clicks    = safeN(m.clicks)
   const purchases = safeN(m.purchases ?? m.purchases_14d ?? 0)
-  if (horizon === 't14' && purchases > 0)
-    return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases }
-  if (clicks > 0) return { verdict: 'WIN', note: 'serving (clicks>0)', clicks }
-  return { verdict: 'LEAK', note: 'target dark (rows found, zero clicks)', clicks: 0 }
+
+  let gp_delta: number | null = null
+  if (m.before_rows_found != null) {
+    const afterSales  = safeN(m.sales  ?? m.sales_14d  ?? 0)
+    const afterCost   = safeN(m.cost   ?? 0)
+    const beforeSales = safeN(m.before_sales ?? m.before_sales_14d ?? 0)
+    const beforeCost  = safeN(m.before_cost ?? 0)
+    gp_delta = (afterSales - afterCost) - (beforeSales - beforeCost)
+  }
+
+  if (clicks > 0) {
+    if (gp_delta != null && gp_delta > 0)
+      return { verdict: 'WIN', note: 'STRONG: gp_delta>0', clicks,
+               purchases: purchases > 0 ? purchases : undefined, gp_delta }
+    if (horizon === 't14' && purchases > 0)
+      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta }
+    return { verdict: 'WIN', note: 'serving (clicks>0)', clicks, gp_delta }
+  }
+  return { verdict: 'LEAK', note: 'target dark (rows found, zero clicks)', clicks: 0, gp_delta }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -319,7 +466,10 @@ function judgeCreateStructure(ev: any, m: any): Judgment {
   return       { verdict: 'PARTIAL', note: 'campaign exists but impressions=0' }
 }
 
-function judgeRow(row: RawScorecardRow): Judgment {
+function judgeRow(
+  row: RawScorecardRow,
+  marketRollingAcos: Record<string, number> = {},
+): Judgment {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ev = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : (row.evidence as any)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -327,7 +477,7 @@ function judgeRow(row: RawScorecardRow): Judgment {
   switch (row.rec_type) {
     case 'NEGATE_TERM':        return judgeNegateTerm(ev, m)
     case 'NEGATE_TARGET':      return judgeNegateTarget(ev, m)
-    case 'BID_ADJUST':         return judgeBidAdjust(ev, m)
+    case 'BID_ADJUST':         return judgeBidAdjust(ev, m, row.country_code, marketRollingAcos)
     case 'REPLACE_PRODUCT_AD': return judgeReplaceProductAd(ev, m)
     case 'PROMOTE_TERM':       return judgePromoteTerm(ev, m, row.horizon)
     case 'CREATIVE_KEYWORD':   return judgeCreativeKeyword(ev, m, row.horizon)
@@ -340,9 +490,7 @@ function judgeRow(row: RawScorecardRow): Judgment {
   }
 }
 
-// ── Type order (task spec: REPLACE, PROMOTE_TERM, NEGATE_TERM, NEGATE_TARGET,
-//   BID_ADJUST, then small cohorts) ──────────────────────────────────────────
-
+// ── Type order ────────────────────────────────────────────────────────────────
 const TYPE_ORDER = [
   'REPLACE_PRODUCT_AD',
   'PROMOTE_TERM',
@@ -362,29 +510,29 @@ const SMALL_TYPES = new Set([
   'CREATIVE_TARGET', 'CREATE_STRUCTURE', 'CREATIVE_KEYWORD',
 ])
 
-// ── Adaptation notes (exported for honesty footer) ────────────────────────────
-
+// ── Adaptation notes ──────────────────────────────────────────────────────────
 export const ADAPTATIONS: Record<string, string> = {
   NEGATE_TARGET:
-    'NEGATE_TARGET: handler added 2026-08-11; metrics: clicks+cost from amazon_search_term_daily WHERE search_term = target ASIN. WIN bar mirrors NEGATE_TERM (≤5% of ev.spend).',
+    'NEGATE_TARGET: handler added 2026-08-11; metrics: clicks+cost+sales_14d from amazon_search_term_daily WHERE search_term = target ASIN. L3.1: before-window added. WIN requires spend stopped (≤5% ev.spend) AND gp_delta≥0; spend stopped + gp_delta<0 → REVIEW.',
   REPLACE_PRODUCT_AD:
-    'REPLACE_PRODUCT_AD: handler added 2026-08-11; B0+HC ad-pair rows from amazon_advertised_product_daily scoped by campaign_id. HC ASIN = ev.hc_isbn10. Grain: asin+campaign_id (approximate if ASIN rides other campaigns).',
+    'REPLACE_PRODUCT_AD: handler added 2026-08-11; B0+HC ad-pair rows from amazon_advertised_product_daily scoped by campaign_id. L3.1: b0_sales, hc_sales + before-window added; gp_delta informational. Execution bar unchanged.',
   PROMOTE_TERM:
-    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy (clicks ≥ 1 ⟹ impressions ≥ 1).',
+    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy. L3.1: before-window added; gp_delta informational; STRONG = gp_delta>0.',
   CREATIVE_KEYWORD:
-    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy.',
+    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy. L3.1: before-window added.',
   BID_ADJUST:
-    'BID_ADJUST direction: proposed_bid == approved_bid == pushed_bid for all stamps; cannot use proposed-vs-approved delta. Direction resolved from evidence.current_bid vs pushed_bid (fallback: existing_targets[0].bid for older recs). WIN bar definition differs for CUTs vs RAISEs — see section.',
+    'BID_ADJUST direction: resolved from evidence.current_bid vs pushed_bid (fallback: existing_targets[0].bid). L3.1: CUT WIN = gp_delta>0; ACoS improvement alone = PARTIAL. RAISE WIN = gp_delta>0 + market ACoS in/below band (target±5pp); above-band market also requires entity ACoS≤ceiling.',
   NEGATE_TERM:
-    'NEGATE_TERM WIN bar: changed 2026-08-11 from cost<0.10 (absolute, unreachable vs attribution lag) to ≤5% of ev.spend = WIN, ≤50% = PARTIAL, else LEAK.',
+    'NEGATE_TERM: L3.1 GP grading: WIN = spend stopped (≤5% ev.spend) AND gp_delta≥0. Spend stopped + gp_delta<0 → REVIEW. Legacy stamps (no before-window) graded on old definition, tagged pre_gp_grading.',
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
+export function computeScorecard(
+  rawRows: RawScorecardRow[],
+  marketRollingAcos: Record<string, number> = {},
+): ScorecardResult {
+  const judged: JudgedRow[] = rawRows.map(r => ({ ...r, judgment: judgeRow(r, marketRollingAcos) }))
 
-export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
-  const judged: JudgedRow[] = rawRows.map(r => ({ ...r, judgment: judgeRow(r) }))
-
-  // ── Per-type sections ──────────────────────────────────────────────────
   const sections: TypeSection[] = []
 
   for (const recType of TYPE_ORDER) {
@@ -401,7 +549,6 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
       const hRows = typeRows.filter(r => r.horizon === h)
       const { n, dn, counts } = aggCounts(hRows)
 
-      // Small cohort or n<5: per-rec listing
       if (n < 5 || isSmall) {
         horizonGroups.push({
           horizon: h, n, dn, counts, byMarket: [],
@@ -416,7 +563,6 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
         continue
       }
 
-      // BID_ADJUST: split CUTs vs RAISEs
       if (recType === 'BID_ADJUST') {
         const cuts   = hRows.filter(r => r.judgment.direction === 'CUT')
         const raises = hRows.filter(r => r.judgment.direction === 'RAISE')
@@ -444,7 +590,6 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
         continue
       }
 
-      // Standard: compute median euros_stopped for negates
       let medianEurosStopped: number | null = null
       if (recType === 'NEGATE_TERM' || recType === 'NEGATE_TARGET') {
         const stops = hRows
@@ -468,7 +613,7 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
     sections.push({ recType, isSmallCohort: isSmall, horizons: horizonGroups })
   }
 
-  // ── Hero stats (computed across ALL horizons) ──────────────────────────
+  // ── Hero stats ─────────────────────────────────────────────────────────────
   const replaceRows    = judged.filter(r => r.rec_type === 'REPLACE_PRODUCT_AD')
   const replaceGraded  = replaceRows.filter(r => r.judgment.verdict !== 'NO-DATA')
   const replaceWinPct  = replaceGraded.length > 0
@@ -500,6 +645,8 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
     ? cuts.filter(r => r.judgment.verdict === 'WIN').length / cutsGraded.length * 100
     : null
 
+  const reviewCount = judged.filter(r => r.judgment.verdict === 'REVIEW').length
+
   return {
     hero: {
       replaceWinPct,
@@ -507,8 +654,9 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
       negateMedianEurosStopped,
       raiseWinPct,
       cutWinPct,
-      totalStamps: judged.length,
-      totalGraded: judged.filter(r => r.judgment.verdict !== 'NO-DATA').length,
+      totalStamps:  judged.length,
+      totalGraded:  judged.filter(r => r.judgment.verdict !== 'NO-DATA').length,
+      reviewCount,
     },
     sections,
     judged,
@@ -516,40 +664,37 @@ export function computeScorecard(rawRows: RawScorecardRow[]): ScorecardResult {
 }
 
 // ── ACoS Contribution ─────────────────────────────────────────────────────────
-// Computed section: attributable spend removed + directional bid delta estimates.
-// spend_stopped = local-currency value of Judgment.euros_stopped (field name unchanged in Judgment).
-// Bid deltas = directional estimate (cruder; median ACoS delta × cohort).
-// NO FX conversion. Currencies: ES/DE/FR/IT=EUR, UK=GBP, US=USD, MX=MXN, CA=CAD (from profiles).
-// sales_14d verified same-currency (MX sample: cost+sales both MXN) → ACoS points per market valid.
-
 export interface AcosContributionMonthEntry {
-  spend_stopped:       number        // sum in local currency — NEGATE WIN+PARTIAL
-  currency:            string        // ISO code from amazon_profiles.currency_code
-  est_acos_points:     number | null // spend_stopped / sales_14d × 100; null when sales unavailable
-  bid_cut_delta_med:   number | null // median acos_delta for CUT WIN+PARTIAL (directional)
-  bid_raise_delta_med: number | null // median acos_delta for RAISE WIN+PARTIAL (directional)
-  n_actions:           number        // total NEGATE+BID_ADJUST WIN+PARTIAL stamps
-}
-
-export interface AcosContributionEstateMonth {
-  byCurrency:          Record<string, number> // currency → spend_stopped; NOT blended (no FX)
+  spend_stopped:       number
+  currency:            string
+  est_acos_points:     number | null
   bid_cut_delta_med:   number | null
   bid_raise_delta_med: number | null
   n_actions:           number
-  // est_acos_points omitted — currencies don’t blend
+  rolling_acos?:       number | null        // market 30-day rolling ACoS
+  band_position?:      'below' | 'in' | 'above' | null   // vs band_low/band_high
+}
+
+export interface AcosContributionEstateMonth {
+  byCurrency:          Record<string, number>
+  bid_cut_delta_med:   number | null
+  bid_raise_delta_med: number | null
+  n_actions:           number
 }
 
 export interface AcosContributionResult {
-  byMarket: Record<string, Record<string, AcosContributionMonthEntry>> // market → YYYY-MM → entry
-  estate:   Record<string, AcosContributionEstateMonth>                // YYYY-MM → aggregate
+  byMarket: Record<string, Record<string, AcosContributionMonthEntry>>
+  estate:   Record<string, AcosContributionEstateMonth>
 }
 
-// market → YYYY-MM → total ad sales in local currency (amazon_campaign_daily.sales_14d)
 export type MarketMonthSales = Record<string, Record<string, number>>
 
 export function computeAcosContribution(
   judged: JudgedRow[],
   marketMonthSales: MarketMonthSales,
+  marketRollingAcos: Record<string, number> = {},
+  bandLow  = 0.25,
+  bandHigh = 0.35,
 ): AcosContributionResult {
   const getMonth = (r: JudgedRow): string | null => {
     if (!r.pushed_at) return null
@@ -575,12 +720,12 @@ export function computeAcosContribution(
     const month    = getMonth(r)
     if (!month) continue
     const mkt      = r.country_code
-    const currency = r.currency_code   // sourced from amazon_profiles via JOIN
+    const currency = r.currency_code
     const v        = r.judgment.verdict
 
-    if ((r.rec_type === 'NEGATE_TERM' || r.rec_type === 'NEGATE_TARGET') && (v === 'WIN' || v === 'PARTIAL')) {
+    if ((r.rec_type === 'NEGATE_TERM' || r.rec_type === 'NEGATE_TARGET') && (v === 'WIN' || v === 'PARTIAL' || v === 'REVIEW')) {
       ensure(mkt, month, currency)
-      const s = r.judgment.euros_stopped  // Judgment field; value is local currency (not EUR-only)
+      const s = r.judgment.euros_stopped
       if (s != null && !isNaN(s)) acc[mkt][month].spendStoppedList.push(s)
       acc[mkt][month].nActions++
     }
@@ -596,7 +741,6 @@ export function computeAcosContribution(
     }
   }
 
-  // ── Per-market result (local currency throughout) ──
   const byMarket: AcosContributionResult['byMarket'] = {}
   for (const mkt of Object.keys(acc)) {
     byMarket[mkt] = {}
@@ -604,6 +748,12 @@ export function computeAcosContribution(
       const d             = acc[mkt][month]
       const spend_stopped = d.spendStoppedList.reduce((a, b) => a + b, 0)
       const sales         = marketMonthSales[mkt]?.[month] ?? null
+      const rolling_acos  = marketRollingAcos[mkt] ?? null
+      const band_position: 'below' | 'in' | 'above' | null =
+        rolling_acos == null ? null
+        : rolling_acos < bandLow  ? 'below'
+        : rolling_acos <= bandHigh ? 'in'
+        : 'above'
       byMarket[mkt][month] = {
         spend_stopped,
         currency:            d.currency,
@@ -611,12 +761,12 @@ export function computeAcosContribution(
         bid_cut_delta_med:   median(d.cutDeltas),
         bid_raise_delta_med: median(d.raiseDeltas),
         n_actions:           d.nActions,
+        rolling_acos,
+        band_position,
       }
     }
   }
 
-  // ── Estate totals: per-currency spend buckets + aggregated bid deltas ──
-  // No FX; currencies are listed separately in the UI.
   const estAcc: Record<string, {
     byCurrency: Record<string, number>
     nActions:   number

@@ -5,7 +5,7 @@ import type { AcosContributionResult } from '@/app/lib/scorecard'
 
 // ── Serialisable types (server → client boundary) ──────────────────────────────
 export interface PanelCounts {
-  WIN: number; PARTIAL: number; LEAK: number; 'NO-DATA': number
+  WIN: number; PARTIAL: number; LEAK: number; 'NO-DATA': number; REVIEW: number
 }
 export interface PanelPerRec {
   id: string | number; market: string; direction?: string; verdict: string; note?: string
@@ -17,17 +17,20 @@ export interface PanelAcosData {
   cut: PanelAcosGroup; raise: PanelAcosGroup
 }
 export interface PanelData {
-  key:             string
-  label:           string
-  recType:         string
-  counts:          PanelCounts
-  n:               number
-  dn:              number
+  key:              string
+  label:            string
+  recType:          string
+  counts:           PanelCounts
+  n:                number
+  dn:               number
   medianEurosStopped?: number | null
-  acosData?:       PanelAcosData
-  perRec?:         PanelPerRec[]
-  adaptationNote?: string
-  subtitle?:       string
+  medianGpDelta?:   number | null
+  gpDeltaCount?:    number
+  gpDeltaCurrency?: string
+  acosData?:        PanelAcosData
+  perRec?:          PanelPerRec[]
+  adaptationNote?:  string
+  subtitle?:        string
 }
 export interface TilePayload {
   key: string; label: string; winPct: number | null; dn: number
@@ -204,23 +207,26 @@ function StackedBarPanel({ counts, n, dn }: { counts: PanelCounts; n: number; dn
       </div>
     )
   }
-  const wPct  = counts.WIN     / dn * 100
-  const paPct = counts.PARTIAL / dn * 100
-  const lPct  = counts.LEAK    / dn * 100
+  const wPct  = counts.WIN              / dn * 100
+  const rvPct = (counts.REVIEW ?? 0)    / dn * 100
+  const paPct = counts.PARTIAL          / dn * 100
+  const lPct  = counts.LEAK             / dn * 100
   const ndPct = counts['NO-DATA'] > 0 ? counts['NO-DATA'] / n * 100 : 0
   return (
     <div style={{ marginBottom: '0.85rem' }}>
       <div style={{ display: 'flex', height: '12px', borderRadius: '4px', overflow: 'hidden', background: 'rgba(138,151,165,0.18)' }}>
         {wPct  > 0 && <div style={{ width: `${wPct}%`,  background: 'var(--cdl-ok)',        flexShrink: 0 }} />}
+        {rvPct > 0 && <div style={{ width: `${rvPct}%`, background: '#b94f1e',               flexShrink: 0 }} />}
         {paPct > 0 && <div style={{ width: `${paPct}%`, background: '#e6a817',               flexShrink: 0 }} />}
         {lPct  > 0 && <div style={{ width: `${lPct}%`,  background: 'var(--cdl-warn)',       flexShrink: 0 }} />}
         {ndPct > 0 && <div style={{ width: `${ndPct}%`, background: 'rgba(138,151,165,0.4)', flexShrink: 0 }} />}
       </div>
       <div style={{ display: 'flex', gap: '0.75rem', fontSize: '0.73rem', flexWrap: 'wrap', marginTop: '5px' }}>
-        {counts.WIN     > 0 && <span style={{ color: 'var(--cdl-ok)'   }}>WIN {counts.WIN} ({fmt(counts.WIN, dn)})</span>}
-        {counts.PARTIAL > 0 && <span style={{ color: '#a07010'         }}>PARTIAL {counts.PARTIAL} ({fmt(counts.PARTIAL, dn)})</span>}
-        {counts.LEAK    > 0 && <span style={{ color: 'var(--cdl-warn)' }}>LEAK {counts.LEAK} ({fmt(counts.LEAK, dn)})</span>}
-        {counts['NO-DATA'] > 0 && <span style={{ color: 'var(--cdl-muted)' }}>NO-DATA {counts['NO-DATA']}</span>}
+        {counts.WIN            > 0 && <span style={{ color: 'var(--cdl-ok)'   }}>WIN {counts.WIN} ({fmt(counts.WIN, dn)})</span>}
+        {(counts.REVIEW ?? 0)  > 0 && <span style={{ color: '#b94f1e', fontWeight: 700 }}>⚠ REVIEW {counts.REVIEW} ({fmt(counts.REVIEW!, dn)})</span>}
+        {counts.PARTIAL        > 0 && <span style={{ color: '#a07010'         }}>PARTIAL {counts.PARTIAL} ({fmt(counts.PARTIAL, dn)})</span>}
+        {counts.LEAK           > 0 && <span style={{ color: 'var(--cdl-warn)' }}>LEAK {counts.LEAK} ({fmt(counts.LEAK, dn)})</span>}
+        {counts['NO-DATA']     > 0 && <span style={{ color: 'var(--cdl-muted)' }}>NO-DATA {counts['NO-DATA']}</span>}
         <span style={{ color: 'var(--cdl-muted)', marginLeft: 'auto' }}>n={n} · graded {dn}</span>
       </div>
     </div>
@@ -286,6 +292,7 @@ function DrillPanel({ panel, onClose }: { panel: PanelData; onClose: () => void 
   const isNegate  = panel.recType === 'NEGATE_TERM' || panel.recType === 'NEGATE_TARGET'
   const isBid     = panel.recType === 'BID_ADJUST'
   const hasPerRec = panel.perRec && panel.perRec.length > 0
+  const hasGpDelta = panel.medianGpDelta != null
 
   return (
     <div style={{
@@ -313,16 +320,33 @@ function DrillPanel({ panel, onClose }: { panel: PanelData; onClose: () => void 
       {/* Stacked bar */}
       <StackedBarPanel counts={panel.counts} n={panel.n} dn={panel.dn} />
 
-      {/* Effect: median € stopped */}
+      {/* Effect: GP Δ (primary effect column, L3.1) */}
+      {hasGpDelta && (
+        <div style={{ marginBottom: '0.7rem', fontSize: '0.83rem' }}>
+          <span style={{ color: 'var(--cdl-muted)', fontWeight: 700 }}>Median GP Δ: </span>
+          <span style={{
+            fontWeight: 800, fontVariantNumeric: 'tabular-nums',
+            color: panel.medianGpDelta! >= 0 ? 'var(--cdl-ok)' : '#b94f1e',
+          }}>
+            {panel.medianGpDelta! >= 0 ? '+' : ''}{panel.medianGpDelta!.toFixed(2)}
+          </span>
+          <span style={{ color: 'var(--cdl-muted)', fontWeight: 400, marginLeft: '0.35rem', fontSize: '0.76rem' }}>
+            {panel.gpDeltaCurrency ?? 'local ccy'}{panel.gpDeltaCount ? ` · n=${panel.gpDeltaCount}` : ''}
+          </span>
+        </div>
+      )}
+
+      {/* Effect: median € stopped (secondary, negates) */}
       {isNegate && panel.medianEurosStopped != null && (
         <div style={{ marginBottom: '0.7rem', fontSize: '0.83rem' }}>
-          <span style={{ color: 'var(--cdl-muted)', fontWeight: 700 }}>Median € stopped: </span>
+          <span style={{ color: 'var(--cdl-muted)', fontWeight: 700 }}>Median spend stopped: </span>
           <span style={{
             fontWeight: 800, fontVariantNumeric: 'tabular-nums',
             color: panel.medianEurosStopped >= 0 ? 'var(--cdl-ok)' : 'var(--cdl-warn)',
           }}>
-            €{panel.medianEurosStopped.toFixed(2)}
+            {panel.medianEurosStopped.toFixed(2)}
           </span>
+          <span style={{ color: 'var(--cdl-muted)', fontWeight: 400, marginLeft: '0.35rem', fontSize: '0.76rem' }}>local ccy</span>
         </div>
       )}
 
@@ -343,14 +367,14 @@ function DrillPanel({ panel, onClose }: { panel: PanelData; onClose: () => void 
             Per-rec (n&lt;5)
           </div>
           {panel.perRec!.map((r, i) => {
-            const vc = r.verdict === 'WIN' ? 'var(--cdl-ok)' : r.verdict === 'PARTIAL' ? '#a07010' : r.verdict === 'LEAK' ? 'var(--cdl-warn)' : 'var(--cdl-muted)'
+            const vc = r.verdict === 'WIN' ? 'var(--cdl-ok)' : r.verdict === 'PARTIAL' ? '#a07010' : r.verdict === 'REVIEW' ? '#b94f1e' : r.verdict === 'LEAK' ? 'var(--cdl-warn)' : 'var(--cdl-muted)'
             return (
               <div key={i} style={{ fontSize: '0.78rem', display: 'flex', gap: '0.45rem', marginBottom: '2px', flexWrap: 'wrap' }}>
                 <span style={{ color: 'var(--cdl-muted)', fontVariantNumeric: 'tabular-nums' }}>#{r.id}</span>
                 <span style={{ fontWeight: 600, color: 'var(--cdl-muted)' }}>[{r.market}]</span>
                 {r.direction && <span style={{ color: 'var(--cdl-blue)' }}>[{r.direction}]</span>}
                 <span style={{ fontWeight: 700, color: vc }}>{r.verdict}</span>
-                {r.note && <span style={{ color: 'var(--cdl-muted)', fontStyle: 'italic' }}>{r.note}</span>}
+                {r.note && <span style={{ color: r.verdict === 'REVIEW' ? '#b94f1e' : 'var(--cdl-muted)', fontStyle: 'italic' }}>{r.note}</span>}
               </div>
             )
           })}
@@ -440,6 +464,20 @@ function AcosContributionPanel({ data }: { data: AcosContributionResult }) {
           return (
             <div key={mkt} style={{ fontSize: '0.78rem', display: 'flex', gap: '0.3rem', flexWrap: 'wrap', alignItems: 'baseline' }}>
               <span style={{ fontWeight: 700, fontSize: '0.7rem', color: 'var(--cdl-muted)', textTransform: 'uppercase', minWidth: '2.5rem' }}>{mkt}</span>
+              {e.rolling_acos != null && e.band_position != null && (
+                <span style={{
+                  fontWeight: 700, fontSize: '0.72rem',
+                  color: e.band_position === 'below' ? '#1a7f4e'
+                       : e.band_position === 'in'    ? '#009485'
+                       : '#b94f1e',
+                }}>
+                  {(e.rolling_acos * 100).toFixed(1)}%
+                  {' · '}
+                  {e.band_position === 'below' ? 'push zone'
+                   : e.band_position === 'in'  ? 'in band'
+                   : 'repair zone'}
+                </span>
+              )}
               <span>{'−'}{fmtAmt(e.spend_stopped, e.currency)}{' dead spend removed ('}{fmtPts(e.est_acos_points)}{')'}</span>
               {[fmtD(e.bid_raise_delta_med, 'raises'), fmtD(e.bid_cut_delta_med, 'cuts')].filter(Boolean).map((s, i) => (
                 <span key={i} style={{ color: 'var(--cdl-muted)' }}>· {s}</span>

@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 import { computeScorecard, computeAcosContribution, ADAPTATIONS } from '@/app/lib/scorecard'
-import type { TypeSection, AcosContributionResult } from '@/app/lib/scorecard'
+import type { TypeSection, AcosContributionResult, JudgedRow } from '@/app/lib/scorecard'
 import { HorizonFilter } from './HorizonFilter'
 import ScorecardClient from './ScorecardClient'
 import type {
@@ -168,19 +168,20 @@ function parseBidAcosPoints(rawRows: RawRow[], horizon: string, market?: string)
 }
 
 function buildPanelData(
-  sections:  TypeSection[],
-  rawRows:   RawRow[],
-  recType:   string,
-  direction: 'CUT' | 'RAISE' | undefined,
-  market:    string | undefined,
-  horizon:   string,
-  label:     string,
-  panelKey:  string,
+  sections:    TypeSection[],
+  rawRows:     RawRow[],
+  judgedRows:  JudgedRow[],
+  recType:     string,
+  direction:   'CUT' | 'RAISE' | undefined,
+  market:      string | undefined,
+  horizon:     string,
+  label:       string,
+  panelKey:    string,
 ): PanelData {
   const section = sections.find(s => s.recType === recType)
   const hGroups = !section ? [] : (horizon === 'all' ? section.horizons : section.horizons.filter(h => h.horizon === horizon))
 
-  let win = 0, partial = 0, leak = 0, nodata = 0, totalN = 0
+  let win = 0, partial = 0, leak = 0, nodata = 0, review = 0, totalN = 0
   const perRecEntries: PanelPerRec[] = []
 
   for (const hg of hGroups) {
@@ -190,35 +191,35 @@ function buildPanelData(
         if (sp) {
           if (market) {
             const mkt = sp.byMarket.find(m => m.market === market)
-            if (mkt) { win += mkt.counts.WIN; partial += mkt.counts.PARTIAL; leak += mkt.counts.LEAK; nodata += mkt.counts['NO-DATA']; totalN += mkt.n }
-          } else { win += sp.counts.WIN; partial += sp.counts.PARTIAL; leak += sp.counts.LEAK; nodata += sp.counts['NO-DATA']; totalN += sp.n }
+            if (mkt) { win += mkt.counts.WIN; partial += mkt.counts.PARTIAL; review += (mkt.counts.REVIEW ?? 0); leak += mkt.counts.LEAK; nodata += mkt.counts['NO-DATA']; totalN += mkt.n }
+          } else { win += sp.counts.WIN; partial += sp.counts.PARTIAL; review += (sp.counts.REVIEW ?? 0); leak += sp.counts.LEAK; nodata += sp.counts['NO-DATA']; totalN += sp.n }
         }
       } else if (hg.perRec) {
         const rel = hg.perRec.filter(r => r.direction === direction && (!market || r.market === market))
         for (const r of rel) {
           perRecEntries.push({ id: r.id, market: r.market, direction: r.direction, verdict: r.verdict, note: r.note })
           totalN++
-          if (r.verdict === 'WIN') win++; else if (r.verdict === 'PARTIAL') partial++; else if (r.verdict === 'LEAK') leak++; else nodata++
+          if (r.verdict === 'WIN') win++; else if (r.verdict === 'PARTIAL') partial++; else if (r.verdict === 'REVIEW') review++; else if (r.verdict === 'LEAK') leak++; else nodata++
         }
       }
     } else {
       if (hg.byMarket.length > 0) {
         if (market) {
           const mkt = hg.byMarket.find(m => m.market === market)
-          if (mkt) { win += mkt.counts.WIN; partial += mkt.counts.PARTIAL; leak += mkt.counts.LEAK; nodata += mkt.counts['NO-DATA']; totalN += mkt.n }
-        } else { win += hg.counts.WIN; partial += hg.counts.PARTIAL; leak += hg.counts.LEAK; nodata += hg.counts['NO-DATA']; totalN += hg.n }
+          if (mkt) { win += mkt.counts.WIN; partial += mkt.counts.PARTIAL; review += (mkt.counts.REVIEW ?? 0); leak += mkt.counts.LEAK; nodata += mkt.counts['NO-DATA']; totalN += mkt.n }
+        } else { win += hg.counts.WIN; partial += hg.counts.PARTIAL; review += (hg.counts.REVIEW ?? 0); leak += hg.counts.LEAK; nodata += hg.counts['NO-DATA']; totalN += hg.n }
       } else if (hg.perRec) {
         const rel = market ? hg.perRec.filter(r => r.market === market) : hg.perRec
         for (const r of rel) {
           perRecEntries.push({ id: r.id, market: r.market, direction: r.direction, verdict: r.verdict, note: r.note })
           totalN++
-          if (r.verdict === 'WIN') win++; else if (r.verdict === 'PARTIAL') partial++; else if (r.verdict === 'LEAK') leak++; else nodata++
+          if (r.verdict === 'WIN') win++; else if (r.verdict === 'PARTIAL') partial++; else if (r.verdict === 'REVIEW') review++; else if (r.verdict === 'LEAK') leak++; else nodata++
         }
       }
     }
   }
 
-  const counts: PanelCounts = { WIN: win, PARTIAL: partial, LEAK: leak, 'NO-DATA': nodata }
+  const counts: PanelCounts = { WIN: win, PARTIAL: partial, LEAK: leak, 'NO-DATA': nodata, REVIEW: review }
   const dn = totalN - nodata
 
   // Median € stopped (NEGATE types)
@@ -241,9 +242,27 @@ function buildPanelData(
     }
   }
 
+  // Median GP Δ — from judged rows scoped to this panel
+  const gpRows = judgedRows.filter(r =>
+    r.rec_type === recType &&
+    (horizon === 'all' || r.horizon === horizon) &&
+    (!market    || r.country_code  === market) &&
+    (!direction || r.judgment.direction === direction) &&
+    r.judgment.gp_delta != null
+  )
+  const gpDeltas      = gpRows.map(r => r.judgment.gp_delta as number)
+  const medianGpDelta = medianOfNonNull(gpDeltas)
+  const gpDeltaCount  = gpDeltas.length
+  const gpDeltaCurrency = market
+    ? rawRows.find(r => r.rec_type === recType && r.country_code === market)?.currency_code
+    : undefined
+
   return {
     key: panelKey, label, recType, counts, n: totalN, dn,
     medianEurosStopped,
+    medianGpDelta:    gpDeltas.length > 0 ? medianGpDelta : undefined,
+    gpDeltaCount:     gpDeltaCount  > 0  ? gpDeltaCount  : undefined,
+    gpDeltaCurrency:  gpDeltaCurrency,
     acosData,
     perRec:         perRecEntries.length > 0 ? perRecEntries : undefined,
     adaptationNote: ADAPTATIONS[recType] ?? undefined,
@@ -281,7 +300,22 @@ export default async function ScorecardPage({
     ORDER BY r.rec_type, o.horizon, p.country_code, r.id
   `) as unknown as RawRow[]
 
-  const { sections, hero, judged } = computeScorecard(rawRows)
+  // Market rolling ACoS (last 30 days) for GP-band judgment
+  const acosMarketRows = (await sql`
+    SELECT p.country_code,
+           (SUM(acd.cost) / NULLIF(SUM(acd.sales_14d), 0))::float AS rolling_acos
+    FROM amazon_campaign_daily acd
+    JOIN amazon_profiles       p ON p.profile_id = acd.profile_id
+    WHERE acd.date >= CURRENT_DATE - INTERVAL '30 days'
+    GROUP BY p.country_code
+  `) as unknown as { country_code: string; rolling_acos: number | null }[]
+
+  const marketRollingAcos: Record<string, number> = {}
+  for (const r of acosMarketRows) {
+    if (r.rolling_acos != null) marketRollingAcos[r.country_code] = Number(r.rolling_acos)
+  }
+
+  const { sections, hero, judged } = computeScorecard(rawRows, marketRollingAcos)
   const matureMap                   = buildMatureMap(rawRows)
 
   // Campaign-daily sales: market → YYYY-MM → total ad sales (for ACoS-points translation)
@@ -302,7 +336,7 @@ export default async function ScorecardPage({
     marketMonthSales[s.country_code][s.month] = Number(s.total_sales)
   }
 
-  const acosContribution = computeAcosContribution(judged, marketMonthSales)
+  const acosContribution = computeAcosContribution(judged, marketMonthSales, marketRollingAcos)
 
   // ── Tile promise subtitles ──────────────────────────────────────────────────────
   const TILE_SUBTITLES: Record<string, string> = {
@@ -346,7 +380,7 @@ export default async function ScorecardPage({
   for (const def of TILE_DEFS) {
     const panelKey = `tile:${def.key}`
     panelDataMap[panelKey] = {
-      ...buildPanelData(sections, rawRows, def.recType, def.direction, undefined, horizon, def.label, panelKey),
+      ...buildPanelData(sections, rawRows, judged, def.recType, def.direction, undefined, horizon, def.label, panelKey),
       subtitle: TILE_SUBTITLES[def.key],
     }
   }
@@ -354,7 +388,7 @@ export default async function ScorecardPage({
   for (const row of MATRIX_ROWS) {
     for (const mkt of matrixMarkets) {
       const panelKey = `cell:${row.key}:${mkt}`
-      panelDataMap[panelKey] = buildPanelData(sections, rawRows, row.recType, row.direction, mkt, horizon, `${row.label} · ${mkt}`, panelKey)
+      panelDataMap[panelKey] = buildPanelData(sections, rawRows, judged, row.recType, row.direction, mkt, horizon, `${row.label} · ${mkt}`, panelKey)
     }
   }
 
