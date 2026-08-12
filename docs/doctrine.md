@@ -223,6 +223,21 @@ flowchart TD
 
 **Default bid fallback in push-structure**: `evidence.proposed_default_bid ?? max(keywords[].bid) ?? 0.75`.
 
+### Cluster-Room Market Mapping (`CLUSTER_LANG_MAP`)
+
+Controls which profiles participate in `cluster_auto_room`, `cluster_kw_room`, and `orphan_kw_room` generation phases. Absent profiles are skipped with a log line (`cluster-room phases skipped — no language mapping for profile <id>`).
+
+| Profile ID | Market | Language | Status |
+|---|---|---|---|
+| 2263723137827296 | ES (Spain) | spa | active |
+| 139446882235960 | US | eng | active |
+| 1711934819800765 | UK | eng | active |
+| 2213278747143677 | DE (Germany) | eng | active — onboarded 2026-08-12; three rooms approved (Dreams\, Creativity & Art · Emotions & Feelings · Wellbeing & Life's Journey); Inspiring Real Stories held back pending verdict |
+| 3035560362970447 | FR (France) | — | **unmapped by deliberate ruling** — pending DE verdict |
+| 2286455750996728 | IT (Italy) | — | **unmapped by deliberate ruling** — pending DE verdict |
+
+Budget default: `ev.budget ?? 3.00` (DAILY). All cluster rooms are born PAUSED. Christian enables in console.
+
 ---
 
 ## d. GRADING

@@ -2102,6 +2102,7 @@ const CLUSTER_LANG_MAP = {
   '2263723137827296': 'spa',  // ES profile (Spain)
   '139446882235960':  'eng',  // US profile
   '1711934819800765': 'eng',  // UK profile
+  '2213278747143677': 'eng',  // DE profile (Germany)
 };
 
 // ── cluster_auto_room entry guard ────────────────────────────────────────────
