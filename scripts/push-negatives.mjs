@@ -139,10 +139,16 @@ for (const rec of recs) {
   const evidence    = typeof rec.evidence === 'string'
     ? JSON.parse(rec.evidence)
     : rec.evidence;
+  // Surgical doctrine: only push to campaigns of negate-scoped placements.
+  // placements with negate:false are converting — excluded from negation scope.
+  // Legacy recs without negate annotation are treated as fully-scoped (negate !== false).
+  const _scopedPlacs = Array.isArray(evidence?.placements)
+    ? evidence.placements.filter((p) => p.negate !== false)
+    : [];
   const campaignIds = Array.isArray(evidence?.campaign_ids) && evidence.campaign_ids.length > 0
     ? evidence.campaign_ids
-    : Array.isArray(evidence?.placements)
-      ? [...new Set(evidence.placements.map((p) => p.campaign_id).filter(Boolean))]
+    : _scopedPlacs.length > 0
+      ? [...new Set(_scopedPlacs.map((p) => p.campaign_id).filter(Boolean))]
       : [];
 
   console.log('─'.repeat(60));
@@ -180,6 +186,11 @@ for (const rec of recs) {
   }
 
   console.log(`Campaigns  : ${campaignIds.join(', ')}`);
+  const _allPlacs = Array.isArray(evidence?.placements) ? evidence.placements : [];
+  if (_scopedPlacs.length < _allPlacs.length) {
+    const _keptCount = _allPlacs.filter((p) => p.negate === false).length;
+    console.log(`Scope      : ${_scopedPlacs.length} negate-scoped, ${_keptCount} converting (kept — surgical)`);
+  }
   console.log('');
 
   // One body batching all campaign_ids for this term

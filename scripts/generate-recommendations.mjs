@@ -384,35 +384,42 @@ for (const row of termRows) {
 
   let salesAtRisk = false;
 
-  if (orders === 0 && spend >= negate_min_spend && clicks >= negate_min_clicks) {
-    // Zero-order negations — clean negate, flow as today
-    recType = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
-  } else if (
-    orders > 0 && spend >= negate_min_spend && clicks >= negate_min_clicks &&
-    !((!ASIN_SHAPE.test(row.search_term) && orders >= harvest_min_orders && acos !== null && acos < target_acos) ||
-      (ASIN_SHAPE.test(row.search_term)  && orders >= promote_asin_min_orders && acos !== null && acos < target_acos))
-  ) {
-    // L3.2 [REVIEW]: meets negate thresholds, has orders, but doesn't qualify for promote.
-    // Christian sees the sales risk before ruling — status DRAFT, proposal prefixed '[REVIEW]'.
-    recType    = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
-    salesAtRisk = true;
-  } else if (
-    !ASIN_SHAPE.test(row.search_term) &&
-    orders >= harvest_min_orders &&
-    acos !== null &&
-    acos < target_acos
-  ) {
-    recType = 'PROMOTE_TERM';
-  } else if (
-    ASIN_SHAPE.test(row.search_term) &&
-    orders >= promote_asin_min_orders &&
-    acos !== null &&
-    acos < target_acos
-  ) {
-    recType = 'PROMOTE_ASIN';
+  if (spend >= negate_min_spend && clicks >= negate_min_clicks) {
+    // Surgical doctrine: per-placement evaluation.
+    // Placements with orders > 0 are excluded from negation scope — only zero-order
+    // placements get negated. Cards where all placements convert are silently skipped.
+    const _negPlacs = row.placements.filter((p) => p.orders === 0);
+    const _qualPromote =
+      (!ASIN_SHAPE.test(row.search_term) && orders >= harvest_min_orders && acos !== null && acos < target_acos) ||
+      (ASIN_SHAPE.test(row.search_term)  && orders >= promote_asin_min_orders && acos !== null && acos < target_acos);
+    if (_negPlacs.length > 0 && !_qualPromote) {
+      // At least one zero-order placement → surgical negate card.
+      recType     = ASIN_SHAPE.test(row.search_term) ? 'NEGATE_TARGET' : 'NEGATE_TERM';
+      // [REVIEW] tripwire: to-be-negated placement has orders — shouldn't happen by construction.
+      salesAtRisk = _negPlacs.some((p) => p.orders > 0);
+    }
+    // _negPlacs.length === 0 → all placements convert → no negate card → fall through to promote.
+  }
+  if (recType === null) {
+    if (
+      !ASIN_SHAPE.test(row.search_term) &&
+      orders >= harvest_min_orders &&
+      acos !== null &&
+      acos < target_acos
+    ) {
+      recType = 'PROMOTE_TERM';
+    } else if (
+      ASIN_SHAPE.test(row.search_term) &&
+      orders >= promote_asin_min_orders &&
+      acos !== null &&
+      acos < target_acos
+    ) {
+      recType = 'PROMOTE_ASIN';
+    }
   }
 
   if (recType !== null) {
+    const _isNeg = recType === 'NEGATE_TERM' || recType === 'NEGATE_TARGET';
     candidates.push({
       recType,
       searchTerm: row.search_term,
@@ -421,7 +428,14 @@ for (const row of termRows) {
       orders,
       sales,
       acos,
-      placements:  row.placements,
+      // For negate types: annotate each placement with negate:bool and kept_reason for converters.
+      placements: _isNeg
+        ? row.placements.map((p) => ({
+            ...p,
+            negate: p.orders === 0,
+            ...(p.orders > 0 ? { kept_reason: 'converting' } : {}),
+          }))
+        : row.placements,
       salesAtRisk,
     });
   }
@@ -690,16 +704,23 @@ if (candidates.length > 0) {
     let evidence;
 
     if (finalRecType === 'NEGATE_TERM') {
-      // L3.2: [REVIEW] prefix for salesAtRisk; zero-order path unchanged.
-      const _negPrefix = c.salesAtRisk
-        ? `[REVIEW] ` : '';
-      const _negOrders = c.salesAtRisk
-        ? `${c.orders} order(s) — saves ~${spendFmt} spend, risks ~${currSym}${c.sales.toFixed(2)} sales`
-        : '0 orders';
-      proposal = `${_negPrefix}Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, ${_negOrders} in ${win}.`;
-      const primaryPlacement = c.placements.reduce(
+      // Surgical doctrine: split annotated placements into negate (zero-order) and keep (converting).
+      const _ntNegPlacs  = c.placements.filter((p) => p.negate !== false); // negate:true or legacy unannotated
+      const _ntKeepPlacs = c.placements.filter((p) => p.negate === false);  // explicitly kept (converting)
+      const _ntNegSpend  = _ntNegPlacs.reduce((s, p) => s + p.spend, 0);
+      const _ntKeepSales = _ntKeepPlacs.reduce((s, p) => s + p.sales, 0);
+      const _ntIsSurgical = _ntKeepPlacs.length > 0;
+      // [REVIEW] tripwire: fires only if a to-be-negated placement has orders (shouldn't happen by construction).
+      const _negPrefix = c.salesAtRisk ? '[REVIEW] ' : '';
+      if (_ntIsSurgical) {
+        proposal = `${_negPrefix}Negate '${c.searchTerm}': negate in ${_ntNegPlacs.length} placement(s) (${currSym}${_ntNegSpend.toFixed(2)} waste); keeping ${_ntKeepPlacs.length} converting placement(s) (${currSym}${_ntKeepSales.toFixed(2)} sales) in ${win}.`;
+      } else {
+        proposal = `${_negPrefix}Negate '${c.searchTerm}': ${spendFmt} spend, ${c.clicks} clicks, 0 orders in ${win}.`;
+      }
+      const _ntNegBase = _ntNegPlacs.length > 0 ? _ntNegPlacs : c.placements;
+      const primaryPlacement = _ntNegBase.reduce(
         (max, p) => (p.spend > max.spend ? p : max),
-        c.placements[0],
+        _ntNegBase[0],
       );
       evidence = {
         window_start:       windowStart,
@@ -709,7 +730,7 @@ if (candidates.length > 0) {
         orders:             c.orders,
         sales:              c.sales,
         acos:               c.acos,
-        placements:         c.placements,
+        placements:         c.placements,  // annotated: negate:bool, kept_reason on converters
         primary_placement:  primaryPlacement,
         params_used:        params,
         ...(c.salesAtRisk ? { sales_at_risk: c.sales } : {}),
@@ -717,14 +738,23 @@ if (candidates.length > 0) {
       };
     } else if (finalRecType === 'NEGATE_TARGET') {
       // ASIN-shaped term: keyword negation cannot block product-targeting traffic.
-      // L3.2: [REVIEW] prefix for salesAtRisk.
-      const _ntPrefix  = c.salesAtRisk ? '[REVIEW] ' : '';
-      const _ntRiskStr = c.salesAtRisk
-        ? ` — saves ~${spendFmt} spend, risks ~${currSym}${c.sales.toFixed(2)} sales` : '';
-      proposal = `${_ntPrefix}Negative product target for ${c.searchTerm.toUpperCase()}${_ntRiskStr} — keyword negation cannot block product-targeting traffic.`;
-      const primaryPlacement = c.placements.reduce(
+      // Surgical doctrine: split into negate (zero-order) and keep (converting) placements.
+      const _ntaNegPlacs  = c.placements.filter((p) => p.negate !== false);
+      const _ntaKeepPlacs = c.placements.filter((p) => p.negate === false);
+      const _ntaNegSpend  = _ntaNegPlacs.reduce((s, p) => s + p.spend, 0);
+      const _ntaKeepSales = _ntaKeepPlacs.reduce((s, p) => s + p.sales, 0);
+      const _ntaIsSurgical = _ntaKeepPlacs.length > 0;
+      // [REVIEW] tripwire: fires only if a to-be-negated placement has orders (shouldn't happen by construction).
+      const _ntPrefix = c.salesAtRisk ? '[REVIEW] ' : '';
+      if (_ntaIsSurgical) {
+        proposal = `${_ntPrefix}Negative product target for ${c.searchTerm.toUpperCase()}: negate in ${_ntaNegPlacs.length} placement(s) (${currSym}${_ntaNegSpend.toFixed(2)} waste); keeping ${_ntaKeepPlacs.length} converting placement(s) (${currSym}${_ntaKeepSales.toFixed(2)} sales) — keyword negation cannot block product-targeting traffic.`;
+      } else {
+        proposal = `${_ntPrefix}Negative product target for ${c.searchTerm.toUpperCase()} — keyword negation cannot block product-targeting traffic.`;
+      }
+      const _ntaNegBase = _ntaNegPlacs.length > 0 ? _ntaNegPlacs : c.placements;
+      const primaryPlacement = _ntaNegBase.reduce(
         (max, p) => (p.spend > max.spend ? p : max),
-        c.placements[0],
+        _ntaNegBase[0],
       );
       evidence = {
         window_start:       windowStart,
@@ -734,7 +764,7 @@ if (candidates.length > 0) {
         orders:             c.orders,
         sales:              c.sales,
         acos:               c.acos,
-        placements:         c.placements,
+        placements:         c.placements,  // annotated: negate:bool, kept_reason on converters
         primary_placement:  primaryPlacement,
         params_used:        params,
         ...(c.salesAtRisk ? { sales_at_risk: c.sales } : {}),
