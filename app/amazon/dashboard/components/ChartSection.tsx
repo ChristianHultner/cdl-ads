@@ -25,15 +25,16 @@ export default function ChartSection({ markets }: { markets: MarketChartData[] }
       !!m && m.points.some(p => p.sales > 0 || p.spend > 0)
     )
 
-  const [tab, setTab] = useState(active[0]?.country ?? 'ES')
+  const [tab, setTab]             = useState(active[0]?.country ?? 'ES')
+  const [showDaily, setShowDaily]  = useState(false)
   const market = active.find(m => m.country === tab) ?? active[0]
 
   if (!market) return null
 
   return (
     <div style={{ marginBottom: '1.5rem' }}>
-      {/* Tab bar */}
-      <div style={{ display: 'flex', borderBottom: '1px solid #c8dfe9', marginBottom: '0.75rem' }}>
+      {/* Tab bar + daily toggle */}
+      <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #c8dfe9', marginBottom: '0.75rem' }}>
         {active.map(m => {
           const isActive = m.country === tab
           return (
@@ -57,6 +58,19 @@ export default function ChartSection({ markets }: { markets: MarketChartData[] }
             </button>
           )
         })}
+        <label style={{
+          marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+          fontSize: '0.68rem', color: 'var(--cdl-muted)', cursor: 'pointer',
+          paddingRight: '0.5rem', paddingBottom: '0.1rem',
+        }}>
+          <input
+            type="checkbox"
+            checked={showDaily}
+            onChange={e => setShowDaily(e.target.checked)}
+            style={{ cursor: 'pointer', accentColor: 'var(--cdl-blue)' }}
+          />
+          daily
+        </label>
       </div>
 
       {/* Sales + Spend chart */}
@@ -70,7 +84,7 @@ export default function ChartSection({ markets }: { markets: MarketChartData[] }
         }}>
           Sales &amp; Spend · 90 days · {market.currency}
         </div>
-        <SalesSpendChart points={market.points} currency={market.currency} />
+        <SalesSpendChart points={market.points} currency={market.currency} showDaily={showDaily} />
       </div>
 
       {/* ACoS chart */}
@@ -84,7 +98,7 @@ export default function ChartSection({ markets }: { markets: MarketChartData[] }
         }}>
           ACoS · 90 days · target {(market.targetAcos * 100).toFixed(0)}%
         </div>
-        <AcosChart points={market.points} targetAcos={market.targetAcos} />
+        <AcosChart points={market.points} targetAcos={market.targetAcos} showDaily={showDaily} />
       </div>
     </div>
   )

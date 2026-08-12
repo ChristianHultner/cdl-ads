@@ -53,7 +53,7 @@ function segments(
   return result
 }
 
-export default function AcosChart({ points, targetAcos }: { points: ChartPoint[]; targetAcos: number }) {
+export default function AcosChart({ points, targetAcos, showDaily }: { points: ChartPoint[]; targetAcos: number; showDaily: boolean }) {
   if (points.length === 0) {
     return (
       <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
@@ -78,7 +78,7 @@ export default function AcosChart({ points, targetAcos }: { points: ChartPoint[]
   }
 
   const peak = Math.max(...validRoll, targetAcos)
-  const maxV = Math.min(peak * 1.2, 2.5)   // cap at 250% — avoids degenerate scale
+  const maxV = Math.min(peak * 1.3, 2.5)   // cap at 250% — avoids degenerate scale; 1.3× rolling headroom
 
   const refY = ty(targetAcos, maxV)
 
@@ -103,6 +103,12 @@ export default function AcosChart({ points, targetAcos }: { points: ChartPoint[]
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible' }}>
+      <defs>
+        <clipPath id="cdl-ac-clip">
+          <rect x={L} y={T} width={PW} height={PH} />
+        </clipPath>
+      </defs>
+
       {/* Gridlines + Y labels */}
       {yTicks.map((t, i) => (
         <g key={i}>
@@ -129,9 +135,9 @@ export default function AcosChart({ points, targetAcos }: { points: ChartPoint[]
       <line x1={L} y1={T} x2={L} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
       <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
 
-      {/* Daily faint lines */}
-      {dailySegs.map((seg, i) => (
-        <path key={i} d={polyline(seg)} fill="none" stroke="var(--cdl-blue)" strokeWidth={1} strokeOpacity={0.25} />
+      {/* Daily faint lines — hidden by default; clipped to plot area when shown */}
+      {showDaily && dailySegs.map((seg, i) => (
+        <path key={i} d={polyline(seg)} fill="none" stroke="var(--cdl-blue)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ac-clip)" />
       ))}
 
       {/* Rolling bold lines */}

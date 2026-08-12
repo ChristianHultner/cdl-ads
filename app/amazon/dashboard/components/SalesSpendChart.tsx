@@ -41,7 +41,7 @@ function rollingAvg(vals: number[], window: number): number[] {
 
 const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
 
-export default function SalesSpendChart({ points, currency }: { points: ChartPoint[]; currency: string }) {
+export default function SalesSpendChart({ points, currency, showDaily }: { points: ChartPoint[]; currency: string; showDaily: boolean }) {
   if (points.length === 0) {
     return (
       <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
@@ -58,11 +58,9 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
   const rSpendPlot   = rollSpendAll.slice(-PLOT_DAYS)
   const n            = plot.length
 
-  const sym  = SYM[currency] ?? currency
-  const maxV = niceMax(Math.max(
-    ...rSalesPlot, ...rSpendPlot,
-    ...plot.map(p => p.sales), ...plot.map(p => p.spend),
-  ))
+  const sym     = SYM[currency] ?? currency
+  const rollMax = Math.max(...rSalesPlot, ...rSpendPlot)
+  const maxV    = niceMax(rollMax * 1.3)   // y-axis driven by rolling series only
 
   // Daily faint points
   const dailySalePts  = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.sales, maxV) }))
@@ -98,6 +96,12 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible' }}>
+      <defs>
+        <clipPath id="cdl-ss-clip">
+          <rect x={L} y={T} width={PW} height={PH} />
+        </clipPath>
+      </defs>
+
       {/* Y gridlines + labels */}
       {yTicks.map((t, i) => (
         <g key={i}>
@@ -119,11 +123,15 @@ export default function SalesSpendChart({ points, currency }: { points: ChartPoi
       <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
 
       {/* GP shaded fill — the gap between sales and spend IS the Ad GP */}
-      <path d={gpFillPath} fill="#16a34a" fillOpacity={0.15} stroke="none" />
+      <path d={gpFillPath} fill="#16a34a" fillOpacity={0.15} stroke="none" clipPath="url(#cdl-ss-clip)" />
 
-      {/* Daily faint lines (behind rolling) */}
-      <path d={polyline(dailySpendPts)} fill="none" stroke="#e8825c" strokeWidth={1}   strokeOpacity={0.25} />
-      <path d={polyline(dailySalePts)}  fill="none" stroke="#0093d0" strokeWidth={1}   strokeOpacity={0.25} />
+      {/* Daily faint lines — hidden by default; clipped to plot area when shown */}
+      {showDaily && (
+        <>
+          <path d={polyline(dailySpendPts)} fill="none" stroke="#e8825c" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
+          <path d={polyline(dailySalePts)}  fill="none" stroke="#0093d0" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
+        </>
+      )}
 
       {/* Rolling bold lines */}
       <path d={polyline(rollSpendPts)} fill="none" stroke="#e8825c" strokeWidth={2}   strokeOpacity={0.85} />
