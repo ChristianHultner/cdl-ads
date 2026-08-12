@@ -1,0 +1,403 @@
+<!-- FRAME RULE: Any frame that touches generation/push/grading logic MUST update this file in the same commit. -->
+
+# doctrine.md — CdL Ads Engine Decision-Tree Spec
+
+> **Extracted from code as it EXISTS on 2026-08-12.**
+> Where code contradicts a section header, the code's truth is recorded with a ⚠ note.
+>
+> **FRAME RULE: Any frame that touches generation/push/grading logic MUST update this file in the same commit.**
+
+Sources: `scripts/generate-recommendations.mjs` · `scripts/stamp-outcomes.mjs` · `scripts/scorecard.mjs` · `scripts/push-negatives.mjs` · `scripts/push-negative-targets.mjs` · `scripts/push-keywords.mjs` · `scripts/push-bid-adjustments.mjs` · `scripts/push-structure.mjs` · `app/amazon/recommendations/actions.ts` · `app/lib/rec-scope.ts`
+
+---
+
+## a. CANDIDATE PIPELINE
+
+### Flowchart
+
+```mermaid
+flowchart TD
+    A([amazon_search_term_daily\nprofile_id, date ∈ window]) -->|GROUP BY search_term,\ncampaign_id, ad_group_id| B[Aggregate rows]
+    B -->|Roll up to term-level| C[termRow:\nspend · clicks · orders · sales\nisTargeting · placements list]
+
+    C --> D{Negate gate:\nspend ≥ negate_min_spend\nAND clicks ≥ negate_min_clicks}
+    D -- MISS --> G
+    D -- HIT --> E[Surgical split:\n_negPlacs = placements where orders = 0\n_qualPromote = would term qualify to promote?\n  text: orders ≥ harvest_min_orders AND acos < target_acos\n  ASIN: orders ≥ promote_asin_min_orders AND acos < target_acos]
+
+    E --> F{_negPlacs.length > 0\nAND NOT _qualPromote?}
+    F -- NO: all convert\nor promote-eligible --> G
+    F -- YES --> F1{ASIN_SHAPE?\n/^\u202809\u2028{9\u2028}[0-9xX]\n|b0[a-z0-9]{8\u2028}$/i}
+    F1 -- YES --> NEGTGT[recType = NEGATE_TARGET\n⚠ salesAtRisk tripwire set here\nsee FINDINGS #1]
+    F1 -- NO --> NEGTERM[recType = NEGATE_TERM\n⚠ salesAtRisk tripwire set here\nsee FINDINGS #1]
+
+    G{recType still null?\nPromote gate} --> H{NOT ASIN shape\nAND orders ≥ harvest_min_orders\nAND acos ≠ null\nAND acos < target_acos}
+    H -- YES --> PROMTERM[recType = PROMOTE_TERM]
+    H -- NO --> I{ASIN shape\nAND orders ≥ promote_asin_min_orders\nAND acos ≠ null\nAND acos < target_acos}
+    I -- YES --> PROMASIN[recType = PROMOTE_ASIN]
+    I -- NO --> NOCANDIDATE([no candidate — skip term])
+
+    NEGTERM & NEGTGT & PROMTERM & PROMASIN --> J[candidate assembled]
+
+    J --> K{PROMOTE_ASIN:\nalready ENABLED target\nin amazon_targets for this ASIN?}
+    K -- YES --> SKIPTAR([skip: already targeted])
+    K -- NO-or-not-ASIN --> L{PROMOTE_TERM:\nterm already EXACT ENABLED keyword\nin resolved destination group?}
+    L -- YES --> SKIPEXACT([skip: already exact in destination])
+    L -- NO-or-not-PT --> M[Idempotency fetch:\nrecommendations WHERE profile_id + target_text\nEXCLUDING REJECTED with\nreject_reason = 'superseded—surgical doctrine']
+
+    M --> N{status in DRAFT\nAPPROVED PUSHED?}
+    N -- YES → openSet --> SKIPOPEN([skip: existing open rec])
+    N -- NO --> O{status in REJECTED\nor HELD?}
+    O -- YES → rejectedSet --> SKIPREJ([skip: rejected/held])
+    O -- NO --> P([INSERT recommendations\nstatus = DRAFT])
+```
+
+### Legend
+
+**Evaluation window**
+`windowEnd = today − params.negate_attribution_buffer_days` (days);
+`windowStart = windowEnd − params.negate_window_days` (days).
+Both are UTC-date ISO slices from `amazon_search_term_daily`.
+
+**ASIN_SHAPE**: `/^([0-9]{9}[0-9xX]|b0[a-z0-9]{8})$/i` — determines NEGATE_TARGET vs NEGATE_TERM and PROMOTE_ASIN vs PROMOTE_TERM.
+
+**Classification order is NEGATE first, then PROMOTE.**
+A term that passes the spend/click floor *and* the promote bars skips negation only if `_qualPromote` is true. If `_qualPromote` is true, no negate card is written; the term falls through to the promote check instead.
+
+**Surgical split (negate path)**
+Placements with `orders > 0` are tagged `negate: false, kept_reason: 'converting'` — they are excluded from push scope.
+Placements with `orders = 0` are tagged `negate: true` — only these reach the API.
+
+**Doctrine-supersession exception**
+The idempotency query excludes `REJECTED` rows where `evidence->>'reject_reason' = 'superseded—surgical doctrine'`. Those recs do not enter `rejectedSet` and thus can be re-proposed when the surgical split has changed.
+
+**v6 BID_ADJUST** runs in Phase 5.5 — a separate sub-phase over `bidEntities` collected from `amazon_targets`, `amazon_keywords`, and `amazon_targets[AUTO]`. It does not use `termRows`. See Section b.
+
+**acos = null when sales = 0** — division-by-zero guard; such terms never qualify for promotion.
+
+**Param names to cite when tuning**:
+`negate_min_spend` · `negate_min_clicks` · `harvest_min_orders` · `promote_asin_min_orders` · `target_acos` (from `amazon_profiles.target_acos`, not engine_parameters) · `negate_attribution_buffer_days` · `negate_window_days` · `promote_bid_cpc_multiplier` · `promote_bid_max`
+
+---
+
+## b. BAND & BID GATES
+
+### Market Zone Computation
+
+```mermaid
+flowchart TD
+    A([Market rolling ACoS\nSUM cost ÷ SUM sales_14d\nlast 30 d from amazon_campaign_daily]) --> B{ACoS\nresolvable?}
+    B -- NULL / no data --> ZONEIN[zone = 'in' by default]
+    B -- YES --> C{rollingAcos\n< bandLow?\nbandLow = target_acos − 0.05}
+    C -- YES --> BELOW[zone = 'below'\nPush zone]
+    C -- NO --> D{rollingAcos\n≤ bandHigh?\nbandHigh = target_acos + 0.05}
+    D -- YES --> IN[zone = 'in'\nOn target]
+    D -- NO --> ABOVE[zone = 'above'\nRepair zone]
+```
+
+> ⚠ At default `target_acos = 0.30` the band is 25–35%.
+> `target_acos` is read from the **profile row** (`amazon_profiles.target_acos`), not from `engine_parameters`.
+> `scorecard.mjs` hardcodes `BAND_LOW = 0.25 / BAND_HIGH = 0.35` for display — diverges from engine if `target_acos` is tuned. See Findings #4.
+
+### CUT Gate (per zone)
+
+```mermaid
+flowchart TD
+    A([Entity qualifies for CUT:\nentity.acos > target_acos\nAND vpc < currentBid\nAND entity.sales > 0]) --> B{marketZone?}
+
+    B -- in or below --> C{entity.acos\n> bandHigh × 2\ne.g. > 70 % at default}
+    B -- above / repair --> D{entity.acos\n> bandHigh\ne.g. > 35 % at default}
+
+    C -- NO: not extraordinary waste --> SKIPC([skip entity])
+    D -- NO: not above ceiling --> SKIPD([skip entity])
+
+    C -- YES --> E
+    D -- YES --> E{entity.clicks\n≥ bidMinClicks × 2\nbidMinClicks = params.v6_min_clicks ?? 30\nso gate = clicks ≥ 60}
+
+    E -- NO: low confidence --> SKIPV([skip entity])
+    E -- YES --> F[step:\nAUTO_STRATEGY → auto_strategy_cut_step ?? 0.7\nother → cut_max_step ?? 0.6\nstepBid = currentBid × step\nproposedBid = max vpc, stepBid, 0.05\nskip if abs delta < 0.02]
+    F --> EMITCUT([EMIT BID_ADJUST CUT])
+```
+
+### RAISE Gate (per zone)
+
+```mermaid
+flowchart TD
+    A([Entity qualifies for RAISE:\nentity.acos < target_acos\nAND vpc > currentBid\nAND entity.sales > 0\nAND entity.clicks > 0]) --> B{marketZone = 'above'?}
+
+    B -- YES: repair zone --> C{Proven winner rule:\nentity.acos ≤ 0.30\nAND entity.orders ≥ 3}
+    C -- NO --> SKIPA([skip entity])
+    C -- YES --> VOLCHK
+
+    B -- NO: in or below --> VOLCHK{Volume floor:\neffectiveMinClicks = below\n  ? floor v6_min_clicks ÷ 2\n  : v6_min_clicks ?? 30\nentity.clicks ≥ effectiveMinClicks\nOR entity.orders ≥ v6_min_orders ?? 3}
+
+    VOLCHK -- NO --> SKIPV([skip entity])
+    VOLCHK -- YES --> F[raiseStepCap:\nbelow-band → 1.75\nin-band → raise_max_step ?? 1.50\nAUTO_STRATEGY → auto_strategy_raise_step ?? 1.30\ncapBid = raise_bid_max ?? 0.75\nstepBid = currentBid × step\nproposedBid = min vpc, stepBid, capBid\nskip if abs delta < 0.02]
+    F --> EMITRAISE([EMIT BID_ADJUST RAISE])
+```
+
+**vpc** = `round((entity.sales / entity.clicks) × target_acos, 2)` — value per click at target ACoS.
+
+**DEFUSE** (TARGET entity only, Phase 5.5):
+`entity.spend > 0 AND entity.sales = 0` →
+`proposedBid = max(round(currentBid × (cut_max_step ?? 0.6), 2), 0.05)`.
+Skip if `|delta| < 0.02`. Tagged as CUT direction in evidence.
+
+**REVIVE** (Phase 7c, `rec_type = BID_ADJUST`, `evidence.kind = 'REVIVE'`):
+Campaign with `spend_30d < 2`, `lifetime_sales > 0 OR lifetime_orders > 0`, `max_enabled_bid < viabilityFloor`.
+`viabilityFloor` = median bid across ENABLED targets+keywords in campaigns with `spend_30d ≥ 10`; fallback = `target_acos`.
+v2: per-entity bids from `amazon_bid_recommendations` (≤ 7 d fresh); else uniform `viabilityFloor`.
+
+**BUDGET_ADJUST** (Phase 7):
+`avg_daily_spend ≥ budget × 0.85 AND acos_30d < target_acos AND orders_30d ≥ 5` →
+`proposedBudget = min(budget × 1.5, budget + 20)`.
+
+**PAUSE_CAMPAIGN** (Phase 7b):
+`spend_30d ≥ 30 AND (acos_30d ≥ 1.0 OR sales_30d = 0)`.
+
+**DORMANT-PAUSE** (Phase 7d, emitted as PAUSE_CAMPAIGN):
+`spend_30d < 2 AND lifetime_impressions < 500 AND lifetime_sales = 0`.
+Hard exclude: campaign name `LIKE 'CDL | SP |%'`.
+Age guard skipped — creation date unavailable (see Findings #10).
+
+---
+
+## c. PUSH LAYER
+
+### Per rec-type → script → scope → receipt shape
+
+```mermaid
+flowchart TD
+
+    subgraph NT["NEGATE_TERM → push-negatives.mjs"]
+    NT1([APPROVED NEGATE_TERM\nlimit: push_max_per_run ?? 20]) --> NT2{Eligibility filter}
+    NT2 -- evidence.is_targeting = true --> NTS1([skip: needs neg targeting clause])
+    NT2 -- ISBN-10 shape /^0-9...9xX$/ --> NTS2([skip: ISBN-10 belt-and-braces])
+    NT2 -- no campaigns in evidence --> NTS3([skip: no campaigns])
+    NT2 -- pass --> NT3[Scope resolution:\ncampaign_ids from negate:true placements only\nconverting placements excluded surgically]
+    NT3 --> NT4[POST /sp/campaignNegativeKeywords\nmatchType: NEGATIVE_EXACT\nstate: ENABLED\ncampaign-level — no adGroupId sent\nreceipt: SP v3 multi-status JSON]
+    end
+
+    subgraph NTA["NEGATE_TARGET → push-negative-targets.mjs"]
+    NTA1([APPROVED NEGATE_TARGET\nlimit: push_max_per_run ?? 20]) --> NTA2{Eligibility:\nmatch ASIN_SHAPE?}
+    NTA2 -- NO --> NTAS([skip: not ASIN shape])
+    NTA2 -- YES --> NTA3[Scope: campaigns from\nnegate:true placements only]
+    NTA3 --> NTA4[POST /sp/campaignNegativeTargets\nexpression: ASIN_SAME_AS target_text.toUpperCase\n⚠ resource + expression type\nto confirm on first live response]
+    end
+
+    subgraph PT["PROMOTE_TERM / CREATIVE_KEYWORD → push-keywords.mjs"]
+    PT1([APPROVED PROMOTE_TERM\nor CREATIVE_KEYWORD\nlimit: push_max_per_run ?? 20]) --> PT2[Load orphan route map\nfrom PUSHED CREATE_STRUCTURE evidences\nevidence.orphan_rec_ids → ad_group_id]
+    PT2 --> PT3{Destination resolution}
+    PT3 -- rec id in orphanRouteMap --> PT3A[Route to structure room\nevidence.created_ad_group_id]
+    PT3 -- CREATIVE_KEYWORD with destination_ad_group_id --> PT3B[Use explicit destination\nbypass tier logic]
+    PT3 -- standard tier --> PT3C[Tier A: placement where\nexactKws ≥ 1\nAND hasAuto = 0\nAND NOT autoCampaign\nsorted by spend desc\nTier B: same but anyKws ≥ 1\nNo tier → skip]
+    PT3A & PT3B & PT3C --> PT4{Duplicate:\nalready EXACT ENABLED\nin destination group?}
+    PT4 -- YES → terminal --> PT5([self-retire RETIRED in execute mode\ndry-run: print and skip])
+    PT4 -- NO --> PT6[Bid: evidence.approved_bid\nOR evidence.proposed_bid\nPOST /sp/keywords\ncampaignId + adGroupId\nkeywordText matchType:EXACT\nstate: ENABLED\nBorn ENABLED not PAUSED]
+    end
+
+    subgraph BA["BID_ADJUST → push-bid-adjustments.mjs"]
+    BA1([APPROVED BID_ADJUST\nlimit: push_max_per_run ?? 20]) --> BA2{evidence.kind\n= 'REVIVE'?}
+    BA2 -- YES --> BA3[Fetch ALL ENABLED targets+keywords\nin evidence.campaign_id\nv2: per-entity bid from evidence.per_entity\nelse uniform proposed_bid\nPUT /sp/targets\nPUT /sp/keywords\none call per entity batch]
+    BA2 -- NO --> BA4{entity_kind}
+    BA4 -- TARGET or AUTO_STRATEGY --> BA5[PUT /sp/targets\ntargetId: evidence.entity_id\nbid: approved_bid ?? proposed_bid]
+    BA4 -- KEYWORD --> BA6[PUT /sp/keywords\nkeywordId: evidence.entity_id\nbid: approved_bid ?? proposed_bid]
+    end
+
+    subgraph CS["CREATE_STRUCTURE → push-structure.mjs"]
+    CS1([APPROVED CREATE_STRUCTURE\nHARD CAP: 2 per run\nnot a param — hardcoded const]) --> CS2[1 POST /sp/campaigns\nstate: PAUSED deliberately\ntargetingType from evidence.targeting_type\nbudget from evidence.budget or 3.00/day\nstartDate: today ISO date]
+    CS2 --> CS3[2 POST /sp/adGroups]
+    CS3 --> CS4[3 POST /sp/productAds\nseed_asins from evidence.seed_asins]
+    CS4 --> CS5([Born PAUSED\nChristian enables in console\nor later frame flips state])
+    end
+```
+
+### Legend
+
+**push_max_per_run**: `params.push_max_per_run ?? 20` applies to all push scripts **except** CREATE_STRUCTURE, which uses the hardcoded constant `2`.
+
+**Orphan route map** is built from **PUSHED** (not APPROVED) CREATE_STRUCTURE evidences. APPROVED-but-not-yet-PUSHED structure rooms do not yet route orphan PROMOTE_TERM recs; those orphans skip at push time (see Findings #11).
+
+**Duplicate-is-satisfied (PROMOTE_TERM)**: EXACT keyword already ENABLED in the destination ad group → terminal skip. In execute mode the rec is self-retired to `RETIRED` status. `RETIRED` is not in the generation suppression check → re-proposable (see Findings #7).
+
+**Born-PAUSED rule applies only to CREATE_STRUCTURE campaigns.** Keywords (PROMOTE_TERM push), negatives, and bid adjustments are not born paused — they become effective immediately on API success.
+
+**Default bid fallback in push-structure**: `evidence.proposed_default_bid ?? max(keywords[].bid) ?? 0.75`.
+
+---
+
+## d. GRADING
+
+### Stamp Windows & Horizons
+
+```mermaid
+flowchart TD
+    A([PUSHED rec with resolvable pushed_at:\nCOALESCE pushed_at,\nevidence->pushed_at ::timestamptz]) --> B[Horizons: t7 7d · t14 14d · t30 30d]
+    B --> C{For each horizon:\ndueMs = pushedAt + horizon_days × 86400 s\ndueMs ≤ now?\nNOT already in rec_outcomes?}
+    C -- NO --> SKIP([skip horizon])
+    C -- YES --> D[after-window:\npushed_at_date → pushed_at_date + horizon_days exclusive\nbefore-window:\npushed_at_date − horizon_days → pushed_at_date]
+    D --> E[Query source table\nby rec_type per handler\nSUM cost · sales · clicks · purchases · impressions\nfor both windows separately]
+    E --> F([INSERT rec_outcomes\nON CONFLICT DO NOTHING])
+```
+
+**Source tables by rec_type**:
+`NEGATE_TERM / NEGATE_TARGET / PROMOTE_TERM / CREATIVE_KEYWORD / PROMOTE_ASIN / CREATIVE_TARGET` → `amazon_search_term_daily` (by `search_term` or `lower(search_term)`)
+`BID_ADJUST / BUDGET_ADJUST / PAUSE_CAMPAIGN / CREATE_STRUCTURE` → `amazon_campaign_daily` (by `campaign_id`)
+`REPLACE_PRODUCT_AD` → `amazon_advertised_product_daily` (by `asin + campaign_id` for B0 and HC separately)
+
+### NEGATE_TERM / NEGATE_TARGET Verdict
+
+```mermaid
+flowchart TD
+    A([metrics m, evidence ev]) --> B{m.rows_found = 0?}
+    B -- YES --> NODATA([NO-DATA])
+    B -- NO --> C{m.before_rows_found\nnot null?\nL3.1 GP stamp}
+    C -- NO: legacy stamp --> D[pre_gp_grading: true\nratio = m.cost ÷ ev.spend]
+    D --> D1{ratio ≤ 0.05?}
+    D1 -- YES --> WL([WIN legacy])
+    D1 -- NO --> D2{ratio ≤ 0.50?}
+    D2 -- YES --> PL([PARTIAL legacy])
+    D2 -- NO --> LL([LEAK legacy])
+    C -- YES: GP stamp --> E[gp_delta = salesAfter − cost − beforeSales − beforeCost\nspendStopped:\n  ev.spend > 0 → cost ÷ ev.spend ≤ 0.05\n  ev.spend unknown → cost < 0.10]
+    E --> F{spendStopped?}
+    F -- YES --> G{gp_delta ≥ 0?}
+    G -- YES --> WIN([WIN])
+    G -- NO --> REVIEW([REVIEW\nspend stopped but GP Δ < 0\nnegation may have killed converting traffic])
+    F -- NO --> H{ratio = cost ÷ ev.spend\nev.spend known?}
+    H -- NO --> PARTIAL_FB([PARTIAL: refSpend unknown fallback])
+    H -- YES --> H2{ratio ≤ 0.50?}
+    H2 -- YES --> PARTIAL([PARTIAL])
+    H2 -- NO --> LEAK([LEAK])
+```
+
+### BID_ADJUST Verdict (CUT and RAISE)
+
+```mermaid
+flowchart TD
+    A([metrics m, evidence ev, countryCode]) --> D{m.rows_found = 0?}
+    D -- YES --> NODATA([NO-DATA + direction tag])
+    D -- NO --> E[direction inferred:\npushed = ev.pushed_bid ?? ev.proposed_bid\ncurrent = ev.current_bid ?? ev.existing_targets0.bid\nCUT if pushed < current × 0.99\nRAISE if pushed > current × 1.01\nFLAT or UNKNOWN otherwise\ngp_delta = afterSales−afterCost − beforeSales−beforeCost]
+    E --> F{direction}
+
+    F -- CUT --> C1{gp_delta > 0?}
+    C1 -- YES --> WINC([WIN])
+    C1 -- NO --> C2{afterAcos < beforeAcos?}
+    C2 -- YES --> PC1([PARTIAL: ACoS improved but GP Δ ≤ 0])
+    C2 -- NO --> C3{afterCost < beforeCost × 0.90?}
+    C3 -- YES --> PC2([PARTIAL: spend fell but GP Δ ≤ 0])
+    C3 -- NO --> LC([LEAK])
+
+    F -- RAISE --> R1{gp_delta > 0?}
+    R1 -- YES --> R2{market ACoS\n≤ bandHigh OR unknown?\nbandHigh = targetAcos + 0.05\nfrom ev.params_used.target_acos ?? 0.30}
+    R2 -- YES: in or below band --> WINR([WIN])
+    R2 -- NO: above-band market --> R3{entity afterAcos\n≤ bandHigh?}
+    R3 -- YES --> WINR2([WIN: entity within ceiling])
+    R3 -- NO --> PR1([PARTIAL: GP Δ > 0 but entity above ceiling in repair market])
+    R1 -- NO --> R4{afterClicks > beforeClicks?}
+    R4 -- YES --> PR2([PARTIAL: clicks rose but GP Δ ≤ 0])
+    R4 -- NO --> LR([LEAK: clicks did not rise and GP Δ ≤ 0])
+
+    F -- FLAT or UNKNOWN --> NODATA2([NO-DATA])
+```
+
+### Other Types (abbreviated)
+
+**REPLACE_PRODUCT_AD**:
+`rows_found = 0` → NO-DATA.
+`b0Dark AND hcServe` → WIN. `b0Dark AND NOT hcServe` → PARTIAL. `NOT b0Dark AND hcServe` → PARTIAL. `NOT b0Dark AND NOT hcServe` → LEAK.
+`gp_delta = (hc_sales + b0_sales − hc_spend − b0_spend)_after − same_before` (informational).
+
+**PROMOTE_TERM / CREATIVE_KEYWORD / PROMOTE_ASIN / CREATIVE_TARGET**:
+`rows_found = 0` → NO-DATA.
+`clicks = 0` → LEAK (dark).
+`clicks > 0`:
+  `gp_delta > 0` → WIN (STRONG: gp_delta>0).
+  `horizon = 't14' AND purchases > 0` → WIN (STRONG: orders>0 at t14).
+  else → WIN (serving at `horizon`; clicks>0 impression proxy).
+`gp_delta` computed only when `before_rows_found` present.
+
+**PAUSE_CAMPAIGN**:
+`afterCost < 0.10` → WIN. `afterCost < beforeCost × 0.50` → PARTIAL. Else LEAK.
+
+**BUDGET_ADJUST** ⚠:
+`spendChg > 0` → PARTIAL; `spendChg ≤ 0` → WIN. See Findings #3 — this appears inverted.
+
+**CREATE_STRUCTURE**:
+`impressions > 0` → WIN. Else PARTIAL.
+
+**`pre_gp_grading` tag**: applied to NEGATE/TARGET stamps created before L3.1 (no before-window). Old definition (ratio only, no gp_delta) applies; tagged for audit.
+
+---
+
+## e. LIFECYCLE
+
+### Status Graph
+
+```mermaid
+stateDiagram-v2
+    [*] --> DRAFT : INSERT by generate-recommendations.mjs\nat end of each generation phase
+
+    DRAFT --> APPROVED : approveRecommendation() server action\nevidence patched with approved_bid and/or asin if supplied
+    DRAFT --> REJECTED : rejectRecommendation() server action
+
+    APPROVED --> PUSHED : push script API success\nstatus + pushed_at written after 2xx
+    APPROVED --> HELD : manual or operational hold\nmechanism not in reviewed code\nacts as REJECTED for suppression
+    APPROVED --> RETIRED : push-keywords.mjs terminal duplicate skip\nin --execute mode\nPROMOTE_TERM only observed path
+
+    PUSHED --> [*] : terminal — graded by stamp-outcomes.mjs + scorecard.mjs
+
+    REJECTED --> [*] : terminal — in rejectedSet → suppressed\nEXCEPTION: reject_reason = 'superseded—surgical doctrine'\n→ excluded from fetch → re-proposable
+    HELD --> [*] : terminal — same suppression as REJECTED\nno programmatic path sets HELD in reviewed code
+    RETIRED --> [*] : terminal — NOT in rejectedSet or openSet\n→ re-proposable (see Findings #7)
+```
+
+### Legend
+
+**HELD semantics**: added to `rejectedSet` in the suppression query alongside REJECTED. Behaviour is identical — the term will not be re-proposed. No reviewed script sets HELD programmatically; it is a human-only status.
+
+**Supersession exception**: REJECTED recs with `evidence->>'reject_reason' = 'superseded—surgical doctrine'` are excluded from the suppression fetch entirely. They are not in `openSet` and not in `rejectedSet` → the term is treated as fresh. This is the upgrade path when surgical doctrine changes a full-negate into a partial-negate.
+
+**PUSHED in openSet**: prevents duplicate recommendations for already-executed terms.
+
+**RETIRED gap**: RETIRED is written by push-keywords.mjs (terminal duplicate skip, execute mode) but is absent from both `openSet` and `rejectedSet` checks in generation. See Findings #7.
+
+---
+
+## FINDINGS
+
+Discovered during extraction. No fixes applied in this frame — honest list only.
+
+1. **[REVIEW] tripwire is structurally unreachable.**
+   `salesAtRisk = _negPlacs.some(p => p.orders > 0)`. Since `_negPlacs` is defined as `placements.filter(p => p.orders === 0)`, no element in `_negPlacs` can have `orders > 0`. `salesAtRisk` is permanently `false`. The `[REVIEW]` prefix in card text is dead code — it never fires.
+
+2. **`_estSavedSpend` temporal dead zone (TDZ) bug in CUT proposal.**
+   In the BID_ADJUST generation loop, the Cut-direction proposal string contains the template literal `` `${(_estSavedSpend ?? 0).toFixed(2)}` ``. `_estSavedSpend` is declared with `const` on a *later* line in the same block (after the proposal and evidence assignment). In ES modules (strict mode) this is a TDZ violation: `ReferenceError: Cannot access '_estSavedSpend' before initialization`. The crash fires only when a Cut-direction entity passes all gates and the proposal branch is taken. If no Cuts currently qualify, the bug is dormant.
+
+3. **BUDGET_ADJUST verdict appears inverted.**
+   `judgeBudgetAdjust` returns `PARTIAL` when `spendChg > 0` (spend rose — the expected outcome of a budget raise) and `WIN` when `spendChg ≤ 0` (spend did not increase). Intuition: a successful budget raise should produce more spend, not less. The current logic treats the wrong direction as a win.
+
+4. **Scorecard band is hardcoded 25–35%; engine band is `target_acos ± 5 pp`.**
+   `scorecard.mjs` uses `const BAND_LOW = 0.25; const BAND_HIGH = 0.35` for market zone annotation. The engine computes `bandLow = target_acos − 0.05 / bandHigh = target_acos + 0.05` from the profile row. If `target_acos` is tuned to any value other than 0.30, the scorecard's band labels diverge from what the engine saw at generation time.
+
+5. **PROMOTE_ASIN `proposed_bid` is null when `clicks = 0`.**
+   `observedCpc` and `proposedBid` are computed only when `entity.clicks > 0`. Zero-click candidates carry `proposed_bid: null` in evidence. The push script requires `approved_bid` or `proposed_bid` to proceed; without a manual reviewer override, these recs cannot be pushed.
+
+6. **CREATIVE_KEYWORD and CREATIVE_TARGET are not generated by `generate-recommendations.mjs`.**
+   Neither type appears in any generation phase of the main script. They share judgment functions with their PROMOTE siblings (`judgeCreativeKeyword = judgePromoteTerm`, `judgeCreativeTarget = judgePromoteAsin`) and appear in stamp-outcomes and scorecard. Their generation source is presumably `scripts/generate-creative.mjs` but is outside the scope of this extraction.
+
+7. **RETIRED status is not in the generation suppression check.**
+   When `push-keywords.mjs` self-retires a terminal duplicate in `--execute` mode, the rec is set to status `RETIRED`. The suppression query in `generate-recommendations.mjs` only adds `REJECTED` and `HELD` to `rejectedSet`. RETIRED recs are not suppressed → the term can be re-proposed on the next run → potentially creating a loop of draft → approve → retire → draft for terms that are already live as exact keywords.
+
+8. **REVIVE recs are graded as plain BID_ADJUST — direction will be UNKNOWN → NO-DATA.**
+   `stamp-outcomes.mjs` has no special branch for `evidence.kind = 'REVIVE'`. REVIVE recs stamp using `amazon_campaign_daily` by `campaign_id`. In `judgeBidAdjust`, direction is inferred from `ev.pushed_bid ?? ev.proposed_bid` vs `ev.current_bid`. REVIVE evidence carries `proposed_bid = viabilityFloor` as a single top-level scalar, but `current_bid` is per-entity only (not top-level). Result: direction = `'UNKNOWN'` → verdict = `NO-DATA` for all REVIVE stamps.
+
+9. **CREATE_STRUCTURE per-run cap (2) is a hardcoded constant, not a param.**
+   `STRUCTURE_MAX_PER_RUN = 2` is a literal in `push-structure.mjs` with the comment "never increase without Christian's ruling". It cannot be tuned via `engine_parameters`.
+
+10. **DORMANT-PAUSE age guard was explicitly skipped by design.**
+    Phase 7d notes "`amazon_campaigns.raw` has no `creationDate/createdDate` (confirmed: both fields return NULL) — age guard skipped". The sole newborn protection is `lifetime_impressions < 500`. Newly-launched campaigns that have served zero impressions immediately qualify; the partial guard is the hard exclude `name NOT LIKE 'CDL | SP |%'`.
+
+11. **Orphan route map is built from PUSHED (not APPROVED) CREATE_STRUCTURE recs.**
+    APPROVED-but-not-yet-PUSHED structure rooms do not yet populate the orphan route map. Orphan PROMOTE_TERM recs that become APPROVED while their CREATE_STRUCTURE rec is still only APPROVED will skip at push time with "no keyword-holding ad group among placements — needs manual destination".
+
+12. **NEGATE_TERM retro ASIN sweep is print-only (no engine action).**
+    After the main candidate loop, `generate-recommendations.mjs` scans PUSHED NEGATE_TERM recs whose `target_text` matches ASIN_SHAPE and prints `info: consider NEGATE_TARGET for...`. No rec is created, updated, or flagged. This is informational only — a log advisory, not an engine action.
