@@ -7,6 +7,7 @@ const AMAZON_NAV = [
   { href: '/amazon/campaigns',       label: 'Campaigns' },
   { href: '/amazon/recommendations', label: 'Recommendations' },
   { href: '/amazon/scorecard',       label: 'Scorecard' },
+  { href: '/amazon/engine',          label: 'Engine' },
   { href: '/amazon/spend',           label: 'Spend' },
   { href: '/amazon/accounts',        label: 'Accounts' },
 ]

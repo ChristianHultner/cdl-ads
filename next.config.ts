@@ -9,6 +9,8 @@ const nextConfig: NextConfig = {
       './scripts/**',
       './node_modules/@neondatabase/serverless/**',
     ],
+    // Engine page reads doctrine.md at request time; include the docs dir in the bundle.
+    '/amazon/engine': ['./docs/**'],
   },
 
   async redirects() {
