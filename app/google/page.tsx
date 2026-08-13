@@ -51,6 +51,12 @@ function fmtDateTime(iso: string | null): string {
 export default async function GooglePage() {
   const sql = getGoogleDb()
 
+  const [{ rec_draft }] = (await sql`
+    SELECT count(*)::int AS rec_draft
+    FROM google_recommendations
+    WHERE state = 'DRAFT'
+  `) as unknown as [{ rec_draft: number }]
+
   const [stats] = (await sql`
     SELECT
       (SELECT count(*)::int          FROM google_campaigns)                              AS camp_total,
@@ -114,20 +120,59 @@ export default async function GooglePage() {
         />
       </div>
 
-      <Link
-        href="/google/campaigns"
-        style={{
-          display: 'inline-block',
-          padding: '0.5rem 1.25rem',
-          background: 'var(--cdl-blue)',
-          color: '#fff',
-          borderRadius: '6px',
-          fontWeight: 700,
-          fontSize: '0.9rem',
-        }}
-      >
-        View Campaigns →
-      </Link>
+      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+        <Link
+          href="/google/campaigns"
+          style={{
+            display: 'inline-block',
+            padding: '0.5rem 1.25rem',
+            background: 'var(--cdl-blue)',
+            color: '#fff',
+            borderRadius: '6px',
+            fontWeight: 700,
+            fontSize: '0.9rem',
+          }}
+        >
+          View Campaigns →
+        </Link>
+        <Link
+          href="/google/recommendations"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            padding: '0.5rem 1.25rem',
+            background: 'var(--cdl-sky)',
+            color: 'var(--cdl-ink)',
+            border: '1px solid #c8dfe9',
+            borderRadius: '6px',
+            fontWeight: 700,
+            fontSize: '0.9rem',
+          }}
+        >
+          Recommendations
+          {rec_draft > 0 && (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: '1.3rem',
+                height: '1.3rem',
+                padding: '0 0.3rem',
+                background: 'var(--cdl-blue)',
+                color: '#fff',
+                borderRadius: '999px',
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                lineHeight: 1,
+              }}
+            >
+              {rec_draft}
+            </span>
+          )}
+        </Link>
+      </div>
 
       <p
         style={{
