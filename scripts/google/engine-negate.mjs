@@ -1,12 +1,16 @@
 /**
  * scripts/google/engine-negate.mjs
  *
- * Google Ads NEGATE engine — PRINT ONLY.  Zero DB writes.
+ * Google Ads NEGATE engine.
  * Implements RULE 1 (NEGATE_TERM) and RULE 2 (NEGATE_NGRAM) from P3 spec §2-3.
  *
  * Usage:
  *   node scripts/google/engine-negate.mjs \
- *     --from=YYYY-MM-DD --to=YYYY-MM-DD --conv-from=YYYY-MM-DD [--illustrative]
+ *     --from=YYYY-MM-DD --to=YYYY-MM-DD --conv-from=YYYY-MM-DD [--illustrative] [--insert]
+ *
+ * Without --insert: print-only, zero DB writes.
+ * With --insert:    ACT cards written to google_recommendations (state=DRAFT).
+ *                   Cannot combine with --illustrative.
  */
 
 import { neon } from '@neondatabase/serverless';
@@ -48,6 +52,12 @@ const fromDate   = rawArgs['from'];
 const toDate     = rawArgs['to'];
 const convFrom   = rawArgs['conv-from'];
 const illustrative = !!rawArgs['illustrative'];
+const insertMode   = !!rawArgs['insert'];
+
+if (insertMode && illustrative) {
+  console.error('REFUSED: illustrative data must never become cards');
+  process.exit(1);
+}
 
 if (!fromDate || !DATE_RE.test(fromDate)) {
   console.error('ERROR: --from=YYYY-MM-DD required'); process.exit(1);
@@ -83,6 +93,9 @@ if (acctRows.length === 0) {
 console.log(`\nENGINE DRY RUN ${fromDate}..${toDate} conv-from=${convFrom}`);
 if (illustrative) {
   console.log('MODE: ILLUSTRATIVE — pre-signal era, NOT ACTIONABLE');
+}
+if (insertMode) {
+  console.log('MODE: INSERT — ACT cards will be written to google_recommendations as DRAFT');
 }
 
 // ── Load data ──────────────────────────────────────────────────────────────────
@@ -268,7 +281,7 @@ for (const row of termRows) {
       ` — P(rate<${(0.5 * parentRate).toFixed(5)})=${pBelow.toFixed(4)}` +
       ` — parent=${parentRate.toFixed(5)}` +
       ` — gate1(≥${CONV_ECON_CLICKS}clk)=${gate1Met}`;
-    r1Cards.push({ rule: 'NEGATE_TERM', state, entity: term, clicks, costEur, conv, alpha, beta, pointEstimate, pBelow, whyLine });
+    r1Cards.push({ rule: 'NEGATE_TERM', state, entity: term, agId, clicks, costEur, conv, alpha, beta, pointEstimate, pBelow, whyLine, parentRate });
   }
 }
 
@@ -284,11 +297,11 @@ for (const row of termRows) {
   const conv    = Number(row.conv);
 
   for (const gram of extractGrams(row.search_term)) {
-    if (!gramMap[gram]) gramMap[gram] = { clicks: 0, costEur: 0, conv: 0, terms: new Set() };
+    if (!gramMap[gram]) gramMap[gram] = { clicks: 0, costEur: 0, conv: 0, terms: new Map() };
     gramMap[gram].clicks  += clicks;
     gramMap[gram].costEur += costEur;
     gramMap[gram].conv    += conv;
-    gramMap[gram].terms.add(row.search_term);
+    gramMap[gram].terms.set(row.search_term, (gramMap[gram].terms.get(row.search_term) || 0) + clicks);
   }
 }
 
@@ -317,7 +330,11 @@ for (const [gram, stats] of Object.entries(gramMap)) {
       `${conv}c/${clicks}clk/€${costEur.toFixed(2)} pooled/${terms.size}terms` +
       ` — P(rate<${(0.5 * campParentRate).toFixed(5)})=${pBelow.toFixed(4)}` +
       ` — parent=${campParentRate.toFixed(5)}`;
-    r2Cards.push({ rule: 'NEGATE_NGRAM', state, entity: gram, clicks, costEur, conv, alpha, beta, pointEstimate, pBelow, whyLine });
+    const constituents = [...stats.terms.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([t]) => t);
+    r2Cards.push({ rule: 'NEGATE_NGRAM', state, entity: gram, clicks, costEur, conv, alpha, beta, pointEstimate, pBelow, whyLine, constituents, parentRate: campParentRate });
   }
 }
 
@@ -333,3 +350,55 @@ console.log(`  of evaluated: ACT ${r2.ACT} / WATCH ${r2.WATCH} / NEUTRAL ${r2.NE
 for (const c of r2Cards) console.log(fmtCard(c));
 
 console.log(`\nTOTAL candidate cards: ${r1Cards.length + r2Cards.length}`);
+
+// ── Insert mode ────────────────────────────────────────────────────────────────
+if (insertMode) {
+  const runId    = 'run-' + new Date().toISOString().slice(0, 10);
+  const actCards = [...r1Cards, ...r2Cards].filter(c => c.state === 'ACT');
+  let inserted = 0, skipped = 0;
+
+  console.log(`\nINSERT MODE: run_id=${runId} | ACT cards to write=${actCards.length}`);
+
+  for (const c of actCards) {
+    const isNgram   = c.rule === 'NEGATE_NGRAM';
+    const agId      = isNgram ? null : c.agId;
+    const matchType = isNgram ? 'PHRASE' : 'EXACT';
+    const level     = isNgram ? 'CAMPAIGN' : 'AD_GROUP';
+    const target    = isNgram ? CAMPAIGN_ID : c.agId;
+
+    const actionJson = JSON.stringify({
+      type: 'negative_keyword',
+      level,
+      target,
+      match_type: matchType,
+    });
+
+    const evidenceBase = {
+      window:         `${fromDate}..${toDate}`,
+      conv_from:      convFrom,
+      clicks:         c.clicks,
+      cost_eur:       +c.costEur.toFixed(2),
+      conv:           c.conv,
+      posterior_mean: +c.pointEstimate.toFixed(6),
+      p_below:        +c.pBelow.toFixed(6),
+      parent_rate:    +c.parentRate.toFixed(6),
+      threshold:      +(0.5 * c.parentRate).toFixed(6),
+    };
+    if (isNgram) evidenceBase.constituents = c.constituents;
+    const evidenceJson = JSON.stringify(evidenceBase);
+
+    const rows = await sql`
+      INSERT INTO google_recommendations
+        (state, run_id, rec_type, customer_id, campaign_id, ad_group_id,
+         entity_key, action, evidence, why_line)
+      VALUES
+        ('DRAFT', ${runId}, ${c.rule}, ${CUSTOMER_ID}, ${CAMPAIGN_ID}, ${agId},
+         ${c.entity}, ${actionJson}::jsonb, ${evidenceJson}::jsonb, ${c.whyLine})
+      ON CONFLICT ON CONSTRAINT uq_grec_open DO NOTHING
+      RETURNING entity_key
+    `;
+    if (rows.length > 0) inserted++; else skipped++;
+  }
+
+  console.log(`INSERTED ${inserted} / SKIPPED ${skipped} (open rec exists)`);
+}
