@@ -177,7 +177,7 @@ export default async function RecommendationsPage() {
       c.name                                                AS campaign_name,
       ag.name                                               AS ad_group_name
     FROM  google_recommendations r
-    LEFT  JOIN google_campaigns  c  ON c.campaign_id  = r.campaign_id::text
+    LEFT  JOIN google_campaigns  c  ON c.campaign_id  = r.campaign_id
     LEFT  JOIN google_ad_groups  ag ON ag.ad_group_id = r.ad_group_id
     WHERE r.state = 'DRAFT'
     ORDER BY r.run_id DESC, r.id ASC
