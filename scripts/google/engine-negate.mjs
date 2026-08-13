@@ -363,8 +363,8 @@ if (insertMode) {
     const isNgram   = c.rule === 'NEGATE_NGRAM';
     const agId      = isNgram ? null : c.agId;
     const matchType = isNgram ? 'PHRASE' : 'EXACT';
-    const level     = isNgram ? 'CAMPAIGN' : 'AD_GROUP';
-    const target    = isNgram ? CAMPAIGN_ID : c.agId;
+    const level     = isNgram ? 'campaign' : 'ad_group';
+    const target    = c.entity;
 
     const actionJson = JSON.stringify({
       type: 'negative_keyword',
