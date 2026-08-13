@@ -175,7 +175,7 @@ function fmtError(err) {
 console.log(`--- MANIFEST (${recs.length} rec${recs.length === 1 ? '' : 's'}) ---`);
 for (const rec of recs) {
   console.log(
-    `WOULD PUSH id=${rec.id} ${rec.rec_type} ${rec.action.match_type}` +
+    `MANIFEST id=${rec.id} ${rec.rec_type} ${rec.action.match_type}` +
     ` '${rec.entity_key}' -> ${rec.action.level} ${levelId(rec)}`
   );
 }
@@ -200,22 +200,10 @@ for (const rec of recs) {
 }
 console.log('');
 
-const validatedCount = [...validationStatus.values()].filter(Boolean).length;
+const validatedCount  = [...validationStatus.values()].filter(Boolean).length;
 const validationFailed = validatedCount < recs.length;
 
-// ── DEFAULT MODE — stop here ───────────────────────────────────────────────────
-
-if (!execute) {
-  console.log('--- RECONCILE: skipped (dry run) ---');
-  console.log('');
-  console.log(
-    `PUSH SUMMARY approved=${recs.length} validated=${validatedCount}` +
-    ` pushed=0 confirmed=0 failed=0`
-  );
-  process.exit(validationFailed ? 1 : 0);
-}
-
-// ── EXECUTE — abort if any validation failed ───────────────────────────────────
+// ── Abort if any validation failed (both modes) ────────────────────────────────
 
 if (validationFailed) {
   const nFailed = recs.length - validatedCount;
@@ -224,6 +212,15 @@ if (validationFailed) {
     ` no real mutate performed`
   );
   process.exit(1);
+}
+
+// ── Dry-run gate — nothing below is reachable without --execute ────────────────
+
+if (!execute) {
+  console.log('--- RECONCILIATION ---');
+  console.log('RECONCILE: skipped (dry run)');
+  console.log(`PUSH SUMMARY approved=${recs.length} validated=${validatedCount} pushed=0 confirmed=0 failed=0`);
+  process.exit(0);
 }
 
 neonConfig.webSocketConstructor = WebSocket;
