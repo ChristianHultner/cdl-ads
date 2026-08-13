@@ -394,7 +394,7 @@ if (insertMode) {
       VALUES
         ('DRAFT', ${runId}, ${c.rule}, ${CUSTOMER_ID}, ${CAMPAIGN_ID}, ${agId},
          ${c.entity}, ${actionJson}::jsonb, ${evidenceJson}::jsonb, ${c.whyLine})
-      ON CONFLICT ON CONSTRAINT uq_grec_open DO NOTHING
+      ON CONFLICT (rec_type, customer_id, coalesce(campaign_id,0), coalesce(ad_group_id,0), entity_key) WHERE state IN ('DRAFT','APPROVED') DO NOTHING
       RETURNING entity_key
     `;
     if (rows.length > 0) inserted++; else skipped++;
