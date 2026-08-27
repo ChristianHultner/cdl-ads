@@ -149,7 +149,7 @@ for (const rec of recs) {
           before_purchases_14d: Number(b.before_purchases_14d),
           before_sales_14d:     Number(b.before_sales_14d),
           before_rows_found:    Number(b.before_rows_found),
-          gp_basis,
+          gp_basis: gpBasis,
           gp_per_order:         gpPerOrder,
         };
 
@@ -195,7 +195,7 @@ for (const rec of recs) {
           before_purchases_14d: Number(nb.before_purchases_14d),
           before_sales_14d:     Number(nb.before_sales_14d),
           before_rows_found:    Number(nb.before_rows_found),
-          gp_basis,
+          gp_basis: gpBasis,
           gp_per_order:         gpPerOrder,
         };
 
@@ -239,7 +239,7 @@ for (const rec of recs) {
           before_purchases_14d: Number(b.before_purchases_14d),
           before_sales_14d:     Number(b.before_sales_14d),
           before_rows_found:    Number(b.before_rows_found),
-          gp_basis,
+          gp_basis: gpBasis,
           gp_per_order:         gpPerOrder,
         };
 
@@ -284,7 +284,7 @@ for (const rec of recs) {
           before_purchases:  Number(b.before_purchases),
           before_sales:      Number(b.before_sales),
           before_rows_found: Number(b.before_rows_found),
-          gp_basis,
+          gp_basis: gpBasis,
           gp_per_order:      gpPerOrder,
         };
 
@@ -375,7 +375,7 @@ for (const rec of recs) {
           rows_found:           Number(b0.b0_rows_found) + Number(hc.hc_rows_found),
           b0_rows_found:        Number(b0.b0_rows_found),
           hc_rows_found:        Number(hc.hc_rows_found),
-          gp_basis,
+          gp_basis: gpBasis,
           gp_per_order:         gpPerOrder,
         };
 
@@ -429,7 +429,7 @@ for (const rec of recs) {
           before_clicks:        Number(b.before_clicks),
           before_impressions:   Number(b.before_impressions),
           before_rows_found:    Number(b.before_rows_found),
-          gp_basis,
+          gp_basis: gpBasis,
           gp_per_order:         gpPerOrder,
         };
       }
