@@ -76,7 +76,7 @@ console.log(JSON.stringify({ window_start: windowStart, window_end: windowEnd })
 
 // ── Fetch profile (currency + target_acos) ──────────────────────────────────
 const { rows: profileRows } = await pool.query(
-  `SELECT currency_code, country_code, target_acos FROM amazon_profiles WHERE profile_id = $1`,
+  `SELECT currency_code, country_code, target_acos, gp_per_order::float AS gp_per_order FROM amazon_profiles WHERE profile_id = $1`,
   [profileId],
 );
 if (!profileRows.length) {
@@ -87,6 +87,9 @@ const currencyCode = profileRows[0].currency_code;
 const countryCode  = profileRows[0].country_code ?? 'US';
 // Override target_acos from the profile row (seeded at 0.30; editable by Christian in the DB).
 params.target_acos = Number(profileRows[0].target_acos);
+// L3.2: gp_per_order basis for generator gates.
+const gpPerOrder = profileRows[0].gp_per_order != null ? Number(profileRows[0].gp_per_order) : null;
+const gpBasis    = gpPerOrder != null ? 'unit' : 'revenue';
 const CURRENCY_SYMBOL = { EUR: '€', USD: '$', GBP: '£', CAD: 'CA$', MXN: 'MX$' };
 const currSym = CURRENCY_SYMBOL[currencyCode] ?? `${currencyCode}\u202f`;
 
@@ -1113,7 +1116,11 @@ for (const entity of bidEligible) {
     ...(direction === 'Cut' ? {
       est_saved_spend:    _estSavedSpend,
       est_at_risk_sales:  entity.sales,
+      ...(gpPerOrder != null ? {
+        est_at_risk_gp: Math.round((entity.orders * gpPerOrder - entity.spend) * 100) / 100,
+      } : {}),
     } : {}),
+    gp_basis: gpBasis,
     ...(entity.match_type ? { match_type: entity.match_type } : {}),
     ...(amzRec ? {
       amazon_suggested:   amzRec.amazon_suggested,
