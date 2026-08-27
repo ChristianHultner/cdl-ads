@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
+import { profileGP } from '../../lib/scorecard'
 import VerdictStrip,  { type MarketVerdictRow }  from './components/VerdictStrip'
 import ChartSection,  { type MarketChartData }   from './components/ChartSection'
 import MoversRow,     { type MoverRow, type ClusterStats } from './components/MoversRow'
@@ -20,13 +21,16 @@ export default async function DashboardPage() {
   ] = await Promise.all([
 
     // ── Verdict strip: this week + 4-week prior-avg, per profile/currency ──
+    // L3.2: gp_per_order + orders fetched for basis-resolved GP display.
     sql`
       SELECT
         p.country_code,
         p.currency_code,
         p.target_acos::float,
-        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.sales ELSE 0 END),0)::float AS sales_this,
-        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.spend ELSE 0 END),0)::float AS spend_this,
+        p.gp_per_order::float,
+        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.sales  ELSE 0 END),0)::float AS sales_this,
+        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.spend  ELSE 0 END),0)::float AS spend_this,
+        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.orders ELSE 0 END),0)::float AS orders_this,
         ((COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-14 AND dr.date < CURRENT_DATE-7  THEN dr.sales ELSE 0 END),0)+
           COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-21 AND dr.date < CURRENT_DATE-14 THEN dr.sales ELSE 0 END),0)+
           COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-28 AND dr.date < CURRENT_DATE-21 THEN dr.sales ELSE 0 END),0)+
@@ -36,11 +40,16 @@ export default async function DashboardPage() {
           COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-21 AND dr.date < CURRENT_DATE-14 THEN dr.spend ELSE 0 END),0)+
           COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-28 AND dr.date < CURRENT_DATE-21 THEN dr.spend ELSE 0 END),0)+
           COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-35 AND dr.date < CURRENT_DATE-28 THEN dr.spend ELSE 0 END),0)
-        )/4.0)::float AS spend_prior_avg
+        )/4.0)::float AS spend_prior_avg,
+        ((COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-14 AND dr.date < CURRENT_DATE-7  THEN dr.orders ELSE 0 END),0)+
+          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-21 AND dr.date < CURRENT_DATE-14 THEN dr.orders ELSE 0 END),0)+
+          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-28 AND dr.date < CURRENT_DATE-21 THEN dr.orders ELSE 0 END),0)+
+          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-35 AND dr.date < CURRENT_DATE-28 THEN dr.orders ELSE 0 END),0)
+        )/4.0)::float AS orders_prior_avg
       FROM daily_rollup dr
       JOIN amazon_profiles p USING (profile_id)
       WHERE dr.date >= CURRENT_DATE - 35
-      GROUP BY p.country_code, p.currency_code, p.target_acos
+      GROUP BY p.country_code, p.currency_code, p.target_acos, p.gp_per_order
       ORDER BY spend_this DESC
     `,
 
@@ -78,22 +87,26 @@ export default async function DashboardPage() {
         AND d.date >= CURRENT_DATE - 14
     `,
 
-    // ── Campaign movers: top 3 gainers + 3 decliners by sales delta, estate-wide ──
+    // ── Campaign movers: top 3 gainers + 3 decliners by GP delta, estate-wide ──
+    // L3.2: gp_per_order + purchases fetched; delta computed on correct basis in shaping.
     sql`
       SELECT
         COALESCE(c.name, d.campaign_id::text)              AS name,
         p.country_code,
         p.currency_code,
-        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.sales_14d ELSE 0 END),0)::float AS sales_this,
-        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d ELSE 0 END),0)::float AS sales_last,
-        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.cost ELSE 0 END),0)::float AS spend_this,
-        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.cost ELSE 0 END),0)::float AS spend_last
+        p.gp_per_order::float,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.sales_14d     ELSE 0 END),0)::float AS sales_this,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d   ELSE 0 END),0)::float AS sales_last,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.cost          ELSE 0 END),0)::float AS spend_this,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.cost        ELSE 0 END),0)::float AS spend_last,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.purchases_14d ELSE 0 END),0)::float AS purchases_this,
+        COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.purchases_14d ELSE 0 END),0)::float AS purchases_last
       FROM amazon_campaign_daily d
       JOIN amazon_profiles    p ON p.profile_id  = d.profile_id
       LEFT JOIN amazon_campaigns c ON c.campaign_id = d.campaign_id AND c.profile_id = d.profile_id
       WHERE d.date >= CURRENT_DATE - 14
         AND c.state IN ('ENABLED','PAUSED')
-      GROUP BY COALESCE(c.name, d.campaign_id::text), p.country_code, p.currency_code
+      GROUP BY COALESCE(c.name, d.campaign_id::text), p.country_code, p.currency_code, p.gp_per_order
       HAVING COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-7  AND d.date < CURRENT_DATE THEN d.sales_14d ELSE 0 END),0) > 0
           OR COALESCE(SUM(CASE WHEN d.date >= CURRENT_DATE-14 AND d.date < CURRENT_DATE-7 THEN d.sales_14d ELSE 0 END),0) > 0
       ORDER BY (
@@ -119,16 +132,20 @@ export default async function DashboardPage() {
 
   // ── Shape verdict rows ───────────────────────────────────────────────────
   const verdict: MarketVerdictRow[] = (verdictRows as {
-    country_code: string; currency_code: string; target_acos: number;
-    sales_this: number; spend_this: number; sales_prior_avg: number; spend_prior_avg: number
+    country_code: string; currency_code: string; target_acos: number; gp_per_order: number | null;
+    sales_this: number; spend_this: number; orders_this: number;
+    sales_prior_avg: number; spend_prior_avg: number; orders_prior_avg: number;
   }[]).map(r => ({
-    country:       r.country_code,
-    currency:      r.currency_code,
-    targetAcos:    r.target_acos,
-    salesThis:     r.sales_this,
-    salesPriorAvg: r.sales_prior_avg,
-    spendThis:     r.spend_this,
-    spendPriorAvg: r.spend_prior_avg,
+    country:        r.country_code,
+    currency:       r.currency_code,
+    targetAcos:     r.target_acos,
+    gpPerOrder:     r.gp_per_order ?? null,
+    salesThis:      r.sales_this,
+    salesPriorAvg:  r.sales_prior_avg,
+    spendThis:      r.spend_this,
+    spendPriorAvg:  r.spend_prior_avg,
+    ordersThis:     r.orders_this,
+    ordersPriorAvg: r.orders_prior_avg,
   }))
 
   // ── Shape chart data ─────────────────────────────────────────────────────
@@ -167,18 +184,24 @@ export default async function DashboardPage() {
   } : null
 
   // ── Shape movers ─────────────────────────────────────────────────────────
+  // L3.2: delta uses profileGP for correct basis; revenue sort order preserved.
   const allMovers: MoverRow[] = (moverRows as {
-    name: string; country_code: string; currency_code: string;
-    sales_this: number; sales_last: number; spend_this: number; spend_last: number
+    name: string; country_code: string; currency_code: string; gp_per_order: number | null;
+    sales_this: number; sales_last: number; spend_this: number; spend_last: number;
+    purchases_this: number; purchases_last: number;
   }[]).map(r => ({
-    name:      r.name,
-    country:   r.country_code,
-    currency:  r.currency_code,
-    salesThis: r.sales_this,
-    salesLast: r.sales_last,
-    spendThis: r.spend_this,
-    spendLast: r.spend_last,
-    delta:     (r.sales_this - r.spend_this) - (r.sales_last - r.spend_last),
+    name:       r.name,
+    country:    r.country_code,
+    currency:   r.currency_code,
+    gpPerOrder: r.gp_per_order ?? null,
+    salesThis:  r.sales_this,
+    salesLast:  r.sales_last,
+    spendThis:  r.spend_this,
+    spendLast:  r.spend_last,
+    ordersThis: r.purchases_this,
+    ordersLast: r.purchases_last,
+    delta:      profileGP(r.gp_per_order ?? null, r.purchases_this, r.sales_this, r.spend_this)
+              - profileGP(r.gp_per_order ?? null, r.purchases_last, r.sales_last, r.spend_last),
   }))
   const gainers   = allMovers.slice(0, 3)
   const decliners = [...allMovers].sort((a, b) => a.delta - b.delta).slice(0, 3)

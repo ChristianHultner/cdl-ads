@@ -1,6 +1,9 @@
 // Design choice: estate-wide movers with currency symbols. Tab-scoping would
 // require threading client tab state into a server-rendered component; keeping
 // this server-side and estate-wide is simpler and still readable with currency labels.
+// L3.2: GP delta uses profileGP (unit basis where margin ruled, revenue otherwise).
+
+import { profileGP } from '../../../lib/scorecard'
 
 export interface ClusterStats {
   impThis:   number
@@ -14,14 +17,17 @@ export interface ClusterStats {
 }
 
 export interface MoverRow {
-  name:      string
-  country:   string
-  currency:  string
-  salesThis: number
-  salesLast: number
-  spendThis: number
-  spendLast: number
-  delta:     number   // GP delta = (salesThis-spendThis) - (salesLast-spendLast)
+  name:       string
+  country:    string
+  currency:   string
+  gpPerOrder: number | null   // null = revenue basis
+  salesThis:  number
+  salesLast:  number
+  spendThis:  number
+  spendLast:  number
+  ordersThis: number
+  ordersLast: number
+  delta:      number   // GP delta using correct basis (pre-computed in page.tsx)
 }
 
 const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
@@ -82,8 +88,9 @@ function MoverTable({ rows, kind }: { rows: MoverRow[]; kind: 'up' | 'down' }) {
             <tr><td colSpan={3} style={{ padding: '0.7rem 1rem', color: 'var(--cdl-muted)' }}>—</td></tr>
           ) : rows.map((r, i) => {
             const sym   = SYM[r.currency] ?? r.currency
-            const gpThis = r.salesThis - r.spendThis
-            const gpLast = r.salesLast - r.spendLast
+            // L3.2: basis-resolved GP for percentage label
+            const gpThis = profileGP(r.gpPerOrder, r.ordersThis, r.salesThis, r.spendThis)
+            const gpLast = profileGP(r.gpPerOrder, r.ordersLast, r.salesLast, r.spendLast)
             const amt    = `${sym}${Math.abs(r.delta).toFixed(0)}`
             const sign   = isUp ? '+' : '−'
             const pct    = pctLabel(gpThis, gpLast)

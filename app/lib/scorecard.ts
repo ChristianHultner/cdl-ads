@@ -147,6 +147,21 @@ function computeGP(m: any, cost: number, purchases: number, sales: number): numb
   return sales - cost
 }
 
+/**
+ * Shared GP basis helper for UI display components.
+ * Unit basis (gpPerOrder non-null): orders × gpPerOrder − spend.
+ * Revenue basis (gpPerOrder null):  sales − spend.
+ * NEVER aggregate unit-basis and revenue-basis values together.
+ */
+export function profileGP(
+  gpPerOrder: number | null,
+  orders:     number,
+  sales:      number,
+  spend:      number,
+): number {
+  return gpPerOrder != null ? orders * gpPerOrder - spend : sales - spend
+}
+
 // ── Judgment functions ────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

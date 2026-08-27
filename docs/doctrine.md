@@ -27,6 +27,8 @@ Sources: `scripts/generate-recommendations.mjs` · `scripts/stamp-outcomes.mjs` 
 
 **Generation-side gates (frame 3, 2026-08-27):** Where `gp_per_order` is ruled, the generator evaluates at-risk quantities in GP terms. For BID_ADJUST CUT cards: `est_at_risk_gp = orders × gp_per_order − spend` is written to evidence alongside `est_at_risk_sales` (kept for continuity). `gp_basis` is written to every BID_ADJUST card evidence. Thresholds, band logic, and all other gate conditions are unchanged — only the GP quantity inside them changes basis. Where `gp_per_order` is NULL, `est_at_risk_sales` is the only at-risk field and `gp_basis` records `'revenue'`.
 
+**Display conventions (frame 4, 2026-08-27):** The dashboard (VerdictStrip, MoversRow) consumes `profileGP` from `app/lib/scorecard.ts` — the same basis resolution as the scorecard. Unit-basis GP displays plain; revenue-basis GP displays with an italic `rev` label. Mixed-basis figures (different `gp_basis` within the same currency) are shown side-by-side and are never summed. Sales and spend rows continue to aggregate by currency only (unchanged). Movers delta pre-computed in the server page using `profileGP`; SQL sort order remains revenue-based for ranking.
+
 **Historical grades:** Stamps created before this frame lack `gp_basis` in their metrics. They are identified by absence of `gp_basis` (the scorecard defaults to `'revenue'` when the field is absent) and were graded on revenue-based GP. The `pre_gp_grading` tag on legacy stamps (those lacking a before-window) remains the explicit audit marker; all pre-frame-2 stamps are implicitly revenue-basis by absence.
 
 ---
