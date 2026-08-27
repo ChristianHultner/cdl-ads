@@ -1,5 +1,5 @@
 // app/lib/scorecard.ts
-// Layer 3.1: GP-derived judgment, ACoS band 25-35, REVIEW state.
+// Layer 3.2: gp_per_order basis resolution. gp_basis read from stamped metrics.
 // Server-side scorecard logic — ported from scripts/scorecard.mjs; no deviations.
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -36,6 +36,7 @@ export interface Judgment {
   pct_reduced?:      number
   acos_delta?:       number | null
   gp_delta?:         number | null
+  gp_basis?:         'unit' | 'revenue'
   pre_gp_grading?:   boolean
   b0_spend?:         number | null
   hc_orders?:        number | null
@@ -131,8 +132,19 @@ function aggCounts(rows: JudgedRow[]): { n: number; dn: number; counts: VerdictC
   const counts = zeroVerdicts()
   for (const r of rows) counts[r.judgment.verdict]++
   const n  = rows.length
-  const dn = n - counts['NO-DATA']   // REVIEW counts in dn (graded data)
+  const dn = n - counts['NO-DATA']
   return { n, dn, counts }
+}
+
+// Layer 3.2: basis-resolved GP per window endpoint.
+// Unit basis (gp_basis='unit', gp_per_order non-null): purchases × gp_per_order − spend.
+// Revenue basis: sales − spend.
+// NEVER call with metrics from different profiles mixed — basis is per-profile.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function computeGP(m: any, cost: number, purchases: number, sales: number): number {
+  if (m.gp_basis === 'unit' && m.gp_per_order != null)
+    return purchases * Number(m.gp_per_order) - cost
+  return sales - cost
 }
 
 // ── Judgment functions ────────────────────────────────────────────────────────
@@ -143,8 +155,6 @@ function judgeNegateTerm(ev: any, m: any): Judgment {
 
   const cost     = safeN(m.cost)
   const refSpend = safeN(ev.spend)
-
-  // L3.1 GP grading requires before-window (before_rows_found present)
   const hasBefore = m.before_rows_found != null
 
   if (!hasBefore) {
@@ -160,38 +170,39 @@ function judgeNegateTerm(ev: any, m: any): Judgment {
     return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true }
   }
 
-  // GP grading (L3.1): gp_delta = (sales_after − spend_after) − (sales_before − spend_before)
-  const salesAfter  = safeN(m.sales_14d  ?? 0)
-  const beforeCost  = safeN(m.before_cost ?? 0)
-  const beforeSales = safeN(m.before_sales_14d ?? 0)
-  const gp_delta    = (salesAfter - cost) - (beforeSales - beforeCost)
-  const stopped     = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+  // Layer 3.2: basis-resolved GP
+  const salesAfter      = safeN(m.sales_14d          ?? 0)
+  const beforeCost      = safeN(m.before_cost        ?? 0)
+  const beforeSales     = safeN(m.before_sales_14d   ?? 0)
+  const afterPurchases  = safeN(m.purchases_14d      ?? 0)
+  const beforePurchases = safeN(m.before_purchases_14d ?? 0)
+  const gp_delta  = computeGP(m, cost, afterPurchases, salesAfter)
+                  - computeGP(m, beforeCost, beforePurchases, beforeSales)
+  const gp_basis  = (m.gp_basis ?? 'revenue') as 'unit' | 'revenue'
+  const stopped   = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
 
-  // Spend-stopped test (existing bar: ≤5% of ref spend)
   const spendStopped = !isNaN(refSpend) && refSpend > 0
     ? (cost / refSpend) <= 0.05
     : cost < 0.10
 
   if (spendStopped) {
     if (gp_delta >= 0)
-      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta,
+      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta, gp_basis,
                pct_of_ref: !isNaN(refSpend) && refSpend > 0 ? cost / refSpend : undefined }
-    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta,
+    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta, gp_basis,
                note: 'spend stopped but GP Δ<0: negation may have killed converting traffic' }
   }
 
-  // Spend not fully stopped → PARTIAL / LEAK (unchanged logic)
   if (!isNaN(refSpend) && refSpend > 0) {
     const ratio = cost / refSpend
-    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta }
-    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta }
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta, gp_basis }
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta, gp_basis }
   }
-  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta }
+  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta, gp_basis }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function judgeNegateTarget(ev: any, m: any): Judgment {
-  // Same logic as NEGATE_TERM (search_term ASIN as target)
   if (m.rows_found === 0) return { verdict: 'NO-DATA' }
 
   const cost     = safeN(m.cost)
@@ -210,11 +221,16 @@ function judgeNegateTarget(ev: any, m: any): Judgment {
     return                  { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', pre_gp_grading: true }
   }
 
-  const salesAfter  = safeN(m.sales_14d  ?? 0)
-  const beforeCost  = safeN(m.before_cost ?? 0)
-  const beforeSales = safeN(m.before_sales_14d ?? 0)
-  const gp_delta    = (salesAfter - cost) - (beforeSales - beforeCost)
-  const stopped     = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
+  // Layer 3.2: basis-resolved GP
+  const salesAfter      = safeN(m.sales_14d          ?? 0)
+  const beforeCost      = safeN(m.before_cost        ?? 0)
+  const beforeSales     = safeN(m.before_sales_14d   ?? 0)
+  const afterPurchases  = safeN(m.purchases_14d      ?? 0)
+  const beforePurchases = safeN(m.before_purchases_14d ?? 0)
+  const gp_delta  = computeGP(m, cost, afterPurchases, salesAfter)
+                  - computeGP(m, beforeCost, beforePurchases, beforeSales)
+  const gp_basis  = (m.gp_basis ?? 'revenue') as 'unit' | 'revenue'
+  const stopped   = (!isNaN(refSpend) && !isNaN(cost)) ? refSpend - cost : null
 
   const spendStopped = !isNaN(refSpend) && refSpend > 0
     ? (cost / refSpend) <= 0.05
@@ -222,18 +238,18 @@ function judgeNegateTarget(ev: any, m: any): Judgment {
 
   if (spendStopped) {
     if (gp_delta >= 0)
-      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta,
+      return { verdict: 'WIN',    euros_stopped: stopped, gp_delta, gp_basis,
                pct_of_ref: !isNaN(refSpend) && refSpend > 0 ? cost / refSpend : undefined }
-    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta,
+    return   { verdict: 'REVIEW', euros_stopped: stopped, gp_delta, gp_basis,
                note: 'spend stopped but GP Δ<0: negation may have killed converting traffic' }
   }
 
   if (!isNaN(refSpend) && refSpend > 0) {
     const ratio = cost / refSpend
-    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta }
-    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta }
+    if (ratio <= 0.50) return { verdict: 'PARTIAL', euros_stopped: stopped, pct_of_ref: ratio, pct_reduced: 1 - ratio, gp_delta, gp_basis }
+    return               { verdict: 'LEAK',          euros_stopped: stopped, pct_of_ref: ratio, gp_delta, gp_basis }
   }
-  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta }
+  return { verdict: 'PARTIAL', euros_stopped: stopped, note: 'refSpend unknown; absolute fallback', gp_delta, gp_basis }
 }
 
 function judgeBidAdjust(
@@ -246,7 +262,6 @@ function judgeBidAdjust(
   let   current = safeN(ev.current_bid)
   if (isNaN(current) && Array.isArray(ev.existing_targets) && ev.existing_targets.length > 0)
     current = safeN(ev.existing_targets[0].bid)
-  // REVIVE: current_bid not top-level; resolve from evidence.current_max (#8 fix — 2026-08-12).
   if (isNaN(current) && ev.kind === 'REVIVE' && ev.current_max != null)
     current = safeN(ev.current_max)
 
@@ -264,65 +279,63 @@ function judgeBidAdjust(
 
   if (m.rows_found === 0) return { verdict: 'NO-DATA', direction }
 
-  const afterCost   = safeN(m.cost)
-  const afterSales  = safeN(m.sales_14d)
-  const afterClicks = safeN(m.clicks)
-  const beforeCost  = safeN(m.before_cost)
-  const beforeSales = safeN(m.before_sales_14d)
-  const beforeClks  = safeN(m.before_clicks)
+  const afterCost       = safeN(m.cost)
+  const afterSales      = safeN(m.sales_14d)
+  const afterClicks     = safeN(m.clicks)
+  const afterPurchases  = safeN(m.purchases_14d      ?? 0)
+  const beforeCost      = safeN(m.before_cost)
+  const beforeSales     = safeN(m.before_sales_14d)
+  const beforeClks      = safeN(m.before_clicks)
+  const beforePurchases = safeN(m.before_purchases_14d ?? 0)
 
   const afterAcos  = afterSales  > 0 ? afterCost  / afterSales  : null
   const beforeAcos = beforeSales > 0 ? beforeCost / beforeSales : null
   const acosDelta  = (afterAcos !== null && beforeAcos !== null) ? afterAcos - beforeAcos : null
 
-  // GP delta — BID_ADJUST always has before/after (from Layer 2 onward)
+  // Layer 3.2: basis-resolved GP delta
   const gp_delta = (!isNaN(afterCost) && !isNaN(beforeCost))
-    ? (afterSales - afterCost) - (beforeSales - beforeCost)
+    ? computeGP(m, afterCost, afterPurchases, afterSales)
+      - computeGP(m, beforeCost, beforePurchases, beforeSales)
     : null
+  const gp_basis = (m.gp_basis ?? 'revenue') as 'unit' | 'revenue'
 
   if (direction === 'CUT') {
-    // WIN = gp_delta > 0 (saved spend exceeded any lost sales)
     if (gp_delta !== null && gp_delta > 0)
-      return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta }
-    // ACoS improvement alone without GP gain = PARTIAL
+      return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta, gp_basis }
     const acosBetter = afterAcos !== null && beforeAcos !== null && afterAcos < beforeAcos
     if (acosBetter)
-      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta, gp_basis,
                note: 'ACoS improved but GP Δ≤0' }
     const spendFell = afterCost < beforeCost * 0.90
     if (spendFell)
-      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta, gp_basis,
                note: 'spend fell but GP Δ≤0 (sales fell more)' }
-    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta }
+    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta, gp_basis }
   }
 
   if (direction === 'RAISE') {
     if (gp_delta !== null && gp_delta > 0) {
-      // Check market band: rolling ACoS vs target_acos + 5pp ceiling
       const marketAcos    = marketRollingAcos[countryCode]
       const marketAbove   = marketAcos != null && marketAcos > bandHigh
 
       if (!marketAbove) {
-        // Market in/below band: WIN
         const note = marketAcos != null
           ? `market ${(marketAcos * 100).toFixed(1)}% in/below band`
           : undefined
-        return { verdict: 'WIN', direction, acos_delta: acosDelta, gp_delta, note }
+        return { verdict: 'WIN', direction, acos_delta: acosDelta, gp_delta, gp_basis, note }
       }
-      // Above-band market: entity's own ACoS must also be ≤ band ceiling
       if (afterAcos == null || afterAcos <= bandHigh) {
-        return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta,
+        return { verdict: 'WIN',     direction, acos_delta: acosDelta, gp_delta, gp_basis,
                  note: `market ${(marketAcos! * 100).toFixed(1)}% above band; entity ACoS within ceiling` }
       }
-      return   { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+      return   { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta, gp_basis,
                  note: `GP Δ>0 but market ${(marketAcos! * 100).toFixed(1)}% above band; entity ACoS ${(afterAcos * 100).toFixed(1)}%>ceiling` }
     }
-    // gp_delta ≤ 0
     const clicksRose = afterClicks > beforeClks
     if (clicksRose)
-      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta,
+      return { verdict: 'PARTIAL', direction, acos_delta: acosDelta, gp_delta, gp_basis,
                note: 'clicks rose but GP Δ≤0' }
-    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta,
+    return { verdict: 'LEAK', direction, acos_delta: acosDelta, gp_delta, gp_basis,
              note: 'clicks did not rise and GP Δ≤0' }
   }
 
@@ -347,24 +360,34 @@ function judgeReplaceProductAd(ev: any, m: any): Judgment {
   const hcOrders = safeN(m.hc_orders      ?? 0)
   const b0Dark   = b0Impr === 0
   const hcServe  = hcImpr > 0 || hcClicks > 0
+  const gp_basis = (m.gp_basis ?? 'revenue') as 'unit' | 'revenue'
 
-  // GP delta informational — pair-level (L3.1 stamps only)
+  // Layer 3.2: basis-resolved GP (informational, pair-level)
   let gp_delta: number | null = null
   if (m.before_b0_spend != null && m.before_hc_spend != null) {
-    const afterGP  = safeN(m.hc_sales  ?? 0) + safeN(m.b0_sales  ?? 0)
-                   - safeN(m.hc_spend  ?? 0) - safeN(m.b0_spend  ?? 0)
-    const beforeGP = safeN(m.before_hc_sales ?? 0) + safeN(m.before_b0_sales ?? 0)
-                   - safeN(m.before_hc_spend ?? 0) - safeN(m.before_b0_spend ?? 0)
-    gp_delta = afterGP - beforeGP
+    if (m.gp_basis === 'unit' && m.gp_per_order != null) {
+      const gpo     = Number(m.gp_per_order)
+      const afterGP  = (safeN(m.hc_orders ?? 0) + safeN(m.b0_orders ?? 0)) * gpo
+                     - safeN(m.hc_spend  ?? 0) - safeN(m.b0_spend  ?? 0)
+      const beforeGP = (safeN(m.before_hc_orders ?? 0) + safeN(m.before_b0_orders ?? 0)) * gpo
+                     - safeN(m.before_hc_spend ?? 0) - safeN(m.before_b0_spend ?? 0)
+      gp_delta = afterGP - beforeGP
+    } else {
+      const afterGP  = safeN(m.hc_sales  ?? 0) + safeN(m.b0_sales  ?? 0)
+                     - safeN(m.hc_spend  ?? 0) - safeN(m.b0_spend  ?? 0)
+      const beforeGP = safeN(m.before_hc_sales ?? 0) + safeN(m.before_b0_sales ?? 0)
+                     - safeN(m.before_hc_spend ?? 0) - safeN(m.before_b0_spend ?? 0)
+      gp_delta = afterGP - beforeGP
+    }
   }
 
   if (b0Dark && hcServe)
-    return { verdict: 'WIN',     note: 'B0 dark, HC serving', b0_spend: b0Spend, hc_orders: hcOrders, gp_delta }
+    return { verdict: 'WIN',     note: 'B0 dark, HC serving', b0_spend: b0Spend, hc_orders: hcOrders, gp_delta, gp_basis }
   if (b0Dark)
-    return { verdict: 'PARTIAL', note: 'B0 dark but HC not yet serving', b0_spend: b0Spend, gp_delta }
+    return { verdict: 'PARTIAL', note: 'B0 dark but HC not yet serving', b0_spend: b0Spend, gp_delta, gp_basis }
   if (hcServe)
-    return { verdict: 'PARTIAL', note: 'HC serving but B0 still active', b0_spend: b0Spend, gp_delta }
-  return   { verdict: 'LEAK',    note: 'B0 still active, HC not serving', b0_spend: b0Spend, gp_delta }
+    return { verdict: 'PARTIAL', note: 'HC serving but B0 still active', b0_spend: b0Spend, gp_delta, gp_basis }
+  return   { verdict: 'LEAK',    note: 'B0 still active, HC not serving', b0_spend: b0Spend, gp_delta, gp_basis }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -373,27 +396,30 @@ function judgePromoteTerm(ev: any, m: any, horizon: string): Judgment {
   const clicks    = safeN(m.clicks)
   const purchases = safeN(m.purchases_14d ?? 0)
   if (isNaN(clicks)) return { verdict: 'NO-DATA', note: 'no clicks field in metrics' }
+  const gp_basis = (m.gp_basis ?? 'revenue') as 'unit' | 'revenue'
 
-  // GP delta informational (L3.1 stamps only)
+  // Layer 3.2: basis-resolved GP (informational)
   let gp_delta: number | null = null
   if (m.before_rows_found != null) {
-    const afterSales  = safeN(m.sales_14d  ?? 0)
-    const afterCost   = safeN(m.cost       ?? 0)
-    const beforeSales = safeN(m.before_sales_14d ?? 0)
-    const beforeCost  = safeN(m.before_cost ?? 0)
-    gp_delta = (afterSales - afterCost) - (beforeSales - beforeCost)
+    const afterSales      = safeN(m.sales_14d          ?? 0)
+    const afterCost       = safeN(m.cost               ?? 0)
+    const beforeSales     = safeN(m.before_sales_14d   ?? 0)
+    const beforeCost      = safeN(m.before_cost        ?? 0)
+    const afterPurchases  = safeN(m.purchases_14d      ?? 0)
+    const beforePurchases = safeN(m.before_purchases_14d ?? 0)
+    gp_delta = computeGP(m, afterCost, afterPurchases, afterSales)
+             - computeGP(m, beforeCost, beforePurchases, beforeSales)
   }
 
-  // WIN: serving (unchanged); STRONG = gp_delta > 0
   if (clicks > 0) {
     if (gp_delta != null && gp_delta > 0)
       return { verdict: 'WIN', note: 'STRONG: gp_delta>0',
-               clicks, purchases: purchases > 0 ? purchases : undefined, gp_delta }
+               clicks, purchases: purchases > 0 ? purchases : undefined, gp_delta, gp_basis }
     if (horizon === 't14' && purchases > 0)
-      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta }
-    return { verdict: 'WIN', note: 'serving at ' + horizon + ' (clicks>0; impression proxy)', clicks, gp_delta }
+      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta, gp_basis }
+    return { verdict: 'WIN', note: 'serving at ' + horizon + ' (clicks>0; impression proxy)', clicks, gp_delta, gp_basis }
   }
-  return { verdict: 'LEAK', note: 'rows found but zero clicks — keyword dark', clicks: 0, gp_delta }
+  return { verdict: 'LEAK', note: 'rows found but zero clicks — keyword dark', clicks: 0, gp_delta, gp_basis }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -406,25 +432,30 @@ function judgePromoteAsin(ev: any, m: any, horizon: string): Judgment {
   if (m.rows_found === 0) return { verdict: 'NO-DATA' }
   const clicks    = safeN(m.clicks)
   const purchases = safeN(m.purchases ?? m.purchases_14d ?? 0)
+  const gp_basis  = (m.gp_basis ?? 'revenue') as 'unit' | 'revenue'
 
+  // Layer 3.2: basis-resolved GP (informational)
   let gp_delta: number | null = null
   if (m.before_rows_found != null) {
-    const afterSales  = safeN(m.sales  ?? m.sales_14d  ?? 0)
-    const afterCost   = safeN(m.cost   ?? 0)
-    const beforeSales = safeN(m.before_sales ?? m.before_sales_14d ?? 0)
-    const beforeCost  = safeN(m.before_cost ?? 0)
-    gp_delta = (afterSales - afterCost) - (beforeSales - beforeCost)
+    const afterSales      = safeN(m.sales  ?? m.sales_14d  ?? 0)
+    const afterCost       = safeN(m.cost   ?? 0)
+    const beforeSales     = safeN(m.before_sales ?? m.before_sales_14d ?? 0)
+    const beforeCost      = safeN(m.before_cost ?? 0)
+    const afterPurchases  = safeN(m.purchases      ?? m.purchases_14d      ?? 0)
+    const beforePurchases = safeN(m.before_purchases ?? m.before_purchases_14d ?? 0)
+    gp_delta = computeGP(m, afterCost, afterPurchases, afterSales)
+             - computeGP(m, beforeCost, beforePurchases, beforeSales)
   }
 
   if (clicks > 0) {
     if (gp_delta != null && gp_delta > 0)
       return { verdict: 'WIN', note: 'STRONG: gp_delta>0', clicks,
-               purchases: purchases > 0 ? purchases : undefined, gp_delta }
+               purchases: purchases > 0 ? purchases : undefined, gp_delta, gp_basis }
     if (horizon === 't14' && purchases > 0)
-      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta }
-    return { verdict: 'WIN', note: 'serving (clicks>0)', clicks, gp_delta }
+      return { verdict: 'WIN', note: 'STRONG: orders>0 at t14', clicks, purchases, gp_delta, gp_basis }
+    return { verdict: 'WIN', note: 'serving (clicks>0)', clicks, gp_delta, gp_basis }
   }
-  return { verdict: 'LEAK', note: 'target dark (rows found, zero clicks)', clicks: 0, gp_delta }
+  return { verdict: 'LEAK', note: 'target dark (rows found, zero clicks)', clicks: 0, gp_delta, gp_basis }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -453,21 +484,21 @@ function judgeBudgetAdjust(ev: any, m: any): Judgment {
   const salesChg = (safeN(m.before_sales_14d) > 0)
     ? (safeN(m.sales_14d) - safeN(m.before_sales_14d)) / safeN(m.before_sales_14d)
     : null
-  // GP delta (L3.1-parity; campaign_daily before/after always present for BUDGET_ADJUST).
+  // Layer 3.2: basis-resolved GP delta
+  const afterPurchases  = safeN(m.purchases_14d      ?? 0)
+  const beforePurchases = safeN(m.before_purchases_14d ?? 0)
   const gp_delta = (!isNaN(safeN(m.cost)) && !isNaN(safeN(m.before_cost)))
-    ? (safeN(m.sales_14d) - safeN(m.cost)) - (safeN(m.before_sales_14d) - safeN(m.before_cost))
+    ? computeGP(m, safeN(m.cost), afterPurchases, safeN(m.sales_14d))
+      - computeGP(m, safeN(m.before_cost), beforePurchases, safeN(m.before_sales_14d))
     : null
-  // WIN  = spend rose (raise took) AND gp_delta ≥ 0.
-  // LEAK = spend rose but GP fell (volume gained at a loss).
-  // PARTIAL = spend flat/fell (raise did not take; no directional signal).
-  // BUDGET_ADJUST is raise-only by generation — no direction inversion needed (#3 fix — 2026-08-12).
+  const gp_basis = (m.gp_basis ?? 'revenue') as 'unit' | 'revenue'
   let verdict: Verdict
   if (spendChg === null) {
-    verdict = 'PARTIAL' // no baseline — cannot judge
+    verdict = 'PARTIAL'
   } else if (spendChg > 0) {
     verdict = (gp_delta !== null && gp_delta >= 0) ? 'WIN' : 'LEAK'
   } else {
-    verdict = 'PARTIAL' // raise did not take
+    verdict = 'PARTIAL'
   }
   return {
     verdict,
@@ -475,6 +506,7 @@ function judgeBudgetAdjust(ev: any, m: any): Judgment {
     spend_change_pct: spendChg,
     sales_change_pct: salesChg,
     gp_delta,
+    gp_basis,
   }
 }
 
@@ -533,17 +565,17 @@ const SMALL_TYPES = new Set([
 // ── Adaptation notes ──────────────────────────────────────────────────────────
 export const ADAPTATIONS: Record<string, string> = {
   NEGATE_TARGET:
-    'NEGATE_TARGET: handler added 2026-08-11; metrics: clicks+cost+sales_14d from amazon_search_term_daily WHERE search_term = target ASIN. L3.1: before-window added. WIN requires spend stopped (≤5% ev.spend) AND gp_delta≥0; spend stopped + gp_delta<0 → REVIEW.',
+    'NEGATE_TARGET: handler added 2026-08-11; metrics: clicks+cost+sales_14d from amazon_search_term_daily WHERE search_term = target ASIN. L3.1: before-window added. WIN requires spend stopped (≤5% ev.spend) AND gp_delta≥0; spend stopped + gp_delta<0 → REVIEW. L3.2: gp_basis stamped; unit basis uses purchases_14d × gp_per_order.',
   REPLACE_PRODUCT_AD:
-    'REPLACE_PRODUCT_AD: handler added 2026-08-11; B0+HC ad-pair rows from amazon_advertised_product_daily scoped by campaign_id. L3.1: b0_sales, hc_sales + before-window added; gp_delta informational. Execution bar unchanged.',
+    'REPLACE_PRODUCT_AD: handler added 2026-08-11; B0+HC ad-pair rows from amazon_advertised_product_daily scoped by campaign_id. L3.1: b0_sales, hc_sales + before-window added; gp_delta informational. L3.2: b0_orders, before_b0_orders, before_hc_orders added; unit basis uses (hc_orders+b0_orders) × gp_per_order.',
   PROMOTE_TERM:
-    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy. L3.1: before-window added; gp_delta informational; STRONG = gp_delta>0.',
+    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy. L3.1: before-window added; gp_delta informational; STRONG = gp_delta>0. L3.2: gp_basis stamped; unit basis uses purchases_14d × gp_per_order.',
   CREATIVE_KEYWORD:
-    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy. L3.1: before-window added.',
+    'PROMOTE_TERM / CREATIVE_KEYWORD: stamp metrics lack impressions. Using clicks>0 as serving proxy. L3.2: gp_basis stamped.',
   BID_ADJUST:
-    'BID_ADJUST direction: resolved from evidence.current_bid vs pushed_bid (fallback: existing_targets[0].bid). L3.1: CUT WIN = gp_delta>0; ACoS improvement alone = PARTIAL. RAISE WIN = gp_delta>0 + market ACoS in/below band (target±5pp); above-band market also requires entity ACoS≤ceiling.',
+    'BID_ADJUST direction: resolved from evidence.current_bid vs pushed_bid (fallback: existing_targets[0].bid). L3.1: CUT WIN = gp_delta>0; ACoS improvement alone = PARTIAL. RAISE WIN = gp_delta>0 + market ACoS in/below band (target±5pp); above-band market also requires entity ACoS≤ceiling. L3.2: gp_basis stamped; unit basis uses purchases_14d × gp_per_order. GP medians never mixed across bases.',
   NEGATE_TERM:
-    'NEGATE_TERM: L3.1 GP grading: WIN = spend stopped (≤5% ev.spend) AND gp_delta≥0. Spend stopped + gp_delta<0 → REVIEW. Legacy stamps (no before-window) graded on old definition, tagged pre_gp_grading.',
+    'NEGATE_TERM: L3.1 GP grading: WIN = spend stopped (≤5% ev.spend) AND gp_delta≥0. Spend stopped + gp_delta<0 → REVIEW. Legacy stamps (no before-window) graded on old definition, tagged pre_gp_grading. L3.2: gp_basis stamped; unit basis uses purchases_14d × gp_per_order.',
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -691,8 +723,8 @@ export interface AcosContributionMonthEntry {
   bid_cut_delta_med:   number | null
   bid_raise_delta_med: number | null
   n_actions:           number
-  rolling_acos?:       number | null        // market 30-day rolling ACoS
-  band_position?:      'below' | 'in' | 'above' | null   // vs band_low/band_high
+  rolling_acos?:       number | null
+  band_position?:      'below' | 'in' | 'above' | null
 }
 
 export interface AcosContributionEstateMonth {
@@ -713,8 +745,6 @@ export function computeAcosContribution(
   judged: JudgedRow[],
   marketMonthSales: MarketMonthSales,
   marketRollingAcos: Record<string, number> = {},
-  // Per-market target_acos from amazon_profiles — replaces hardcoded 25/35 constants
-  // (#4 fix — 2026-08-12). Callers must pass this; defaults to empty (band falls back to 0.30±0.05).
   marketTargetAcos: Record<string, number> = {},
 ): AcosContributionResult {
   const getMonth = (r: JudgedRow): string | null => {

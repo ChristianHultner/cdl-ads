@@ -21,7 +21,11 @@ Sources: `scripts/generate-recommendations.mjs` · `scripts/stamp-outcomes.mjs` 
 
 **NULL semantics:** `NULL` `gp_per_order` means no margin ruling has been made for that profile. Revenue-based GP (`sales − spend`) is retained and labeled as such. `NULL` must never be treated as zero, derived, or converted.
 
-**Historical grades:** Stamps created before the arithmetic switch (frame 2) carry `pre_unit_gp: true` and were graded on revenue-based GP. The tag is applied when frame 2 lands; this entry records the ruling that makes them historical.
+**Arithmetic switch (frame 2, 2026-08-27):** Grading now runs on `gp_per_order` where ruled. Every new stamp carries `gp_basis` (`'unit'` or `'revenue'`) and `gp_per_order` in its metrics JSON. The scorecard resolves GP via `computeGP` / `resolveGP` at judgment time — reading `gp_basis` and `gp_per_order` from the already-stamped metrics.
+
+**Mixed-basis aggregation banned:** `gp_delta` values from `gp_basis='unit'` and `gp_basis='revenue'` stamps must never be summed or medianed together. The scorecard prints them separately by basis in all display sections.
+
+**Historical grades:** Stamps created before this frame lack `gp_basis` in their metrics. They are identified by absence of `gp_basis` (the scorecard defaults to `'revenue'` when the field is absent) and were graded on revenue-based GP. The `pre_gp_grading` tag on legacy stamps (those lacking a before-window) remains the explicit audit marker; all pre-frame-2 stamps are implicitly revenue-basis by absence.
 
 ---
 

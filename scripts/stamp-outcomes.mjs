@@ -1,23 +1,21 @@
 // scripts/stamp-outcomes.mjs
 // Usage: node --env-file=.env.local scripts/stamp-outcomes.mjs --profile <id>
 //
-// Layer 3.1: GP-derived judgment support.
-// Per-handler additions vs Layer 2:
+// Layer 3.2: gp_per_order basis. gp_basis ('unit'|'revenue') + gp_per_order
+// stamped into every outcome. Unit basis: purchases_14d × gp_per_order − spend.
+// Revenue basis (NULL gp_per_order): sales_14d − spend, unchanged.
 //
-//  NEGATE_TERM        : + sales_14d (after); + before_cost, before_sales_14d,
-//                         before_clicks, before_rows_found
-//  NEGATE_TARGET      : same as NEGATE_TERM
-//  PROMOTE_TERM       : + before_cost, before_sales_14d, before_clicks,
-//                         before_purchases_14d, before_rows_found
-//  CREATIVE_KEYWORD   : same as PROMOTE_TERM
-//  PROMOTE_ASIN       : + before_cost, before_sales (sales_14d), before_clicks,
-//                         before_purchases, before_rows_found
-//  CREATIVE_TARGET    : same as PROMOTE_ASIN
-//  REPLACE_PRODUCT_AD : + b0_sales, hc_sales (after); + before_b0_spend,
-//                         before_b0_sales, before_b0_rows_found, before_hc_spend,
-//                         before_hc_sales, before_hc_rows_found
-//  BID_ADJUST / BUDGET_ADJUST / PAUSE_CAMPAIGN / CREATE_STRUCTURE:
-//                         NO CHANGE — before/after cost + sales already present
+// Per-handler additions vs Layer 3.1:
+//
+//  NEGATE_TERM        : + purchases_14d (after); + before_purchases_14d;
+//                         + gp_basis, gp_per_order
+//  NEGATE_TARGET      : same
+//  PROMOTE_TERM/CK    : + gp_basis, gp_per_order (purchases already present)
+//  PROMOTE_ASIN/CT    : + gp_basis, gp_per_order (purchases already present)
+//  REPLACE_PRODUCT_AD : + b0_orders (after); + before_b0_orders,
+//                         before_hc_orders; + gp_basis, gp_per_order
+//  BID_ADJUST family  : + purchases_14d (after); + before_purchases_14d;
+//                         + gp_basis, gp_per_order
 //
 // rows_found honest as ever: 0 → still insert, never fake before-window.
 // DO NOT run during write+commit bites; call only when grading.
@@ -48,6 +46,15 @@ const HORIZONS = [
   { key: 't30', days: 30 },
 ];
 const MS_PER_DAY = 86_400_000;
+
+// ── Fetch gp_per_order for this profile (once per run) ───────────────────────
+const { rows: profRows } = await pool.query(
+  `SELECT gp_per_order::float AS gp_per_order FROM amazon_profiles WHERE profile_id = $1`,
+  [profileIdStr],
+);
+const gpPerOrder = (profRows[0]?.gp_per_order != null) ? Number(profRows[0].gp_per_order) : null;
+const gpBasis    = gpPerOrder != null ? 'unit' : 'revenue';
+console.log(`profile ${profileId}: gp_basis=${gpBasis}${gpPerOrder != null ? ` (gp_per_order=${gpPerOrder})` : ''}`);
 
 // ── 1. Fetch PUSHED recs with a resolvable pushed_at ───────────────────────
 const { rows: recs } = await pool.query(
@@ -102,24 +109,28 @@ for (const rec of recs) {
 
     try {
       // ── NEGATE_TERM ──────────────────────────────────────────────────────
-      // L3.1 additions: sales_14d (after); before-window (cost, sales_14d,
+      // Layer 3.1: sales_14d (after); before-window (cost, sales_14d,
       //   clicks, rows_found).
+      // Layer 3.2: + purchases_14d (after); + before_purchases_14d;
+      //             + gp_basis, gp_per_order
       if (rec.rec_type === 'NEGATE_TERM') {
         const { rows } = await pool.query(
-          `SELECT COALESCE(SUM(clicks),    0)::bigint AS clicks,
-                  COALESCE(SUM(cost),      0)         AS cost,
-                  COALESCE(SUM(sales_14d), 0)         AS sales_14d,
-                  COUNT(*)::int                       AS rows_found
+          `SELECT COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                  COALESCE(SUM(cost),          0)         AS cost,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS purchases_14d,
+                  COALESCE(SUM(sales_14d),     0)         AS sales_14d,
+                  COUNT(*)::int                           AS rows_found
              FROM amazon_search_term_daily
             WHERE profile_id  = $1 AND search_term = $2
               AND date >= $3::date AND date < $4::date`,
           [profileIdStr, rec.target_text, windowStart, windowEnd],
         );
         const { rows: bRows } = await pool.query(
-          `SELECT COALESCE(SUM(clicks),    0)::bigint AS before_clicks,
-                  COALESCE(SUM(cost),      0)         AS before_cost,
-                  COALESCE(SUM(sales_14d), 0)         AS before_sales_14d,
-                  COUNT(*)::int                       AS before_rows_found
+          `SELECT COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                  COALESCE(SUM(cost),          0)         AS before_cost,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases_14d,
+                  COALESCE(SUM(sales_14d),     0)         AS before_sales_14d,
+                  COUNT(*)::int                           AS before_rows_found
              FROM amazon_search_term_daily
             WHERE profile_id  = $1 AND search_term = $2
               AND date >= $3::date AND date < $4::date`,
@@ -128,36 +139,44 @@ for (const rec of recs) {
         const r = rows[0]; const b = bRows[0];
         metrics = {
           ...metrics,
-          clicks:            Number(r.clicks),
-          cost:              Number(r.cost),
-          sales_14d:         Number(r.sales_14d),
-          rows_found:        Number(r.rows_found),
-          before_clicks:     Number(b.before_clicks),
-          before_cost:       Number(b.before_cost),
-          before_sales_14d:  Number(b.before_sales_14d),
-          before_rows_found: Number(b.before_rows_found),
+          clicks:               Number(r.clicks),
+          cost:                 Number(r.cost),
+          purchases_14d:        Number(r.purchases_14d),
+          sales_14d:            Number(r.sales_14d),
+          rows_found:           Number(r.rows_found),
+          before_clicks:        Number(b.before_clicks),
+          before_cost:          Number(b.before_cost),
+          before_purchases_14d: Number(b.before_purchases_14d),
+          before_sales_14d:     Number(b.before_sales_14d),
+          before_rows_found:    Number(b.before_rows_found),
+          gp_basis,
+          gp_per_order:         gpPerOrder,
         };
 
       // ── NEGATE_TARGET ────────────────────────────────────────────────────
-      // L3.1 additions: sales_14d (after); before-window (cost, sales_14d,
+      // Layer 3.1: sales_14d (after); before-window (cost, sales_14d,
       //   clicks, rows_found).
+      // Layer 3.2: + purchases_14d (after); + before_purchases_14d;
+      //             + gp_basis, gp_per_order
       } else if (rec.rec_type === 'NEGATE_TARGET') {
         const targetAsin = (rec.target_text || '').toLowerCase();
         const { rows: ntRows } = await pool.query(
-          `SELECT COALESCE(SUM(clicks),    0)::bigint AS clicks,
-                  COALESCE(SUM(cost),      0)         AS cost,
-                  COALESCE(SUM(sales_14d), 0)         AS sales_14d,
-                  COUNT(*)::int                       AS rows_found
+          `SELECT COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                  COALESCE(SUM(cost),          0)         AS cost,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS purchases_14d,
+                  COALESCE(SUM(sales_14d),     0)         AS sales_14d,
+                  COUNT(*)::int                           AS rows_found
              FROM amazon_search_term_daily
             WHERE profile_id = $1 AND LOWER(search_term) = $2
               AND date >= $3::date AND date < $4::date`,
           [profileIdStr, targetAsin, windowStart, windowEnd],
         );
         const { rows: nbRows } = await pool.query(
-          `SELECT COALESCE(SUM(clicks),    0)::bigint AS before_clicks,
-                  COALESCE(SUM(cost),      0)         AS before_cost,
-                  COALESCE(SUM(sales_14d), 0)         AS before_sales_14d,
-                  COUNT(*)::int                       AS before_rows_found
+          `SELECT COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                  COALESCE(SUM(cost),          0)         AS before_cost,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases_14d,
+                  COALESCE(SUM(sales_14d),     0)         AS before_sales_14d,
+                  COUNT(*)::int                           AS before_rows_found
              FROM amazon_search_term_daily
             WHERE profile_id = $1 AND LOWER(search_term) = $2
               AND date >= $3::date AND date < $4::date`,
@@ -166,19 +185,24 @@ for (const rec of recs) {
         const ntr = ntRows[0]; const nb = nbRows[0];
         metrics = {
           ...metrics,
-          clicks:            Number(ntr.clicks),
-          cost:              Number(ntr.cost),
-          sales_14d:         Number(ntr.sales_14d),
-          rows_found:        Number(ntr.rows_found),
-          before_clicks:     Number(nb.before_clicks),
-          before_cost:       Number(nb.before_cost),
-          before_sales_14d:  Number(nb.before_sales_14d),
-          before_rows_found: Number(nb.before_rows_found),
+          clicks:               Number(ntr.clicks),
+          cost:                 Number(ntr.cost),
+          purchases_14d:        Number(ntr.purchases_14d),
+          sales_14d:            Number(ntr.sales_14d),
+          rows_found:           Number(ntr.rows_found),
+          before_clicks:        Number(nb.before_clicks),
+          before_cost:          Number(nb.before_cost),
+          before_purchases_14d: Number(nb.before_purchases_14d),
+          before_sales_14d:     Number(nb.before_sales_14d),
+          before_rows_found:    Number(nb.before_rows_found),
+          gp_basis,
+          gp_per_order:         gpPerOrder,
         };
 
       // ── PROMOTE_TERM / CREATIVE_KEYWORD ──────────────────────────────────
-      // L3.1 additions: before-window (cost, sales_14d, clicks,
+      // Layer 3.1: before-window (cost, sales_14d, clicks,
       //   purchases_14d, rows_found).
+      // Layer 3.2: + gp_basis, gp_per_order (purchases already present)
       } else if (rec.rec_type === 'PROMOTE_TERM' || rec.rec_type === 'CREATIVE_KEYWORD') {
         const { rows } = await pool.query(
           `SELECT COALESCE(SUM(clicks),        0)::bigint AS clicks,
@@ -215,11 +239,14 @@ for (const rec of recs) {
           before_purchases_14d: Number(b.before_purchases_14d),
           before_sales_14d:     Number(b.before_sales_14d),
           before_rows_found:    Number(b.before_rows_found),
+          gp_basis,
+          gp_per_order:         gpPerOrder,
         };
 
       // ── PROMOTE_ASIN / CREATIVE_TARGET ───────────────────────────────────
-      // L3.1 additions: before-window (cost, sales (sales_14d), clicks,
+      // Layer 3.1: before-window (cost, sales (sales_14d), clicks,
       //   purchases, rows_found).
+      // Layer 3.2: + gp_basis, gp_per_order (purchases already present)
       } else if (rec.rec_type === 'PROMOTE_ASIN' || rec.rec_type === 'CREATIVE_TARGET') {
         const asin = rec.target_text.toLowerCase();
         const { rows } = await pool.query(
@@ -257,12 +284,15 @@ for (const rec of recs) {
           before_purchases:  Number(b.before_purchases),
           before_sales:      Number(b.before_sales),
           before_rows_found: Number(b.before_rows_found),
+          gp_basis,
+          gp_per_order:      gpPerOrder,
         };
 
       // ── REPLACE_PRODUCT_AD ───────────────────────────────────────────────
-      // L3.1 additions: b0_sales, hc_sales (after-window); before-window for
-      //   both B0 (before_b0_spend, before_b0_sales, before_b0_rows_found) and
-      //   HC (before_hc_spend, before_hc_sales, before_hc_rows_found).
+      // Layer 3.1: b0_sales, hc_sales (after-window); before-window for
+      //   both B0 and HC.
+      // Layer 3.2: + b0_orders (after); + before_b0_orders, before_hc_orders;
+      //             + gp_basis, gp_per_order
       } else if (rec.rec_type === 'REPLACE_PRODUCT_AD') {
         const b0Asin = (ev.b0_asin   || '').toLowerCase();
         const hcAsin = (ev.hc_isbn10 || '').toLowerCase();
@@ -270,11 +300,12 @@ for (const rec of recs) {
 
         // B0 after
         const { rows: b0Rows } = await pool.query(
-          `SELECT COALESCE(SUM(cost),        0)         AS b0_spend,
-                  COALESCE(SUM(clicks),      0)::bigint AS b0_clicks,
-                  COALESCE(SUM(impressions), 0)::bigint AS b0_impressions,
-                  COALESCE(SUM(sales_14d),   0)         AS b0_sales,
-                  COUNT(*)::int                         AS b0_rows_found
+          `SELECT COALESCE(SUM(cost),          0)         AS b0_spend,
+                  COALESCE(SUM(clicks),        0)::bigint AS b0_clicks,
+                  COALESCE(SUM(impressions),   0)::bigint AS b0_impressions,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS b0_orders,
+                  COALESCE(SUM(sales_14d),     0)         AS b0_sales,
+                  COUNT(*)::int                           AS b0_rows_found
              FROM amazon_advertised_product_daily
             WHERE profile_id = $1 AND LOWER(asin) = $2 AND campaign_id = $3
               AND date >= $4::date AND date < $5::date`,
@@ -295,9 +326,10 @@ for (const rec of recs) {
         );
         // B0 before
         const { rows: b0bRows } = await pool.query(
-          `SELECT COALESCE(SUM(cost),      0)         AS before_b0_spend,
-                  COALESCE(SUM(sales_14d), 0)         AS before_b0_sales,
-                  COUNT(*)::int                       AS before_b0_rows_found
+          `SELECT COALESCE(SUM(cost),          0)         AS before_b0_spend,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS before_b0_orders,
+                  COALESCE(SUM(sales_14d),     0)         AS before_b0_sales,
+                  COUNT(*)::int                           AS before_b0_rows_found
              FROM amazon_advertised_product_daily
             WHERE profile_id = $1 AND LOWER(asin) = $2 AND campaign_id = $3
               AND date >= $4::date AND date < $5::date`,
@@ -305,9 +337,10 @@ for (const rec of recs) {
         );
         // HC before
         const { rows: hcbRows } = await pool.query(
-          `SELECT COALESCE(SUM(cost),      0)         AS before_hc_spend,
-                  COALESCE(SUM(sales_14d), 0)         AS before_hc_sales,
-                  COUNT(*)::int                       AS before_hc_rows_found
+          `SELECT COALESCE(SUM(cost),          0)         AS before_hc_spend,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS before_hc_orders,
+                  COALESCE(SUM(sales_14d),     0)         AS before_hc_sales,
+                  COUNT(*)::int                           AS before_hc_rows_found
              FROM amazon_advertised_product_daily
             WHERE profile_id = $1 AND LOWER(asin) = $2 AND campaign_id = $3
               AND date >= $4::date AND date < $5::date`,
@@ -324,6 +357,7 @@ for (const rec of recs) {
           b0_spend:             Number(b0.b0_spend),
           b0_clicks:            Number(b0.b0_clicks),
           b0_impressions:       Number(b0.b0_impressions),
+          b0_orders:            Number(b0.b0_orders),
           b0_sales:             Number(b0.b0_sales),
           hc_spend:             Number(hc.hc_spend),
           hc_clicks:            Number(hc.hc_clicks),
@@ -331,18 +365,24 @@ for (const rec of recs) {
           hc_orders:            Number(hc.hc_orders),
           hc_sales:             Number(hc.hc_sales),
           before_b0_spend:      Number(b0b.before_b0_spend),
+          before_b0_orders:     Number(b0b.before_b0_orders),
           before_b0_sales:      Number(b0b.before_b0_sales),
           before_b0_rows_found: Number(b0b.before_b0_rows_found),
           before_hc_spend:      Number(hcb.before_hc_spend),
+          before_hc_orders:     Number(hcb.before_hc_orders),
           before_hc_sales:      Number(hcb.before_hc_sales),
           before_hc_rows_found: Number(hcb.before_hc_rows_found),
           rows_found:           Number(b0.b0_rows_found) + Number(hc.hc_rows_found),
           b0_rows_found:        Number(b0.b0_rows_found),
           hc_rows_found:        Number(hc.hc_rows_found),
+          gp_basis,
+          gp_per_order:         gpPerOrder,
         };
 
       // ── BID_ADJUST (incl. REVIVE) / BUDGET_ADJUST / PAUSE_CAMPAIGN / CREATE_STRUCTURE
-      // NO CHANGE — before/after cost + sales_14d already captured in Layer 2.
+      // Layer 3.1: before/after cost + sales already present.
+      // Layer 3.2: + purchases_14d (after); + before_purchases_14d;
+      //             + gp_basis, gp_per_order
       } else if (
         rec.rec_type === 'BID_ADJUST'       ||
         rec.rec_type === 'BUDGET_ADJUST'    ||
@@ -351,22 +391,24 @@ for (const rec of recs) {
       ) {
         const campId = String(ev.campaign_id ?? rec.campaign_id ?? rec.target_text);
         const { rows: curr } = await pool.query(
-          `SELECT COALESCE(SUM(cost),        0)         AS cost,
-                  COALESCE(SUM(sales_14d),   0)         AS sales_14d,
-                  COALESCE(SUM(clicks),      0)::bigint AS clicks,
-                  COALESCE(SUM(impressions), 0)::bigint AS impressions,
-                  COUNT(*)::int                         AS rows_found
+          `SELECT COALESCE(SUM(cost),          0)         AS cost,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS purchases_14d,
+                  COALESCE(SUM(sales_14d),     0)         AS sales_14d,
+                  COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                  COALESCE(SUM(impressions),   0)::bigint AS impressions,
+                  COUNT(*)::int                           AS rows_found
              FROM amazon_campaign_daily
             WHERE profile_id = $1 AND campaign_id = $2
               AND date >= $3::date AND date < $4::date`,
           [profileIdStr, campId, windowStart, windowEnd],
         );
         const { rows: before } = await pool.query(
-          `SELECT COALESCE(SUM(cost),        0)         AS before_cost,
-                  COALESCE(SUM(sales_14d),   0)         AS before_sales_14d,
-                  COALESCE(SUM(clicks),      0)::bigint AS before_clicks,
-                  COALESCE(SUM(impressions), 0)::bigint AS before_impressions,
-                  COUNT(*)::int                         AS before_rows_found
+          `SELECT COALESCE(SUM(cost),          0)         AS before_cost,
+                  COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases_14d,
+                  COALESCE(SUM(sales_14d),     0)         AS before_sales_14d,
+                  COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                  COALESCE(SUM(impressions),   0)::bigint AS before_impressions,
+                  COUNT(*)::int                           AS before_rows_found
              FROM amazon_campaign_daily
             WHERE profile_id = $1 AND campaign_id = $2
               AND date >= $3::date AND date < $4::date`,
@@ -375,16 +417,20 @@ for (const rec of recs) {
         const c = curr[0]; const b = before[0];
         metrics = {
           ...metrics,
-          cost:               Number(c.cost),
-          sales_14d:          Number(c.sales_14d),
-          clicks:             Number(c.clicks),
-          impressions:        Number(c.impressions),
-          rows_found:         Number(c.rows_found),
-          before_cost:        Number(b.before_cost),
-          before_sales_14d:   Number(b.before_sales_14d),
-          before_clicks:      Number(b.before_clicks),
-          before_impressions: Number(b.before_impressions),
-          before_rows_found:  Number(b.before_rows_found),
+          cost:                 Number(c.cost),
+          purchases_14d:        Number(c.purchases_14d),
+          sales_14d:            Number(c.sales_14d),
+          clicks:               Number(c.clicks),
+          impressions:          Number(c.impressions),
+          rows_found:           Number(c.rows_found),
+          before_cost:          Number(b.before_cost),
+          before_purchases_14d: Number(b.before_purchases_14d),
+          before_sales_14d:     Number(b.before_sales_14d),
+          before_clicks:        Number(b.before_clicks),
+          before_impressions:   Number(b.before_impressions),
+          before_rows_found:    Number(b.before_rows_found),
+          gp_basis,
+          gp_per_order:         gpPerOrder,
         };
       }
     } catch (err) {
