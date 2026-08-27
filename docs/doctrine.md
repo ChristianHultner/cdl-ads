@@ -11,6 +11,20 @@ Sources: `scripts/generate-recommendations.mjs` · `scripts/stamp-outcomes.mjs` 
 
 ---
 
+## GP Basis
+
+**Ruling (migration 028, 2026-08-27):** Engine GP is computed as `purchases_14d × gp_per_order − spend`, per profile, in native currency. No FX conversion is ever applied.
+
+`gp_per_order` is a business ruling stored in `amazon_profiles.gp_per_order` (nullable `numeric`). Ruled values: US profile `139446882235960` → 4.40 USD/order; ES profile `2263723137827296` → 5.00 EUR/order. All other profiles `NULL`.
+
+**Per-order, not per-unit:** The margin is applied per order (`purchases_14d`), not per unit sold. Multi-unit orders count as one order. This produces a ~6% GP understatement by design — conservative by ruling. No `units` column exists in any daily table; no derivation from orders to units is permitted.
+
+**NULL semantics:** `NULL` `gp_per_order` means no margin ruling has been made for that profile. Revenue-based GP (`sales − spend`) is retained and labeled as such. `NULL` must never be treated as zero, derived, or converted.
+
+**Historical grades:** Stamps created before the arithmetic switch (frame 2) carry `pre_unit_gp: true` and were graded on revenue-based GP. The tag is applied when frame 2 lands; this entry records the ruling that makes them historical.
+
+---
+
 ## a. CANDIDATE PIPELINE
 
 ### Flowchart
