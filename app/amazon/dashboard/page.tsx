@@ -6,6 +6,7 @@ import VerdictStrip,  { type MarketVerdictRow }  from './components/VerdictStrip
 import ChartSection,  { type MarketChartData }   from './components/ChartSection'
 import MoversRow,     { type MoverRow, type ClusterStats } from './components/MoversRow'
 import MachineFooter, { type MachineData }       from './components/MachineFooter'
+import LongTermSection, { type LongTermMarket, type LongTermPoint } from './components/LongTermSection'
 import type { ChartPoint } from './components/SalesSpendChart'
 
 export default async function DashboardPage() {
@@ -18,6 +19,7 @@ export default async function DashboardPage() {
     moverRows,
     watchdogRow,
     actionsRow,
+    longTermRows,
   ] = await Promise.all([
 
     // ── Verdict strip: this week + 4-week prior-avg, per profile/currency ──
@@ -131,6 +133,27 @@ export default async function DashboardPage() {
       WHERE status = 'PUSHED'
         AND pushed_at >= date_trunc('month', CURRENT_DATE)
     `,
+
+    // ── Long-term: console_history + gp_per_order from amazon_profiles ──
+    // display-only truth layer — never joined to daily_rollup.
+    // Rolling-12 computation and window validation done in TypeScript shaping below.
+    sql`
+      SELECT
+        ch.market,
+        ch.year,
+        ch.month,
+        ch.spend::float,
+        ch.sales::float,
+        ch.orders::float,
+        (SELECT MAX(p2.gp_per_order)::float
+           FROM amazon_profiles p2
+          WHERE p2.country_code = ch.market) AS gp_per_order,
+        (SELECT MAX(p2.currency_code)
+           FROM amazon_profiles p2
+          WHERE p2.country_code = ch.market) AS currency_code
+      FROM console_history ch
+      ORDER BY ch.market, ch.year, ch.month
+    `,
   ])
 
   // ── Shape verdict rows ───────────────────────────────────────────────────
@@ -211,6 +234,47 @@ export default async function DashboardPage() {
   const gainers   = allMovers.slice(0, 3)
   const decliners = [...allMovers].sort((a, b) => a.delta - b.delta).slice(0, 3)
 
+  // ── Shape long-term rolling-12 data ──────────────────────────────────────
+  // console_history is never joined to daily_rollup; read standalone here.
+  type LtRaw = {
+    market: string; year: number; month: number;
+    spend: number; sales: number; orders: number;
+    gp_per_order: number | null; currency_code: string
+  }
+  const ltByMarket: Record<string, LtRaw[]> = {}
+  for (const r of longTermRows as LtRaw[]) {
+    (ltByMarket[r.market] ??= []).push(r)
+  }
+
+  const ltMarkets: LongTermMarket[] = []
+  for (const [country, rows] of Object.entries(ltByMarket)) {
+    const gpPerOrder = rows[0]?.gp_per_order ?? null
+    const currency   = rows[0]?.currency_code ?? ''
+    const pts: LongTermPoint[] = []
+
+    for (let i = 11; i < rows.length; i++) {
+      // A rolling-12 point is only valid when all 12 months are consecutive.
+      let consecutive = true
+      for (let k = i - 11; k < i; k++) {
+        const ym0 = rows[k].year * 12 + rows[k].month
+        const ym1 = rows[k + 1].year * 12 + rows[k + 1].month
+        if (ym1 !== ym0 + 1) { consecutive = false; break }
+      }
+      if (!consecutive) continue
+
+      const win = rows.slice(i - 11, i + 1)
+      pts.push({
+        label:   `${rows[i].year}-${String(rows[i].month).padStart(2, '0')}`,
+        spend12:  win.reduce((s, r) => s + r.spend,  0),
+        sales12:  win.reduce((s, r) => s + r.sales,  0),
+        orders12: win.reduce((s, r) => s + r.orders, 0),
+      })
+    }
+
+    if (pts.length === 0) continue  // < 12 consecutive months (e.g. CA) — silently omit
+    ltMarkets.push({ country, currency, gpPerOrder, points: pts })
+  }
+
   // ── Shape machine footer ─────────────────────────────────────────────────
   const wd = (watchdogRow as { verdict: string; checked_at: string }[])[0]
   const machine: MachineData = {
@@ -229,6 +293,10 @@ export default async function DashboardPage() {
       {/* 2 + 3. CHARTS (client wrapper for tab state) */}
       <h2 style={{ marginBottom: '0.6rem' }}>Trends · 90 days</h2>
       <ChartSection markets={markets} />
+
+      {/* LONG-TERM · ROLLING-12 — clearly separate from 90-day trends */}
+      <h2 style={{ marginTop: '2rem', marginBottom: '0.6rem' }}>Long-term · 12-month rolling</h2>
+      <LongTermSection markets={ltMarkets} />
 
       {/* 4. WHAT MOVED */}
       <MoversRow cluster={cluster} gainers={gainers} decliners={decliners} />
