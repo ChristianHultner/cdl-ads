@@ -4,6 +4,8 @@
 // Rolling window = 30: each plotted point = mean of that day + prior 29.
 // GP series: basis-resolved via profileGP — unit-basis uses gp_per_order×orders;
 // revenue-basis falls back to sales−spend and labels the line '(rev)'.
+// Y-axis: yMin = min(0, 1.1 × lowest rolling series point); when yMin < 0 the
+// y=0 gridline is rendered heavier/darker so the sign crossing is legible.
 
 import { profileGP } from '../../../lib/scorecard'
 
@@ -23,9 +25,10 @@ const PLOT_DAYS = 90
 const ROLL_WIN  = 30
 
 function tx(i: number, n: number) { return n <= 1 ? L : L + (i / (n - 1)) * PW }
-function ty(v: number, maxV: number) {
-  if (maxV === 0) return T + PH
-  return T + PH - (v / maxV) * PH
+function ty(v: number, minV: number, maxV: number) {
+  const range = maxV - minV
+  if (range === 0) return T + PH
+  return T + PH - ((v - minV) / range) * PH
 }
 function polyline(pts: { x: number; y: number }[]) {
   return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
@@ -67,21 +70,28 @@ export default function SalesSpendChart({ points, currency, showDaily, gpPerOrde
 
   const sym     = SYM[currency] ?? currency
   const rollMax = Math.max(...rSalesPlot, ...rSpendPlot)
-  const maxV    = niceMax(rollMax * 1.3)   // y-axis driven by rolling series only
+  const maxV    = niceMax(rollMax * 1.3)   // y-axis max: rolling series only, unchanged
 
-  // Daily faint points
-  const dailySalePts  = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.sales, maxV) }))
-  const dailySpendPts = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.spend, maxV) }))
-  // Rolling bold points
-  const rollSalePts   = rSalesPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
-  const rollSpendPts  = rSpendPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
   // GP series: unit-basis = gp_per_order × rolling_orders − rolling_spend;
   // revenue-basis = rolling_sales − rolling_spend (same arithmetic as profileGP).
   const rGPPlot = gpPerOrder != null
     ? rOrdersPlot.map((o, i) => gpPerOrder * o - rSpendPlot[i])
     : rSalesPlot.map((s, i)  => s - rSpendPlot[i])
   const gpLabel = gpPerOrder != null ? 'Ad GP (30d)' : 'Ad GP (30d) (rev)'
-  const rollGPPts     = rGPPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
+
+  // Y-axis domain: yMin = min(0, 1.1 × lowest point across all rolling series).
+  const rawMin = Math.min(...rSalesPlot, ...rSpendPlot, ...rGPPlot)
+  const minV   = Math.min(0, rawMin * 1.1)
+  // Pre-computed zero-line pixel position (only rendered when minV < 0).
+  const zeroLineY = minV < 0 ? ty(0, minV, maxV) : null
+
+  // Daily faint points
+  const dailySalePts  = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.sales, minV, maxV) }))
+  const dailySpendPts = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.spend, minV, maxV) }))
+  // Rolling bold points
+  const rollSalePts   = rSalesPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, minV, maxV) }))
+  const rollSpendPts  = rSpendPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, minV, maxV) }))
+  const rollGPPts     = rGPPlot.map((v, i)    => ({ x: tx(i, n), y: ty(v, minV, maxV) }))
 
   // GP shaded fill path: forward along rolling sales, backward along rolling spend
   const gpFillPath = [
@@ -100,10 +110,10 @@ export default function SalesSpendChart({ points, currency, showDaily, gpPerOrde
     })
   }
 
-  // Y-axis ticks (0 / 25% / 50% / 75% / 100%)
+  // Y-axis ticks (bottom→top, 5 evenly-spaced steps across [minV, maxV])
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => ({
     y: T + PH - f * PH,
-    label: `${sym}${Math.round(f * maxV).toLocaleString('en-US')}`,
+    label: `${sym}${Math.round(minV + f * (maxV - minV)).toLocaleString('en-US')}`,
   }))
 
   return (
@@ -121,6 +131,10 @@ export default function SalesSpendChart({ points, currency, showDaily, gpPerOrde
           <text x={L - 5} y={t.y + 4} textAnchor="end" fontSize={10} fill="#8a97a5">{t.label}</text>
         </g>
       ))}
+      {/* Zero gridline — heavier and darker when domain spans negative values */}
+      {zeroLineY !== null && (
+        <line x1={L} y1={zeroLineY} x2={L + PW} y2={zeroLineY} stroke="#64748b" strokeWidth={1.5} />
+      )}
 
       {/* X ticks + labels */}
       {xTicks.map((t, i) => (
