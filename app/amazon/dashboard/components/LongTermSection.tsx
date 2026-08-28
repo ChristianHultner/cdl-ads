@@ -6,6 +6,8 @@
 // Y-axis (RULING 2): yMax = 1.1 × market's highest; yMin = min(0, 1.1 × market's lowest) — per-market,
 // no shared cross-market domain, no niceMax rounding. Zero gridline emphasized when yMin < 0.
 // Value labels (RULING 1): 'values' toggle (default OFF); compact k-notation per point, color-matched.
+//   GP labels flip to above when below-placement enters bottom band (T+PH); sales/spend flip to below
+//   when above-placement enters top band (T). Legend fixed in top band (y < T), outside data area.
 // Face label: 'source: console exports - monthly - all ad types'
 
 import { useState } from 'react'
@@ -27,7 +29,7 @@ export interface LongTermMarket {
 
 // ── SVG geometry — matches SalesSpendChart conventions ──────────────────────
 const W = 900, H = 260
-const L = 64, R = 14, T = 14, B = 32
+const L = 64, R = 14, T = 40, B = 32  // T=40: reserves top band (0–T) for legend; data area starts at T
 const PW = W - L - R
 const PH = H - T - B
 
@@ -146,26 +148,31 @@ function RollingChart({ market, showValues }: { market: LongTermMarket; showValu
       {/* Value labels (RULING 1) — compact k-notation; above for sales+spend, below for GP */}
       {showValues && (
         <>
+          {/* Sales labels: above point; flip to below if above-placement enters top band (y < T) */}
           {salesPts.map((p, i) => (
-            <text key={`sv-${i}`} x={p.x} y={p.y - 12} textAnchor="middle" fontSize={9} fill="#0093d0" style={{ pointerEvents: 'none' }}>
+            <text key={`sv-${i}`} x={p.x} y={p.y - 12 < T ? p.y + 14 : p.y - 12} textAnchor="middle" fontSize={9} fill="#0093d0" style={{ pointerEvents: 'none' }}>
               {fmtK(points[i].sales12, sym)}
             </text>
           ))}
+          {/* Spend labels: above point; same top-band flip rule */}
           {spendPts.map((p, i) => (
-            <text key={`spv-${i}`} x={p.x} y={p.y - 12} textAnchor="middle" fontSize={9} fill="#e8825c" style={{ pointerEvents: 'none' }}>
+            <text key={`spv-${i}`} x={p.x} y={p.y - 12 < T ? p.y + 14 : p.y - 12} textAnchor="middle" fontSize={9} fill="#e8825c" style={{ pointerEvents: 'none' }}>
               {fmtK(points[i].spend12, sym)}
             </text>
           ))}
+          {/* GP labels: below point; flip to above if below-placement enters bottom band (y > T+PH). */}
+          {/* Root cause of €5.0k1: fixed y+14 placed label into x-axis tick zone; trailing '1' of */}
+          {/* '2026-01' bled through. Fix: flip to above when p.y+14 > T+PH (= H-B = 228). */}
           {gpPts.map((p, i) => (
-            <text key={`gpv-${i}`} x={p.x} y={p.y + 14} textAnchor="middle" fontSize={9} fill="#15803d" style={{ pointerEvents: 'none' }}>
+            <text key={`gpv-${i}`} x={p.x} y={p.y + 14 > T + PH ? p.y - 12 : p.y + 14} textAnchor="middle" fontSize={9} fill="#15803d" style={{ pointerEvents: 'none' }}>
               {fmtK(gpVals[i], sym)}
             </text>
           ))}
         </>
       )}
 
-      {/* Inline legend */}
-      <g transform={`translate(${L + PW - 336}, ${T + 6})`}>
+      {/* Inline legend — fixed in top band (y=16 < T=40), outside data area; series/labels cannot reach it */}
+      <g transform={`translate(${L + PW - 336}, 16)`}>
         <line x1={0}   y1={5} x2={16}  y2={5} stroke="#0093d0" strokeWidth={2.5} />
         <text x={20}  y={9} fontSize={10} fill="#1a2b3c">Rolling-12 Sales</text>
         <line x1={130} y1={5} x2={146} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
