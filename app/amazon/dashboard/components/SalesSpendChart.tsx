@@ -2,12 +2,17 @@
 // Receives up to 120 days; plots last 90 with 30-day rolling averages (bold).
 // Daily values shown as faint thin lines (~25% opacity) behind the rolling pair.
 // Rolling window = 30: each plotted point = mean of that day + prior 29.
+// GP series: basis-resolved via profileGP — unit-basis uses gp_per_order×orders;
+// revenue-basis falls back to sales−spend and labels the line '(rev)'.
+
+import { profileGP } from '../../../lib/scorecard'
 
 export interface ChartPoint {
-  date:  string        // YYYY-MM-DD
-  sales: number
-  spend: number
-  acos:  number | null
+  date:   string       // YYYY-MM-DD
+  sales:  number
+  spend:  number
+  orders: number
+  acos:   number | null
 }
 
 const W = 900, H = 260
@@ -41,7 +46,7 @@ function rollingAvg(vals: number[], window: number): number[] {
 
 const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
 
-export default function SalesSpendChart({ points, currency, showDaily }: { points: ChartPoint[]; currency: string; showDaily: boolean }) {
+export default function SalesSpendChart({ points, currency, showDaily, gpPerOrder }: { points: ChartPoint[]; currency: string; showDaily: boolean; gpPerOrder: number | null }) {
   if (points.length === 0) {
     return (
       <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
@@ -51,12 +56,14 @@ export default function SalesSpendChart({ points, currency, showDaily }: { point
   }
 
   // Compute rolling over full input (up to 120 days), slice to last 90 for plotting
-  const rollSalesAll = rollingAvg(points.map(p => p.sales), ROLL_WIN)
-  const rollSpendAll = rollingAvg(points.map(p => p.spend), ROLL_WIN)
-  const plot         = points.slice(-PLOT_DAYS)
-  const rSalesPlot   = rollSalesAll.slice(-PLOT_DAYS)
-  const rSpendPlot   = rollSpendAll.slice(-PLOT_DAYS)
-  const n            = plot.length
+  const rollSalesAll  = rollingAvg(points.map(p => p.sales),  ROLL_WIN)
+  const rollSpendAll  = rollingAvg(points.map(p => p.spend),  ROLL_WIN)
+  const rollOrdersAll = rollingAvg(points.map(p => p.orders), ROLL_WIN)
+  const plot          = points.slice(-PLOT_DAYS)
+  const rSalesPlot    = rollSalesAll.slice(-PLOT_DAYS)
+  const rSpendPlot    = rollSpendAll.slice(-PLOT_DAYS)
+  const rOrdersPlot   = rollOrdersAll.slice(-PLOT_DAYS)
+  const n             = plot.length
 
   const sym     = SYM[currency] ?? currency
   const rollMax = Math.max(...rSalesPlot, ...rSpendPlot)
@@ -68,7 +75,12 @@ export default function SalesSpendChart({ points, currency, showDaily }: { point
   // Rolling bold points
   const rollSalePts   = rSalesPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
   const rollSpendPts  = rSpendPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
-  const rGPPlot       = rSalesPlot.map((s, i) => s - rSpendPlot[i])
+  // GP series: unit-basis = gp_per_order × rolling_orders − rolling_spend;
+  // revenue-basis = rolling_sales − rolling_spend (same arithmetic as profileGP).
+  const rGPPlot = gpPerOrder != null
+    ? rOrdersPlot.map((o, i) => gpPerOrder * o - rSpendPlot[i])
+    : rSalesPlot.map((s, i)  => s - rSpendPlot[i])
+  const gpLabel = gpPerOrder != null ? 'Ad GP (30d)' : 'Ad GP (30d) (rev)'
   const rollGPPts     = rGPPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, maxV) }))
 
   // GP shaded fill path: forward along rolling sales, backward along rolling spend
@@ -147,7 +159,7 @@ export default function SalesSpendChart({ points, currency, showDaily }: { point
         <line x1={112} y1={5} x2={128} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
         <text x={132} y={9} fontSize={10} fill="#1a2b3c">Spend (30d avg)</text>
         <line x1={224} y1={5} x2={240} y2={5} stroke="#15803d" strokeWidth={2.5} />
-        <text x={244} y={9} fontSize={10} fill="#1a2b3c">Ad GP (30d)</text>
+        <text x={244} y={9} fontSize={10} fill="#1a2b3c">{gpLabel}</text>
       </g>
     </svg>
   )

@@ -54,15 +54,18 @@ export default async function DashboardPage() {
     `,
 
     // ── Chart data: 90 days per profile ──
+    // L3.3: gp_per_order + orders fetched for basis-resolved GP line.
     sql`
       SELECT
         p.profile_id::text,
         p.country_code,
         p.currency_code,
         p.target_acos::float,
+        p.gp_per_order::float,
         dr.date::text,
         dr.spend::float,
         dr.sales::float,
+        dr.orders::float,
         dr.acos::float
       FROM daily_rollup dr
       JOIN amazon_profiles p USING (profile_id)
@@ -152,21 +155,23 @@ export default async function DashboardPage() {
   const profileMap: Record<string, MarketChartData> = {}
   for (const r of chartRows as {
     profile_id: string; country_code: string; currency_code: string; target_acos: number;
-    date: string; spend: number; sales: number; acos: number | null
+    gp_per_order: number | null; date: string; spend: number; sales: number; orders: number; acos: number | null
   }[]) {
     if (!profileMap[r.country_code]) {
       profileMap[r.country_code] = {
         country:    r.country_code,
         currency:   r.currency_code,
         targetAcos: r.target_acos,
+        gpPerOrder: r.gp_per_order ?? null,
         points:     [],
       }
     }
     profileMap[r.country_code].points.push({
-      date:  r.date,
-      sales: r.sales,
-      spend: r.spend,
-      acos:  r.acos,
+      date:   r.date,
+      sales:  r.sales,
+      spend:  r.spend,
+      orders: r.orders,
+      acos:   r.acos,
     } as ChartPoint)
   }
   const markets: MarketChartData[] = Object.values(profileMap)

@@ -12,6 +12,7 @@ export interface MarketChartData {
   country:    string
   currency:   string
   targetAcos: number
+  gpPerOrder: number | null
   points:     ChartPoint[]
 }
 
@@ -84,7 +85,7 @@ export default function ChartSection({ markets }: { markets: MarketChartData[] }
         }}>
           Sales &amp; Spend · 90 days · {market.currency}
         </div>
-        <SalesSpendChart points={market.points} currency={market.currency} showDaily={showDaily} />
+        <SalesSpendChart points={market.points} currency={market.currency} showDaily={showDaily} gpPerOrder={market.gpPerOrder} />
       </div>
 
       {/* ACoS chart */}
