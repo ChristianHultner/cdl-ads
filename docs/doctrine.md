@@ -33,6 +33,14 @@ Sources: `scripts/generate-recommendations.mjs` · `scripts/stamp-outcomes.mjs` 
 
 **Historical grades:** Stamps created before this frame lack `gp_basis` in their metrics. They are identified by absence of `gp_basis` (the scorecard defaults to `'revenue'` when the field is absent) and were graded on revenue-based GP. The `pre_gp_grading` tag on legacy stamps (those lacking a before-window) remains the explicit audit marker; all pre-frame-2 stamps are implicitly revenue-basis by absence.
 
+**Long-term · Rolling-12 Chart (console_history, frame 6, 2026-08-28):** Monthly console exports are a display-only truth layer stored in `console_history`. They are **never joined to `daily_rollup`** in any query and **never read by any generation, grading, or watchdog rule**. Scope includes all ad types (SP, SB, SBV, SD); API `daily_rollup` is SP/SB only — the completeness difference is the point. Source labeling is mandatory on every chart card that renders `console_history` data: *source: console exports - monthly - all ad types*.
+
+**Rolling-12 window rule:** A rolling-12 point at month M = sum of months M−11 through M (inclusive, 12 months). A point is plotted only when all 12 consecutive months are present in `console_history` — partial windows are never plotted. Markets with fewer than 12 months of history (e.g. CA, 4 months as of 2026-08) are silently excluded.
+
+**GP basis in the rolling-12 chart:** Same `profileGP` resolution as the 90-day charts. Unit-basis (US, ES): `orders12 × gp_per_order − spend12`. Revenue-basis (MX, `gp_per_order` null): `sales12 − spend12`; legend shows "Rolling-12 GP (rev)". `gp_per_order` is fetched from `amazon_profiles` at page-render time; the component never queries the database directly.
+
+**Rolling-12 Y-axis:** `yMin = min(0, 1.1 × lowest plotted value)` across all three series (spend, sales, GP). When `yMin < 0` the y=0 gridline is rendered heavier and darker (same rule as SalesSpendChart, commit 2cf40e6). Currencies native per market, never converted.
+
 ---
 
 ## a. CANDIDATE PIPELINE
