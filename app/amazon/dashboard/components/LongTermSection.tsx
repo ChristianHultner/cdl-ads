@@ -3,8 +3,9 @@
 // Long-term 12-month rolling chart for console_history data.
 // A rolling-12 point is plotted ONLY where all 12 consecutive months of data exist — no partial windows.
 // GP basis: unit-basis (gpPerOrder × orders12 − spend12); revenue-basis (sales12 − spend12) when null.
-// Y-axis: yMin = min(0, 1.1 × lowest plotted value); zero gridline emphasized when yMin < 0 (same rule
-// as SalesSpendChart, 2cf40e6).
+// Y-axis (RULING 2): yMax = 1.1 × market's highest; yMin = min(0, 1.1 × market's lowest) — per-market,
+// no shared cross-market domain, no niceMax rounding. Zero gridline emphasized when yMin < 0.
+// Value labels (RULING 1): 'values' toggle (default OFF); compact k-notation per point, color-matched.
 // Face label: 'source: console exports - monthly - all ad types'
 
 import { useState } from 'react'
@@ -42,15 +43,16 @@ function ty(v: number, minV: number, maxV: number) {
 function polyline(pts: { x: number; y: number }[]) {
   return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
 }
-function niceMax(v: number): number {
-  if (v <= 0) return 100
-  const mag = Math.pow(10, Math.floor(Math.log10(v)))
-  const candidates = [1, 2, 2.5, 5, 10].map(f => f * mag)
-  return candidates.find(c => c >= v) ?? v * 1.1
+// Compact value-label formatter: $138.6k / -$42.3k; native currency symbol.
+function fmtK(v: number, sym: string): string {
+  const neg = v < 0
+  const abs = Math.abs(v)
+  const s   = abs >= 1000 ? `${(abs / 1000).toFixed(1)}k` : abs.toFixed(1)
+  return `${neg ? '-' : ''}${sym}${s}`
 }
 
 // ── Inner SVG chart — pure render, no state ─────────────────────────────────
-function RollingChart({ market }: { market: LongTermMarket }) {
+function RollingChart({ market, showValues }: { market: LongTermMarket; showValues: boolean }) {
   const { country, currency, gpPerOrder, points } = market
   const sym = SYM[currency] ?? currency
   const n   = points.length
@@ -66,11 +68,12 @@ function RollingChart({ market }: { market: LongTermMarket }) {
   const gpVals  = points.map(p => profileGP(gpPerOrder, p.orders12, p.sales12, p.spend12))
   const gpLabel = gpPerOrder != null ? 'Rolling-12 GP' : 'Rolling-12 GP (rev)'
 
-  // Y-axis domain: yMin = min(0, 1.1 × lowest across all three series)
+  // Y-axis domain (RULING 2): per-market, no shared cross-market ceiling, no niceMax rounding.
+  // yMax = 1.1 × this market's highest; yMin = min(0, 1.1 × this market's lowest).
   const rawMin = Math.min(...points.map(p => p.spend12), ...points.map(p => p.sales12), ...gpVals)
   const rawMax = Math.max(...points.map(p => p.spend12), ...points.map(p => p.sales12), ...gpVals)
   const minV   = Math.min(0, rawMin * 1.1)
-  const maxV   = niceMax(rawMax * 1.3)
+  const maxV   = rawMax > 0 ? rawMax * 1.1 : 100
   // Zero gridline pre-computed; rendered heavier/darker only when domain spans negative values.
   const zeroLineY = minV < 0 ? ty(0, minV, maxV) : null
 
@@ -140,6 +143,27 @@ function RollingChart({ market }: { market: LongTermMarket }) {
       <path d={polyline(salesPts)} fill="none" stroke="#0093d0" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
       <path d={polyline(gpPts)}    fill="none" stroke="#15803d" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
 
+      {/* Value labels (RULING 1) — compact k-notation; above for sales+spend, below for GP */}
+      {showValues && (
+        <>
+          {salesPts.map((p, i) => (
+            <text key={`sv-${i}`} x={p.x} y={p.y - 12} textAnchor="middle" fontSize={9} fill="#0093d0" style={{ pointerEvents: 'none' }}>
+              {fmtK(points[i].sales12, sym)}
+            </text>
+          ))}
+          {spendPts.map((p, i) => (
+            <text key={`spv-${i}`} x={p.x} y={p.y - 12} textAnchor="middle" fontSize={9} fill="#e8825c" style={{ pointerEvents: 'none' }}>
+              {fmtK(points[i].spend12, sym)}
+            </text>
+          ))}
+          {gpPts.map((p, i) => (
+            <text key={`gpv-${i}`} x={p.x} y={p.y + 14} textAnchor="middle" fontSize={9} fill="#15803d" style={{ pointerEvents: 'none' }}>
+              {fmtK(gpVals[i], sym)}
+            </text>
+          ))}
+        </>
+      )}
+
       {/* Inline legend */}
       <g transform={`translate(${L + PW - 336}, ${T + 6})`}>
         <line x1={0}   y1={5} x2={16}  y2={5} stroke="#0093d0" strokeWidth={2.5} />
@@ -159,14 +183,15 @@ export default function LongTermSection({ markets }: { markets: LongTermMarket[]
     .map(cc => markets.find(m => m.country === cc))
     .filter((m): m is LongTermMarket => !!m && m.points.length > 0)
 
-  const [tab, setTab] = useState(active[0]?.country ?? 'ES')
+  const [tab, setTab]             = useState(active[0]?.country ?? 'ES')
+  const [showValues, setShowValues] = useState(false)
   const current = active.find(m => m.country === tab) ?? active[0]
 
   if (!current) return null
 
   return (
     <div style={{ marginBottom: '1.5rem' }}>
-      {/* Tab bar */}
+      {/* Tab bar + values toggle — styled like ChartSection's daily toggle */}
       <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #c8dfe9', marginBottom: '0.75rem' }}>
         {active.map(m => {
           const isActive = m.country === tab
@@ -191,6 +216,19 @@ export default function LongTermSection({ markets }: { markets: LongTermMarket[]
             </button>
           )
         })}
+        <label style={{
+          marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+          fontSize: '0.68rem', color: 'var(--cdl-muted)', cursor: 'pointer',
+          paddingRight: '0.5rem', paddingBottom: '0.1rem',
+        }}>
+          <input
+            type="checkbox"
+            checked={showValues}
+            onChange={e => setShowValues(e.target.checked)}
+            style={{ cursor: 'pointer', accentColor: 'var(--cdl-blue)' }}
+          />
+          values
+        </label>
       </div>
 
       {/* Chart card */}
@@ -204,7 +242,7 @@ export default function LongTermSection({ markets }: { markets: LongTermMarket[]
         }}>
           Rolling-12 · {current.currency} · source: console exports - monthly - all ad types
         </div>
-        <RollingChart market={current} />
+        <RollingChart market={current} showValues={showValues} />
       </div>
     </div>
   )
