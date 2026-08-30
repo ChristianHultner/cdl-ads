@@ -6,7 +6,12 @@ import VerdictStrip,  { type MarketVerdictRow }  from './components/VerdictStrip
 import ChartSection,  { type MarketChartData }   from './components/ChartSection'
 import MoversRow,     { type MoverRow, type ClusterStats } from './components/MoversRow'
 import MachineFooter, { type MachineData }       from './components/MachineFooter'
-import LongTermSection, { type LongTermMarket, type LongTermPoint } from './components/LongTermSection'
+import LongTermSection, {
+  type LongTermMarket,
+  type LongTermPoint,
+  type VendorLongTermMarket,
+  type VendorLongTermPoint,
+} from './components/LongTermSection'
 import type { ChartPoint } from './components/SalesSpendChart'
 
 export default async function DashboardPage() {
@@ -20,6 +25,7 @@ export default async function DashboardPage() {
     watchdogRow,
     actionsRow,
     longTermRows,
+    vendorRows,
   ] = await Promise.all([
 
     // ── Verdict strip: this week + 4-week prior-avg, per profile/currency ──
@@ -154,6 +160,21 @@ export default async function DashboardPage() {
       FROM console_history ch
       ORDER BY ch.market, ch.year, ch.month
     `,
+
+    // ── Long-term: vendor_history, read in its own standalone query ──
+    // Never joined to console_history or any other table. The series meet only
+    // when the separately shaped props reach LongTermSection.
+    sql`
+      SELECT
+        market,
+        currency,
+        year,
+        month,
+        units::float,
+        net_revenue::float
+      FROM vendor_history
+      ORDER BY market, year, month
+    `,
   ])
 
   // ── Shape verdict rows ───────────────────────────────────────────────────
@@ -275,6 +296,42 @@ export default async function DashboardPage() {
     ltMarkets.push({ country, currency, gpPerOrder, points: pts })
   }
 
+  // vendor_history stays a separate display-only truth layer. Its rolling-12
+  // windows are shaped independently and meet console data only via component props.
+  type VendorRaw = {
+    market: string; currency: string; year: number; month: number;
+    units: number; net_revenue: number
+  }
+  const vendorByMarket: Record<string, VendorRaw[]> = {}
+  for (const r of vendorRows as VendorRaw[]) {
+    (vendorByMarket[r.market] ??= []).push(r)
+  }
+
+  const vendorMarkets: VendorLongTermMarket[] = []
+  for (const [country, rows] of Object.entries(vendorByMarket)) {
+    const points: VendorLongTermPoint[] = []
+
+    for (let i = 11; i < rows.length; i++) {
+      let consecutive = true
+      for (let k = i - 11; k < i; k++) {
+        const ym0 = rows[k].year * 12 + rows[k].month
+        const ym1 = rows[k + 1].year * 12 + rows[k + 1].month
+        if (ym1 !== ym0 + 1) { consecutive = false; break }
+      }
+      if (!consecutive) continue
+
+      const win = rows.slice(i - 11, i + 1)
+      points.push({
+        label:     `${rows[i].year}-${String(rows[i].month).padStart(2, '0')}`,
+        revenue12: win.reduce((sum, row) => sum + row.net_revenue, 0),
+        units12:   win.reduce((sum, row) => sum + row.units, 0),
+      })
+    }
+
+    if (points.length === 0) continue
+    vendorMarkets.push({ country, currency: rows[0]?.currency ?? '', points })
+  }
+
   // ── Shape machine footer ─────────────────────────────────────────────────
   const wd = (watchdogRow as { verdict: string; checked_at: string }[])[0]
   const machine: MachineData = {
@@ -296,7 +353,7 @@ export default async function DashboardPage() {
 
       {/* LONG-TERM · ROLLING-12 — clearly separate from 90-day trends */}
       <h2 style={{ marginTop: '2rem', marginBottom: '0.6rem' }}>Long-term · 12-month rolling</h2>
-      <LongTermSection markets={ltMarkets} />
+      <LongTermSection markets={ltMarkets} vendorMarkets={vendorMarkets} />
 
       {/* 4. WHAT MOVED */}
       <MoversRow cluster={cluster} gainers={gainers} decliners={decliners} />

@@ -1,6 +1,6 @@
 'use client'
 
-// Long-term 12-month rolling chart for console_history data.
+// Long-term 12-month rolling chart for console_history with a standalone vendor_history overlay.
 // A rolling-12 point is plotted ONLY where all 12 consecutive months of data exist — no partial windows.
 // GP basis: unit-basis (gpPerOrder × orders12 − spend12); revenue-basis (sales12 − spend12) when null.
 // Y-axis (RULING 2): yMax = 1.1 × market's highest; yMin = min(0, 1.1 × market's lowest) — per-market,
@@ -25,6 +25,18 @@ export interface LongTermMarket {
   currency:   string
   gpPerOrder: number | null
   points:     LongTermPoint[]
+}
+
+export interface VendorLongTermPoint {
+  label:     string
+  revenue12: number
+  units12:   number
+}
+
+export interface VendorLongTermMarket {
+  country:  string
+  currency: string
+  points:   VendorLongTermPoint[]
 }
 
 // ── SVG geometry — matches SalesSpendChart conventions ──────────────────────
@@ -54,7 +66,15 @@ function fmtK(v: number, sym: string): string {
 }
 
 // ── Inner SVG chart — pure render, no state ─────────────────────────────────
-function RollingChart({ market, showValues }: { market: LongTermMarket; showValues: boolean }) {
+function RollingChart({
+  market,
+  vendor,
+  showValues,
+}: {
+  market: LongTermMarket
+  vendor?: VendorLongTermMarket
+  showValues: boolean
+}) {
   const { country, currency, gpPerOrder, points } = market
   const sym = SYM[currency] ?? currency
   const n   = points.length
@@ -69,11 +89,28 @@ function RollingChart({ market, showValues }: { market: LongTermMarket; showValu
 
   const gpVals  = points.map(p => profileGP(gpPerOrder, p.orders12, p.sales12, p.spend12))
   const gpLabel = gpPerOrder != null ? 'Rolling-12 GP' : 'Rolling-12 GP (rev)'
+  const pointIndex = new Map(points.map((point, index) => [point.label, index]))
+  const vendorRevenue = vendor?.currency === currency
+    ? vendor.points.flatMap(point => {
+        const index = pointIndex.get(point.label)
+        return index === undefined ? [] : [{ index, value: point.revenue12 }]
+      })
+    : []
 
   // Y-axis domain (RULING 2): per-market, no shared cross-market ceiling, no niceMax rounding.
   // yMax = 1.1 × this market's highest; yMin = min(0, 1.1 × this market's lowest).
-  const rawMin = Math.min(...points.map(p => p.spend12), ...points.map(p => p.sales12), ...gpVals)
-  const rawMax = Math.max(...points.map(p => p.spend12), ...points.map(p => p.sales12), ...gpVals)
+  const rawMin = Math.min(
+    ...points.map(p => p.spend12),
+    ...points.map(p => p.sales12),
+    ...gpVals,
+    ...vendorRevenue.map(point => point.value),
+  )
+  const rawMax = Math.max(
+    ...points.map(p => p.spend12),
+    ...points.map(p => p.sales12),
+    ...gpVals,
+    ...vendorRevenue.map(point => point.value),
+  )
   const minV   = Math.min(0, rawMin * 1.1)
   const maxV   = rawMax > 0 ? rawMax * 1.1 : 100
   // Zero gridline pre-computed; rendered heavier/darker only when domain spans negative values.
@@ -82,6 +119,10 @@ function RollingChart({ market, showValues }: { market: LongTermMarket; showValu
   const spendPts = points.map((p, i) => ({ x: tx(i, n), y: ty(p.spend12, minV, maxV) }))
   const salesPts = points.map((p, i) => ({ x: tx(i, n), y: ty(p.sales12, minV, maxV) }))
   const gpPts    = gpVals.map((v, i)  => ({ x: tx(i, n), y: ty(v,         minV, maxV) }))
+  const vendorRevenuePts = vendorRevenue.map(point => ({
+    x: tx(point.index, n),
+    y: ty(point.value, minV, maxV),
+  }))
 
   // GP shaded fill: forward along sales line, backward along spend line
   const gpFillPath = [
@@ -140,10 +181,25 @@ function RollingChart({ market, showValues }: { market: LongTermMarket; showValu
       {/* GP shaded fill */}
       <path d={gpFillPath} fill="#16a34a" fillOpacity={0.15} stroke="none" clipPath={`url(#${clipId})`} />
 
-      {/* Three series lines */}
+      {/* Console series + standalone vendor revenue overlay */}
       <path d={polyline(spendPts)} fill="none" stroke="#e8825c" strokeWidth={2}   strokeOpacity={0.85} clipPath={`url(#${clipId})`} />
       <path d={polyline(salesPts)} fill="none" stroke="#0093d0" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
       <path d={polyline(gpPts)}    fill="none" stroke="#15803d" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
+      {vendorRevenuePts.length > 0 && (
+        <>
+          <path
+            d={polyline(vendorRevenuePts)}
+            fill="none"
+            stroke="#7c3aed"
+            strokeWidth={2.5}
+            strokeDasharray="7 5"
+            clipPath={`url(#${clipId})`}
+          />
+          {vendorRevenuePts.map((point, index) => (
+            <circle key={`vr-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#7c3aed" />
+          ))}
+        </>
+      )}
 
       {/* Value labels (RULING 1) — compact k-notation; above for sales+spend, below for GP */}
       {showValues && (
@@ -168,24 +224,144 @@ function RollingChart({ market, showValues }: { market: LongTermMarket; showValu
               {fmtK(gpVals[i], sym)}
             </text>
           ))}
+          {vendorRevenuePts.map((point, index) => (
+            <text key={`vrv-${index}`} x={point.x} y={point.y - 12 < T ? point.y + 14 : point.y - 12} textAnchor="middle" fontSize={9} fill="#7c3aed" style={{ pointerEvents: 'none' }}>
+              {fmtK(vendorRevenue[index].value, sym)}
+            </text>
+          ))}
         </>
       )}
 
       {/* Inline legend — fixed in top band (y=16 < T=40), outside data area; series/labels cannot reach it */}
-      <g transform={`translate(${L + PW - 336}, 16)`}>
+      <g transform={`translate(${L}, 16)`}>
         <line x1={0}   y1={5} x2={16}  y2={5} stroke="#0093d0" strokeWidth={2.5} />
         <text x={20}  y={9} fontSize={10} fill="#1a2b3c">Rolling-12 Sales</text>
         <line x1={130} y1={5} x2={146} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
         <text x={150} y={9} fontSize={10} fill="#1a2b3c">Rolling-12 Spend</text>
         <line x1={260} y1={5} x2={276} y2={5} stroke="#15803d" strokeWidth={2.5} />
         <text x={280} y={9} fontSize={10} fill="#1a2b3c">{gpLabel}</text>
+        {vendorRevenuePts.length > 0 && (
+          <>
+            <line x1={390} y1={5} x2={406} y2={5} stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="7 5" />
+            <text x={410} y={9} fontSize={10} fill="#1a2b3c">Rolling-12 Vendor Revenue (sell-in)</text>
+          </>
+        )}
+      </g>
+    </svg>
+  )
+}
+
+const UH = 170, UT = 30, UB = 30
+const UPH = UH - UT - UB
+
+function UnitsPanel({
+  market,
+  vendor,
+  showValues,
+}: {
+  market: LongTermMarket
+  vendor: VendorLongTermMarket
+  showValues: boolean
+}) {
+  const consoleIndex = new Map(market.points.map((point, index) => [point.label, { point, index }]))
+  const points = vendor.points.flatMap(point => {
+    const consolePoint = consoleIndex.get(point.label)
+    return consolePoint
+      ? [{
+          label: point.label,
+          index: consolePoint.index,
+          vendorUnits: point.units12,
+          attributedUnits: consolePoint.point.orders12,
+        }]
+      : []
+  })
+
+  if (points.length === 0) return null
+
+  const maxV = Math.max(
+    ...points.map(point => point.vendorUnits),
+    ...points.map(point => point.attributedUnits),
+  ) * 1.1 || 100
+  const uy = (value: number) => UT + UPH - (value / maxV) * UPH
+  const vendorPts = points.map(point => ({ x: tx(point.index, market.points.length), y: uy(point.vendorUnits) }))
+  const attributedPts = points.map(point => ({ x: tx(point.index, market.points.length), y: uy(point.attributedUnits) }))
+  const haloPath = [
+    ...vendorPts.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x.toFixed(1)},${point.y.toFixed(1)}`),
+    ...[...attributedPts].reverse().map(point => `L${point.x.toFixed(1)},${point.y.toFixed(1)}`),
+    'Z',
+  ].join(' ')
+  const yTicks = [0, 0.5, 1].map(fraction => ({
+    y: UT + UPH - fraction * UPH,
+    label: Math.round(fraction * maxV).toLocaleString('en-US'),
+  }))
+  const clipId = `cdl-lt-units-${market.country}`
+
+  return (
+    <svg viewBox={`0 0 ${W} ${UH}`} width="100%" style={{ display: 'block', overflow: 'visible' }}>
+      <defs>
+        <clipPath id={clipId}>
+          <rect x={L} y={UT} width={PW} height={UPH} />
+        </clipPath>
+      </defs>
+
+      {yTicks.map((tick, index) => (
+        <g key={index}>
+          <line x1={L} y1={tick.y} x2={L + PW} y2={tick.y} stroke="#e4eef3" strokeWidth={1} />
+          <text x={L - 5} y={tick.y + 4} textAnchor="end" fontSize={10} fill="#8a97a5">{tick.label}</text>
+        </g>
+      ))}
+      {points.map((point, index) => {
+        const x = tx(point.index, market.points.length)
+        return (
+          <g key={point.label}>
+            <line x1={x} y1={UT + UPH} x2={x} y2={UT + UPH + 4} stroke="#c8dfe9" strokeWidth={1} />
+            <text x={x} y={UT + UPH + 15} textAnchor="middle" fontSize={9} fill="#8a97a5">{point.label}</text>
+          </g>
+        )
+      })}
+
+      <line x1={L} y1={UT} x2={L} y2={UT + UPH} stroke="#c8dfe9" strokeWidth={1} />
+      <line x1={L} y1={UT + UPH} x2={L + PW} y2={UT + UPH} stroke="#c8dfe9" strokeWidth={1} />
+      <path d={haloPath} fill="#7c3aed" fillOpacity={0.10} stroke="none" clipPath={`url(#${clipId})`} />
+      <path d={polyline(attributedPts)} fill="none" stroke="#0093d0" strokeWidth={2.25} clipPath={`url(#${clipId})`} />
+      <path d={polyline(vendorPts)} fill="none" stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="7 5" clipPath={`url(#${clipId})`} />
+      {attributedPts.map((point, index) => (
+        <circle key={`au-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#0093d0" />
+      ))}
+      {vendorPts.map((point, index) => (
+        <circle key={`vu-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#7c3aed" />
+      ))}
+
+      {showValues && points.map((point, index) => (
+        <g key={`uv-${point.label}`}>
+          <text x={vendorPts[index].x} y={vendorPts[index].y - 9} textAnchor="middle" fontSize={9} fill="#7c3aed">
+            {point.vendorUnits.toLocaleString('en-US')}
+          </text>
+          <text x={attributedPts[index].x} y={attributedPts[index].y + 14} textAnchor="middle" fontSize={9} fill="#0093d0">
+            {point.attributedUnits.toLocaleString('en-US')}
+          </text>
+        </g>
+      ))}
+
+      <g transform={`translate(${L}, 12)`}>
+        <line x1={0} y1={5} x2={16} y2={5} stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="7 5" />
+        <text x={20} y={9} fontSize={10} fill="#1a2b3c">Vendor units (sell-in)</text>
+        <line x1={150} y1={5} x2={166} y2={5} stroke="#0093d0" strokeWidth={2.25} />
+        <text x={170} y={9} fontSize={10} fill="#1a2b3c">Attributed orders</text>
+        <text x={290} y={9} fontSize={10} fill="#8a97a5">gap = un-attributed volume</text>
       </g>
     </svg>
   )
 }
 
 // ── Public wrapper — manages tab state ──────────────────────────────────────
-export default function LongTermSection({ markets }: { markets: LongTermMarket[] }) {
+export default function LongTermSection({
+  markets,
+  vendorMarkets,
+}: {
+  markets: LongTermMarket[]
+  vendorMarkets: VendorLongTermMarket[]
+}) {
   const active = TAB_ORDER
     .map(cc => markets.find(m => m.country === cc))
     .filter((m): m is LongTermMarket => !!m && m.points.length > 0)
@@ -193,6 +369,7 @@ export default function LongTermSection({ markets }: { markets: LongTermMarket[]
   const [tab, setTab]             = useState(active[0]?.country ?? 'ES')
   const [showValues, setShowValues] = useState(false)
   const current = active.find(m => m.country === tab) ?? active[0]
+  const currentVendor = vendorMarkets.find(m => m.country === current?.country)
 
   if (!current) return null
 
@@ -249,8 +426,25 @@ export default function LongTermSection({ markets }: { markets: LongTermMarket[]
         }}>
           Rolling-12 · {current.currency} · source: console exports - monthly - all ad types
         </div>
-        <RollingChart market={current} showValues={showValues} />
+        <RollingChart market={current} vendor={currentVendor} showValues={showValues} />
       </div>
+      {currentVendor && (
+        <div style={{
+          border: '1px solid #c8dfe9', borderRadius: 8,
+          padding: '0.75rem 0.75rem 0.4rem', overflow: 'hidden', marginTop: '0.75rem',
+        }}>
+          <div style={{
+            fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
+            letterSpacing: '0.07em', color: 'var(--cdl-muted)', marginBottom: '0.4rem',
+          }}>
+            Rolling-12 Units: vendor (sell-in) vs attributed
+          </div>
+          <UnitsPanel market={current} vendor={currentVendor} showValues={showValues} />
+          <div style={{ fontSize: '0.66rem', color: 'var(--cdl-muted)', marginTop: '0.2rem' }}>
+            sell-in vs attributed - quarterly-grain caveat applies
+          </div>
+        </div>
+      )}
     </div>
   )
 }
