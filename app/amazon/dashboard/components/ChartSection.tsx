@@ -7,6 +7,7 @@
 import { useState } from 'react'
 import SalesSpendChart, { type ChartPoint } from './SalesSpendChart'
 import AcosChart from './AcosChart'
+import styles from './DashboardZoneOne.module.css'
 
 export interface MarketChartData {
   country:    string
@@ -33,73 +34,46 @@ export default function ChartSection({ markets }: { markets: MarketChartData[] }
   if (!market) return null
 
   return (
-    <div style={{ marginBottom: '1.5rem' }}>
+    <div className={styles.chartSection}>
       {/* Tab bar + daily toggle */}
-      <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #c8dfe9', marginBottom: '0.75rem' }}>
+      <div className={styles.chartTabs}>
         {active.map(m => {
           const isActive = m.country === tab
           return (
             <button
               key={m.country}
               onClick={() => setTab(m.country)}
-              style={{
-                padding: '0.3rem 0.9rem',
-                fontSize: '0.78rem',
-                fontWeight: isActive ? 700 : 400,
-                color: isActive ? 'var(--cdl-blue)' : 'var(--cdl-ink)',
-                background: 'none',
-                border: 'none',
-                borderBottom: isActive ? '2px solid var(--cdl-blue)' : '2px solid transparent',
-                cursor: 'pointer',
-                outline: 'none',
-                marginBottom: -1,
-              }}
+              className={`${styles.chartTab} ${isActive ? styles.chartTabActive : ''}`}
             >
               {m.country}
             </button>
           )
         })}
-        <label style={{
-          marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-          fontSize: '0.68rem', color: 'var(--cdl-muted)', cursor: 'pointer',
-          paddingRight: '0.5rem', paddingBottom: '0.1rem',
-        }}>
+        <label className={styles.chartToggle}>
           <input
             type="checkbox"
             checked={showDaily}
             onChange={e => setShowDaily(e.target.checked)}
-            style={{ cursor: 'pointer', accentColor: 'var(--cdl-blue)' }}
+            className={styles.chartCheckbox}
           />
           daily
         </label>
       </div>
 
       {/* Sales + Spend chart */}
-      <div style={{
-        border: '1px solid #c8dfe9', borderRadius: 8,
-        padding: '0.75rem 0.75rem 0.4rem', marginBottom: '0.75rem', overflow: 'hidden',
-      }}>
-        <div style={{
-          fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
-          letterSpacing: '0.07em', color: 'var(--cdl-muted)', marginBottom: '0.4rem',
-        }}>
-          Sales &amp; Spend · 90 days · {market.currency}
-        </div>
+      <div className={styles.chartPanel}>
+        <h3 className={styles.panelTitle}>Sales, spend &amp; Ad GP · {market.country}</h3>
+        <div className={styles.panelCaption}>Daily averages, last 90 days — the ad slice only.</div>
         <SalesSpendChart points={market.points} currency={market.currency} showDaily={showDaily} gpPerOrder={market.gpPerOrder} />
+        <div className={styles.panelSource}>source: Amazon Ads API · sponsored products + sponsored brands</div>
       </div>
 
       {/* ACoS chart */}
-      <div style={{
-        border: '1px solid #c8dfe9', borderRadius: 8,
-        padding: '0.75rem 0.75rem 0.4rem', overflow: 'hidden',
-      }}>
-        <div style={{
-          fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
-          letterSpacing: '0.07em', color: 'var(--cdl-muted)', marginBottom: '0.4rem',
-        }}>
-          ACoS · 90 days · target {(market.targetAcos * 100).toFixed(0)}%
-        </div>
+      <div className={styles.chartPanel}>
+        <h3 className={styles.panelTitle}>Advertising cost of sales · {market.country}</h3>
+        <div className={styles.panelCaption}>Spend as a share of attributed sales, against the {(market.targetAcos * 100).toFixed(0)}% target.</div>
         <AcosChart points={market.points} targetAcos={market.targetAcos} showDaily={showDaily} />
+        <div className={styles.panelSource}>source: Amazon Ads API · 30-day rolling ACoS</div>
       </div>
     </div>
   )

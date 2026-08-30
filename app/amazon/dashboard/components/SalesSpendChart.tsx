@@ -52,7 +52,7 @@ const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£
 export default function SalesSpendChart({ points, currency, showDaily, gpPerOrder }: { points: ChartPoint[]; currency: string; showDaily: boolean; gpPerOrder: number | null }) {
   if (points.length === 0) {
     return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
+      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
         No data
       </div>
     )
@@ -117,7 +117,7 @@ export default function SalesSpendChart({ points, currency, showDaily, gpPerOrde
   }))
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible' }}>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible', fontFamily: 'var(--font-ibm-plex-mono), monospace' }}>
       <defs>
         <clipPath id="cdl-ss-clip">
           <rect x={L} y={T} width={PW} height={PH} />
@@ -127,53 +127,53 @@ export default function SalesSpendChart({ points, currency, showDaily, gpPerOrde
       {/* Y gridlines + labels */}
       {yTicks.map((t, i) => (
         <g key={i}>
-          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="#e4eef3" strokeWidth={1} />
-          <text x={L - 5} y={t.y + 4} textAnchor="end" fontSize={10} fill="#8a97a5">{t.label}</text>
+          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="var(--line)" strokeWidth={1} />
+          <text x={L - 5} y={t.y + 4} textAnchor="end" fontSize={10} fill="var(--muted)">{t.label}</text>
         </g>
       ))}
       {/* Zero gridline — heavier and darker when domain spans negative values */}
       {zeroLineY !== null && (
-        <line x1={L} y1={zeroLineY} x2={L + PW} y2={zeroLineY} stroke="#64748b" strokeWidth={1.5} />
+        <line x1={L} y1={zeroLineY} x2={L + PW} y2={zeroLineY} stroke="var(--ink)" strokeWidth={1.5} />
       )}
 
       {/* X ticks + labels */}
       {xTicks.map((t, i) => (
         <g key={i}>
-          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="#c8dfe9" strokeWidth={1} />
-          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9.5} fill="#8a97a5">{t.label}</text>
+          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="var(--line)" strokeWidth={1} />
+          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9.5} fill="var(--muted)">{t.label}</text>
         </g>
       ))}
 
       {/* Axis borders */}
-      <line x1={L} y1={T} x2={L} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
-      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
+      <line x1={L} y1={T} x2={L} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
+      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
 
       {/* GP shaded fill — the gap between sales and spend IS the Ad GP */}
-      <path d={gpFillPath} fill="#16a34a" fillOpacity={0.15} stroke="none" clipPath="url(#cdl-ss-clip)" />
+      <path d={gpFillPath} fill="var(--pos)" fillOpacity={0.12} stroke="none" clipPath="url(#cdl-ss-clip)" />
 
       {/* Daily faint lines — hidden by default; clipped to plot area when shown */}
       {showDaily && (
         <>
-          <path d={polyline(dailySpendPts)} fill="none" stroke="#e8825c" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
-          <path d={polyline(dailySalePts)}  fill="none" stroke="#0093d0" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
+          <path d={polyline(dailySpendPts)} fill="none" stroke="var(--neg)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
+          <path d={polyline(dailySalePts)}  fill="none" stroke="var(--blue)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
         </>
       )}
 
       {/* Rolling bold lines */}
-      <path d={polyline(rollSpendPts)} fill="none" stroke="#e8825c" strokeWidth={2}   strokeOpacity={0.85} />
-      <path d={polyline(rollSalePts)}  fill="none" stroke="#0093d0" strokeWidth={2.5} />
+      <path d={polyline(rollSpendPts)} fill="none" stroke="var(--neg)" strokeWidth={2} strokeOpacity={0.85} />
+      <path d={polyline(rollSalePts)}  fill="none" stroke="var(--blue)" strokeWidth={2.5} />
 
       {/* Ad GP (30d) — rolling sales minus rolling spend, bold deep-green line */}
-      <path d={polyline(rollGPPts)} fill="none" stroke="#15803d" strokeWidth={2.5} />
+      <path d={polyline(rollGPPts)} fill="none" stroke="var(--pos)" strokeWidth={2.5} />
 
       {/* Inline legend — 3 items */}
       <g transform={`translate(${L + PW - 328}, ${T + 6})`}>
-        <line x1={0} y1={5} x2={16} y2={5} stroke="#0093d0" strokeWidth={2.5} />
-        <text x={20} y={9} fontSize={10} fill="#1a2b3c">Sales (30d avg)</text>
-        <line x1={112} y1={5} x2={128} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
-        <text x={132} y={9} fontSize={10} fill="#1a2b3c">Spend (30d avg)</text>
-        <line x1={224} y1={5} x2={240} y2={5} stroke="#15803d" strokeWidth={2.5} />
-        <text x={244} y={9} fontSize={10} fill="#1a2b3c">{gpLabel}</text>
+        <line x1={0} y1={5} x2={16} y2={5} stroke="var(--blue)" strokeWidth={2.5} />
+        <text x={20} y={9} fontSize={10} fill="var(--ink)">Sales (30d avg)</text>
+        <line x1={112} y1={5} x2={128} y2={5} stroke="var(--neg)" strokeWidth={2} strokeOpacity={0.85} />
+        <text x={132} y={9} fontSize={10} fill="var(--ink)">Spend (30d avg)</text>
+        <line x1={224} y1={5} x2={240} y2={5} stroke="var(--pos)" strokeWidth={2.5} />
+        <text x={244} y={9} fontSize={10} fill="var(--ink)">{gpLabel}</text>
       </g>
     </svg>
   )

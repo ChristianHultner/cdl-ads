@@ -56,7 +56,7 @@ function segments(
 export default function AcosChart({ points, targetAcos, showDaily }: { points: ChartPoint[]; targetAcos: number; showDaily: boolean }) {
   if (points.length === 0) {
     return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
+      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
         No ACoS data
       </div>
     )
@@ -71,7 +71,7 @@ export default function AcosChart({ points, targetAcos, showDaily }: { points: C
   const validRoll = rollPlot.filter((v): v is number => v !== null)
   if (validRoll.length === 0) {
     return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
+      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
         No ACoS data
       </div>
     )
@@ -102,7 +102,7 @@ export default function AcosChart({ points, targetAcos, showDaily }: { points: C
   }))
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible' }}>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible', fontFamily: 'var(--font-ibm-plex-mono), monospace' }}>
       <defs>
         <clipPath id="cdl-ac-clip">
           <rect x={L} y={T} width={PW} height={PH} />
@@ -112,37 +112,37 @@ export default function AcosChart({ points, targetAcos, showDaily }: { points: C
       {/* Gridlines + Y labels */}
       {yTicks.map((t, i) => (
         <g key={i}>
-          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="#e4eef3" strokeWidth={1} />
-          <text x={L - 4} y={t.y + 4} textAnchor="end" fontSize={9.5} fill="#8a97a5">{t.label}</text>
+          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="var(--line)" strokeWidth={1} />
+          <text x={L - 4} y={t.y + 4} textAnchor="end" fontSize={9.5} fill="var(--muted)">{t.label}</text>
         </g>
       ))}
 
       {/* Target ACoS reference line */}
-      <line x1={L} y1={refY} x2={L + PW} y2={refY} stroke="#8a97a5" strokeWidth={1.2} strokeDasharray="5 3" />
-      <text x={L + PW + 4} y={refY + 4} fontSize={9.5} fill="#8a97a5" dominantBaseline="middle">
+      <line x1={L} y1={refY} x2={L + PW} y2={refY} stroke="var(--ink)" strokeWidth={1.2} strokeDasharray="5 3" />
+      <text x={L + PW + 4} y={refY + 4} fontSize={9.5} fill="var(--muted)" dominantBaseline="middle">
         target {(targetAcos * 100).toFixed(0)}%
       </text>
 
       {/* X ticks */}
       {xTicks.map((t, i) => (
         <g key={i}>
-          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="#c8dfe9" strokeWidth={1} />
-          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9.5} fill="#8a97a5">{t.label}</text>
+          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="var(--line)" strokeWidth={1} />
+          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9.5} fill="var(--muted)">{t.label}</text>
         </g>
       ))}
 
       {/* Axes */}
-      <line x1={L} y1={T} x2={L} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
-      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
+      <line x1={L} y1={T} x2={L} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
+      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
 
       {/* Daily faint lines — hidden by default; clipped to plot area when shown */}
       {showDaily && dailySegs.map((seg, i) => (
-        <path key={i} d={polyline(seg)} fill="none" stroke="var(--cdl-blue)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ac-clip)" />
+        <path key={i} d={polyline(seg)} fill="none" stroke="var(--blue)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ac-clip)" />
       ))}
 
       {/* Rolling bold lines */}
       {rollSegs.map((seg, i) => (
-        <path key={i} d={polyline(seg)} fill="none" stroke="var(--cdl-blue)" strokeWidth={2} />
+        <path key={i} d={polyline(seg)} fill="none" stroke="var(--blue)" strokeWidth={2} />
       ))}
     </svg>
   )

@@ -3,11 +3,12 @@ export const dynamic = 'force-dynamic'
 import { neon } from '@neondatabase/serverless'
 import { profileGP } from '../../lib/scorecard'
 import ChartSection,  { type MarketChartData }   from './components/ChartSection'
-import MoversRow,     { type MoverRow, type ClusterStats } from './components/MoversRow'
+import type { MoverRow, ClusterStats } from './components/MoversRow'
 import MachineFooter, { type MachineData }       from './components/MachineFooter'
 import MarketCards,   { type MarketCardRow }     from './components/MarketCards'
 import StatusChips,   { type DashboardStatus }   from './components/StatusChips'
 import ExperimentsZone, { type ExperimentRow }   from './components/ExperimentsZone'
+import NeedsYouBand from './components/NeedsYouBand'
 import type { ChannelConsoleRow, ChannelVendorRow } from './components/ChannelBlock'
 import LongTermSection, {
   type LongTermMarket,
@@ -310,6 +311,9 @@ export default async function DashboardPage() {
   }))
   const gainers   = allMovers.slice(0, 3)
   const decliners = [...allMovers].sort((a, b) => a.delta - b.delta).slice(0, 3)
+  void cluster
+  void gainers
+  void decliners
 
   // ── Shape long-term rolling-12 data ──────────────────────────────────────
   // console_history is never joined to daily_rollup; read standalone here.
@@ -430,19 +434,22 @@ export default async function DashboardPage() {
 
       <ExperimentsZone rows={experiments} />
 
-      {/* 2 + 3. CHARTS (client wrapper for tab state) */}
-      <h2 id="trends-90-days" style={{ marginBottom: '0.6rem' }}>Trends · 90 days</h2>
-      <ChartSection markets={markets} />
+      <section className={styles.chartZone} id="trends-90-days">
+        <div className={styles.zoneLabel}>This quarter, daily</div>
+        <div className={styles.zoneCaption}>A close view of the ad slice, by market, with daily detail on demand.</div>
+        <ChartSection markets={markets} />
+      </section>
 
-      {/* LONG-TERM · ROLLING-12 — clearly separate from 90-day trends */}
-      <h2 style={{ marginTop: '2rem', marginBottom: '0.6rem' }}>Long-term · 12-month rolling</h2>
-      <LongTermSection markets={ltMarkets} vendorMarkets={vendorMarkets} />
-
-      {/* 4. WHAT MOVED */}
-      <MoversRow cluster={cluster} gainers={gainers} decliners={decliners} />
+      <section className={styles.chartZone}>
+        <div className={styles.zoneLabel}>The year, three truths</div>
+        <div className={styles.zoneCaption}>Attributed (what ads claim) · vendor (what Amazon pays you) · the gap between them (what attribution can&apos;t see).</div>
+        <LongTermSection markets={ltMarkets} vendorMarkets={vendorMarkets} />
+      </section>
 
       {/* 5. MACHINE FOOTER */}
       <MachineFooter data={machine} />
+
+      <NeedsYouBand approvalsWaiting={status.approvalsWaiting} experiments={experiments} />
     </div>
   )
 }

@@ -12,6 +12,7 @@
 
 import { useState } from 'react'
 import { profileGP } from '../../../lib/scorecard'
+import styles from './DashboardZoneOne.module.css'
 
 export interface LongTermPoint {
   label:   string   // 'YYYY-MM' — endpoint month of the 12-month window
@@ -47,6 +48,10 @@ const PH = H - T - B
 
 const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
 const TAB_ORDER = ['ES', 'US', 'MX', 'UK', 'CA', 'DE', 'FR', 'IT']
+const COUNTRY_NAMES: Record<string, string> = {
+  CA: 'Canada', DE: 'Germany', ES: 'Spain', FR: 'France',
+  IT: 'Italy', MX: 'Mexico', UK: 'United Kingdom', US: 'United States',
+}
 
 function tx(i: number, n: number) { return n <= 1 ? L : L + (i / (n - 1)) * PW }
 function ty(v: number, minV: number, maxV: number) {
@@ -81,7 +86,7 @@ function RollingChart({
 
   if (n === 0) {
     return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
+      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
         No rolling-12 data (need 12 consecutive months)
       </div>
     )
@@ -147,7 +152,7 @@ function RollingChart({
   const clipId = `cdl-lt-${country}`
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible' }}>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible', fontFamily: 'var(--font-ibm-plex-mono), monospace' }}>
       <defs>
         <clipPath id={clipId}>
           <rect x={L} y={T} width={PW} height={PH} />
@@ -157,46 +162,46 @@ function RollingChart({
       {/* Y gridlines + labels */}
       {yTicks.map((t, i) => (
         <g key={i}>
-          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="#e4eef3" strokeWidth={1} />
-          <text x={L - 5} y={t.y + 4} textAnchor="end" fontSize={10} fill="#8a97a5">{t.label}</text>
+          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="var(--line)" strokeWidth={1} />
+          <text x={L - 5} y={t.y + 4} textAnchor="end" fontSize={10} fill="var(--muted)">{t.label}</text>
         </g>
       ))}
       {/* Zero gridline — heavier and darker when domain spans negative values */}
       {zeroLineY !== null && (
-        <line x1={L} y1={zeroLineY} x2={L + PW} y2={zeroLineY} stroke="#64748b" strokeWidth={1.5} />
+        <line x1={L} y1={zeroLineY} x2={L + PW} y2={zeroLineY} stroke="var(--ink)" strokeWidth={1.5} />
       )}
 
       {/* X ticks + labels */}
       {xTicks.map((t, i) => (
         <g key={i}>
-          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="#c8dfe9" strokeWidth={1} />
-          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9} fill="#8a97a5">{t.label}</text>
+          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="var(--line)" strokeWidth={1} />
+          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9} fill="var(--muted)">{t.label}</text>
         </g>
       ))}
 
       {/* Axis borders */}
-      <line x1={L} y1={T}      x2={L}      y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
-      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="#c8dfe9" strokeWidth={1} />
+      <line x1={L} y1={T}      x2={L}      y2={T + PH} stroke="var(--line)" strokeWidth={1} />
+      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
 
       {/* GP shaded fill */}
-      <path d={gpFillPath} fill="#16a34a" fillOpacity={0.15} stroke="none" clipPath={`url(#${clipId})`} />
+      <path d={gpFillPath} fill="var(--pos)" fillOpacity={0.12} stroke="none" clipPath={`url(#${clipId})`} />
 
       {/* Console series + standalone vendor revenue overlay */}
-      <path d={polyline(spendPts)} fill="none" stroke="#e8825c" strokeWidth={2}   strokeOpacity={0.85} clipPath={`url(#${clipId})`} />
-      <path d={polyline(salesPts)} fill="none" stroke="#0093d0" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
-      <path d={polyline(gpPts)}    fill="none" stroke="#15803d" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
+      <path d={polyline(spendPts)} fill="none" stroke="var(--neg)" strokeWidth={2} strokeOpacity={0.85} clipPath={`url(#${clipId})`} />
+      <path d={polyline(salesPts)} fill="none" stroke="var(--blue)" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
+      <path d={polyline(gpPts)}    fill="none" stroke="var(--pos)" strokeWidth={2.5} clipPath={`url(#${clipId})`} />
       {vendorRevenuePts.length > 0 && (
         <>
           <path
             d={polyline(vendorRevenuePts)}
             fill="none"
-            stroke="#7c3aed"
+            stroke="#8a5bb8"
             strokeWidth={2.5}
             strokeDasharray="7 5"
             clipPath={`url(#${clipId})`}
           />
           {vendorRevenuePts.map((point, index) => (
-            <circle key={`vr-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#7c3aed" />
+            <circle key={`vr-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#8a5bb8" />
           ))}
         </>
       )}
@@ -206,13 +211,13 @@ function RollingChart({
         <>
           {/* Sales labels: above point; flip to below if above-placement enters top band (y < T) */}
           {salesPts.map((p, i) => (
-            <text key={`sv-${i}`} x={p.x} y={p.y - 12 < T ? p.y + 14 : p.y - 12} textAnchor="middle" fontSize={9} fill="#0093d0" style={{ pointerEvents: 'none' }}>
+            <text key={`sv-${i}`} x={p.x} y={p.y - 12 < T ? p.y + 14 : p.y - 12} textAnchor="middle" fontSize={9} fill="var(--blue)" style={{ pointerEvents: 'none' }}>
               {fmtK(points[i].sales12, sym)}
             </text>
           ))}
           {/* Spend labels: above point; same top-band flip rule */}
           {spendPts.map((p, i) => (
-            <text key={`spv-${i}`} x={p.x} y={p.y - 12 < T ? p.y + 14 : p.y - 12} textAnchor="middle" fontSize={9} fill="#e8825c" style={{ pointerEvents: 'none' }}>
+            <text key={`spv-${i}`} x={p.x} y={p.y - 12 < T ? p.y + 14 : p.y - 12} textAnchor="middle" fontSize={9} fill="var(--neg)" style={{ pointerEvents: 'none' }}>
               {fmtK(points[i].spend12, sym)}
             </text>
           ))}
@@ -220,12 +225,12 @@ function RollingChart({
           {/* Root cause of €5.0k1: fixed y+14 placed label into x-axis tick zone; trailing '1' of */}
           {/* '2026-01' bled through. Fix: flip to above when p.y+14 > T+PH (= H-B = 228). */}
           {gpPts.map((p, i) => (
-            <text key={`gpv-${i}`} x={p.x} y={p.y + 14 > T + PH ? p.y - 12 : p.y + 14} textAnchor="middle" fontSize={9} fill="#15803d" style={{ pointerEvents: 'none' }}>
+            <text key={`gpv-${i}`} x={p.x} y={p.y + 14 > T + PH ? p.y - 12 : p.y + 14} textAnchor="middle" fontSize={9} fill="var(--pos)" style={{ pointerEvents: 'none' }}>
               {fmtK(gpVals[i], sym)}
             </text>
           ))}
           {vendorRevenuePts.map((point, index) => (
-            <text key={`vrv-${index}`} x={point.x} y={point.y - 12 < T ? point.y + 14 : point.y - 12} textAnchor="middle" fontSize={9} fill="#7c3aed" style={{ pointerEvents: 'none' }}>
+            <text key={`vrv-${index}`} x={point.x} y={point.y - 12 < T ? point.y + 14 : point.y - 12} textAnchor="middle" fontSize={9} fill="#8a5bb8" style={{ pointerEvents: 'none' }}>
               {fmtK(vendorRevenue[index].value, sym)}
             </text>
           ))}
@@ -234,16 +239,16 @@ function RollingChart({
 
       {/* Inline legend — fixed in top band (y=16 < T=40), outside data area; series/labels cannot reach it */}
       <g transform={`translate(${L}, 16)`}>
-        <line x1={0}   y1={5} x2={16}  y2={5} stroke="#0093d0" strokeWidth={2.5} />
-        <text x={20}  y={9} fontSize={10} fill="#1a2b3c">Rolling-12 Sales</text>
-        <line x1={130} y1={5} x2={146} y2={5} stroke="#e8825c" strokeWidth={2} strokeOpacity={0.85} />
-        <text x={150} y={9} fontSize={10} fill="#1a2b3c">Rolling-12 Spend</text>
-        <line x1={260} y1={5} x2={276} y2={5} stroke="#15803d" strokeWidth={2.5} />
-        <text x={280} y={9} fontSize={10} fill="#1a2b3c">{gpLabel}</text>
+        <line x1={0}   y1={5} x2={16}  y2={5} stroke="var(--blue)" strokeWidth={2.5} />
+        <text x={20}  y={9} fontSize={10} fill="var(--ink)">Rolling-12 Sales</text>
+        <line x1={130} y1={5} x2={146} y2={5} stroke="var(--neg)" strokeWidth={2} strokeOpacity={0.85} />
+        <text x={150} y={9} fontSize={10} fill="var(--ink)">Rolling-12 Spend</text>
+        <line x1={260} y1={5} x2={276} y2={5} stroke="var(--pos)" strokeWidth={2.5} />
+        <text x={280} y={9} fontSize={10} fill="var(--ink)">{gpLabel}</text>
         {vendorRevenuePts.length > 0 && (
           <>
-            <line x1={390} y1={5} x2={406} y2={5} stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="7 5" />
-            <text x={410} y={9} fontSize={10} fill="#1a2b3c">Rolling-12 Vendor Revenue (sell-in)</text>
+            <line x1={390} y1={5} x2={406} y2={5} stroke="#8a5bb8" strokeWidth={2.5} strokeDasharray="7 5" />
+            <text x={410} y={9} fontSize={10} fill="var(--ink)">Rolling-12 Vendor Revenue (sell-in)</text>
           </>
         )}
       </g>
@@ -297,7 +302,7 @@ function UnitsPanel({
   const clipId = `cdl-lt-units-${market.country}`
 
   return (
-    <svg viewBox={`0 0 ${W} ${UH}`} width="100%" style={{ display: 'block', overflow: 'visible' }}>
+    <svg viewBox={`0 0 ${W} ${UH}`} width="100%" style={{ display: 'block', overflow: 'visible', fontFamily: 'var(--font-ibm-plex-mono), monospace' }}>
       <defs>
         <clipPath id={clipId}>
           <rect x={L} y={UT} width={PW} height={UPH} />
@@ -306,49 +311,49 @@ function UnitsPanel({
 
       {yTicks.map((tick, index) => (
         <g key={index}>
-          <line x1={L} y1={tick.y} x2={L + PW} y2={tick.y} stroke="#e4eef3" strokeWidth={1} />
-          <text x={L - 5} y={tick.y + 4} textAnchor="end" fontSize={10} fill="#8a97a5">{tick.label}</text>
+          <line x1={L} y1={tick.y} x2={L + PW} y2={tick.y} stroke="var(--line)" strokeWidth={1} />
+          <text x={L - 5} y={tick.y + 4} textAnchor="end" fontSize={10} fill="var(--muted)">{tick.label}</text>
         </g>
       ))}
       {points.map((point, index) => {
         const x = tx(point.index, market.points.length)
         return (
           <g key={point.label}>
-            <line x1={x} y1={UT + UPH} x2={x} y2={UT + UPH + 4} stroke="#c8dfe9" strokeWidth={1} />
-            <text x={x} y={UT + UPH + 15} textAnchor="middle" fontSize={9} fill="#8a97a5">{point.label}</text>
+            <line x1={x} y1={UT + UPH} x2={x} y2={UT + UPH + 4} stroke="var(--line)" strokeWidth={1} />
+            <text x={x} y={UT + UPH + 15} textAnchor="middle" fontSize={9} fill="var(--muted)">{point.label}</text>
           </g>
         )
       })}
 
-      <line x1={L} y1={UT} x2={L} y2={UT + UPH} stroke="#c8dfe9" strokeWidth={1} />
-      <line x1={L} y1={UT + UPH} x2={L + PW} y2={UT + UPH} stroke="#c8dfe9" strokeWidth={1} />
-      <path d={haloPath} fill="#7c3aed" fillOpacity={0.10} stroke="none" clipPath={`url(#${clipId})`} />
-      <path d={polyline(attributedPts)} fill="none" stroke="#0093d0" strokeWidth={2.25} clipPath={`url(#${clipId})`} />
-      <path d={polyline(vendorPts)} fill="none" stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="7 5" clipPath={`url(#${clipId})`} />
+      <line x1={L} y1={UT} x2={L} y2={UT + UPH} stroke="var(--line)" strokeWidth={1} />
+      <line x1={L} y1={UT + UPH} x2={L + PW} y2={UT + UPH} stroke="var(--line)" strokeWidth={1} />
+      <path d={haloPath} fill="#8a5bb8" fillOpacity={0.10} stroke="none" clipPath={`url(#${clipId})`} />
+      <path d={polyline(attributedPts)} fill="none" stroke="var(--blue)" strokeWidth={2.25} clipPath={`url(#${clipId})`} />
+      <path d={polyline(vendorPts)} fill="none" stroke="#8a5bb8" strokeWidth={2.5} strokeDasharray="7 5" clipPath={`url(#${clipId})`} />
       {attributedPts.map((point, index) => (
-        <circle key={`au-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#0093d0" />
+        <circle key={`au-${index}`} cx={point.x} cy={point.y} r={2.5} fill="var(--blue)" />
       ))}
       {vendorPts.map((point, index) => (
-        <circle key={`vu-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#7c3aed" />
+        <circle key={`vu-${index}`} cx={point.x} cy={point.y} r={2.5} fill="#8a5bb8" />
       ))}
 
       {showValues && points.map((point, index) => (
         <g key={`uv-${point.label}`}>
-          <text x={vendorPts[index].x} y={vendorPts[index].y - 9} textAnchor="middle" fontSize={9} fill="#7c3aed">
+          <text x={vendorPts[index].x} y={vendorPts[index].y - 9} textAnchor="middle" fontSize={9} fill="#8a5bb8">
             {point.vendorUnits.toLocaleString('en-US')}
           </text>
-          <text x={attributedPts[index].x} y={attributedPts[index].y + 14} textAnchor="middle" fontSize={9} fill="#0093d0">
+          <text x={attributedPts[index].x} y={attributedPts[index].y + 14} textAnchor="middle" fontSize={9} fill="var(--blue)">
             {point.attributedUnits.toLocaleString('en-US')}
           </text>
         </g>
       ))}
 
       <g transform={`translate(${L}, 12)`}>
-        <line x1={0} y1={5} x2={16} y2={5} stroke="#7c3aed" strokeWidth={2.5} strokeDasharray="7 5" />
-        <text x={20} y={9} fontSize={10} fill="#1a2b3c">Vendor units (sell-in)</text>
-        <line x1={150} y1={5} x2={166} y2={5} stroke="#0093d0" strokeWidth={2.25} />
-        <text x={170} y={9} fontSize={10} fill="#1a2b3c">Attributed orders</text>
-        <text x={290} y={9} fontSize={10} fill="#8a97a5">gap = un-attributed volume</text>
+        <line x1={0} y1={5} x2={16} y2={5} stroke="#8a5bb8" strokeWidth={2.5} strokeDasharray="7 5" />
+        <text x={20} y={9} fontSize={10} fill="var(--ink)">Vendor units (sell-in)</text>
+        <line x1={150} y1={5} x2={166} y2={5} stroke="var(--blue)" strokeWidth={2.25} />
+        <text x={170} y={9} fontSize={10} fill="var(--ink)">Attributed orders</text>
+        <text x={290} y={9} fontSize={10} fill="var(--muted)">gap = un-attributed volume</text>
       </g>
     </svg>
   )
@@ -373,76 +378,54 @@ export default function LongTermSection({
 
   if (!current) return null
 
+  const latestVendorPoint = currentVendor?.points.at(-1)
+  const latestConsolePoint = latestVendorPoint
+    ? current.points.find(point => point.label === latestVendorPoint.label)
+    : undefined
+  const unitsCaption = latestVendorPoint && latestConsolePoint
+    ? `Amazon bought ${Math.round(latestVendorPoint.units12).toLocaleString('en-US')} books; ads claim ${Math.round(latestConsolePoint.orders12).toLocaleString('en-US')} orders. The gap is the rest of your business.`
+    : 'Amazon sell-in and attributed orders, shown separately. The gap is the rest of your business.'
+
   return (
-    <div style={{ marginBottom: '1.5rem' }}>
+    <div className={styles.chartSection}>
       {/* Tab bar + values toggle — styled like ChartSection's daily toggle */}
-      <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #c8dfe9', marginBottom: '0.75rem' }}>
+      <div className={styles.chartTabs}>
         {active.map(m => {
           const isActive = m.country === tab
           return (
             <button
               key={m.country}
               onClick={() => setTab(m.country)}
-              style={{
-                padding: '0.3rem 0.9rem',
-                fontSize: '0.78rem',
-                fontWeight: isActive ? 700 : 400,
-                color: isActive ? 'var(--cdl-blue)' : 'var(--cdl-ink)',
-                background: 'none',
-                border: 'none',
-                borderBottom: isActive ? '2px solid var(--cdl-blue)' : '2px solid transparent',
-                cursor: 'pointer',
-                outline: 'none',
-                marginBottom: -1,
-              }}
+              className={`${styles.chartTab} ${isActive ? styles.chartTabActive : ''}`}
             >
               {m.country}
             </button>
           )
         })}
-        <label style={{
-          marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-          fontSize: '0.68rem', color: 'var(--cdl-muted)', cursor: 'pointer',
-          paddingRight: '0.5rem', paddingBottom: '0.1rem',
-        }}>
+        <label className={styles.chartToggle}>
           <input
             type="checkbox"
             checked={showValues}
             onChange={e => setShowValues(e.target.checked)}
-            style={{ cursor: 'pointer', accentColor: 'var(--cdl-blue)' }}
+            className={styles.chartCheckbox}
           />
           values
         </label>
       </div>
 
       {/* Chart card */}
-      <div style={{
-        border: '1px solid #c8dfe9', borderRadius: 8,
-        padding: '0.75rem 0.75rem 0.4rem', overflow: 'hidden',
-      }}>
-        <div style={{
-          fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
-          letterSpacing: '0.07em', color: 'var(--cdl-muted)', marginBottom: '0.4rem',
-        }}>
-          Rolling-12 · {current.currency} · source: console exports - monthly - all ad types
-        </div>
+      <div className={styles.chartPanel}>
+        <h3 className={styles.panelTitle}>{COUNTRY_NAMES[current.country] ?? current.country}, rolling 12 months</h3>
+        <div className={styles.panelCaption}>Each point is a full year ending that month — seasonality removed.</div>
         <RollingChart market={current} vendor={currentVendor} showValues={showValues} />
+        <div className={styles.panelSource}>sources: console exports (all ad types){currentVendor ? ' · vendor invoices (sell-in)' : ''}</div>
       </div>
       {currentVendor && (
-        <div style={{
-          border: '1px solid #c8dfe9', borderRadius: 8,
-          padding: '0.75rem 0.75rem 0.4rem', overflow: 'hidden', marginTop: '0.75rem',
-        }}>
-          <div style={{
-            fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
-            letterSpacing: '0.07em', color: 'var(--cdl-muted)', marginBottom: '0.4rem',
-          }}>
-            Rolling-12 Units: vendor (sell-in) vs attributed
-          </div>
+        <div className={styles.chartPanel}>
+          <h3 className={styles.panelTitle}>What ads can&apos;t see · {COUNTRY_NAMES[current.country] ?? current.country}</h3>
+          <div className={styles.panelCaption}>{unitsCaption}</div>
           <UnitsPanel market={current} vendor={currentVendor} showValues={showValues} />
-          <div style={{ fontSize: '0.66rem', color: 'var(--cdl-muted)', marginTop: '0.2rem' }}>
-            sell-in vs attributed - quarterly-grain caveat applies
-          </div>
+          <div className={styles.panelSource}>sources: vendor invoices (sell-in) · console exports (all ad types) · read quarterly</div>
         </div>
       )}
     </div>

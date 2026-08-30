@@ -386,10 +386,133 @@
   color: var(--muted);
 }
 
+.chartZone {
+  margin-bottom: 38px;
+}
+
+.chartSection {
+  margin-bottom: 0;
+}
+
+.chartTabs {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.chartTab {
+  margin-bottom: -1px;
+  padding: 5px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  outline: none;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.chartTabActive {
+  border-bottom-color: var(--blue);
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.chartToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding-right: 8px;
+  padding-bottom: 2px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.chartCheckbox {
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.chartPanel {
+  overflow: hidden;
+  padding: 16px 18px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.chartPanel + .chartPanel {
+  margin-top: 12px;
+}
+
+.panelTitle {
+  margin: 0 0 2px;
+  color: var(--ink);
+  font-family: var(--font-fraunces), serif;
+  font-size: 15.5px;
+  font-weight: 700;
+}
+
+.panelCaption {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.panelSource {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.needsYouSection {
+  margin-top: 38px;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.actionCard {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--blue);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.actionUrgent {
+  border-left-color: var(--neg);
+}
+
+.actionDate {
+  border-left-color: var(--amber);
+}
+
+.actionWhat {
+  margin-bottom: 3px;
+  font-weight: 600;
+}
+
+.actionWhy {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
 @media (max-width: 1100px) {
   .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .experiment { grid-template-columns: 1fr; gap: 8px; }
   .experimentStatus { text-align: left; }
+  .actions { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 700px) {
