@@ -1,4 +1,5 @@
 import MarginGauge, { formatMoney } from './MarginGauge'
+import ChannelBlock, { type ChannelConsoleRow, type ChannelVendorRow } from './ChannelBlock'
 import styles from './DashboardZoneOne.module.css'
 
 export interface MarketCardRow {
@@ -22,7 +23,13 @@ const COUNTRY_NAMES: Record<string, string> = {
   US: 'United States',
 }
 
-export default function MarketCards({ rows }: { rows: MarketCardRow[] }) {
+interface MarketCardsProps {
+  rows: MarketCardRow[]
+  consoleRows: ChannelConsoleRow[]
+  vendorRows: ChannelVendorRow[]
+}
+
+export default function MarketCards({ rows, consoleRows, vendorRows }: MarketCardsProps) {
   return (
     <div className={styles.cards}>
       {rows.map(row => {
@@ -64,6 +71,14 @@ export default function MarketCards({ rows }: { rows: MarketCardRow[] }) {
               <span>sales <b>{formatMoney(row.sales, row.currency)}</b></span>
               <span>orders <b>{Math.round(row.orders).toLocaleString('en-US')}</b></span>
             </div>
+
+            <ChannelBlock
+              market={row.country}
+              currency={row.currency}
+              gpPerOrder={row.gpPerOrder}
+              consoleRows={consoleRows}
+              vendorRows={vendorRows}
+            />
           </article>
         )
       })}

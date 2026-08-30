@@ -7,6 +7,8 @@ import MoversRow,     { type MoverRow, type ClusterStats } from './components/Mo
 import MachineFooter, { type MachineData }       from './components/MachineFooter'
 import MarketCards,   { type MarketCardRow }     from './components/MarketCards'
 import StatusChips,   { type DashboardStatus }   from './components/StatusChips'
+import ExperimentsZone, { type ExperimentRow }   from './components/ExperimentsZone'
+import type { ChannelConsoleRow, ChannelVendorRow } from './components/ChannelBlock'
 import LongTermSection, {
   type LongTermMarket,
   type LongTermPoint,
@@ -22,6 +24,7 @@ export default async function DashboardPage() {
   const [
     marketCardRows,
     statusRows,
+    experimentRows,
     chartRows,
     clusterRows,
     moverRows,
@@ -46,7 +49,8 @@ export default async function DashboardPage() {
       WHERE dr.date >= CURRENT_DATE - INTERVAL '30 days'
       GROUP BY p.profile_id, p.country_code, p.currency_code, p.gp_per_order
       HAVING COALESCE(SUM(dr.spend), 0) > 10
-      ORDER BY spend DESC
+         AND COALESCE(SUM(dr.orders), 0) >= 5
+      ORDER BY orders DESC
     `,
 
     // ── Zone 1: DB-derivable status chips only ──
@@ -54,7 +58,11 @@ export default async function DashboardPage() {
       SELECT
         (SELECT COUNT(*)::int
            FROM recommendations
-          WHERE status = 'APPROVED') AS approvals_waiting,
+          WHERE status = 'APPROVED'
+            AND NOT (
+              rec_type IN ('PROMOTE_TERM', 'PROMOTE_ASIN')
+              AND evidence->>'resolved_destination' IS NULL
+            )) AS approvals_waiting,
         (SELECT name
            FROM experiments
           WHERE status = 'LIVE' AND started_at IS NOT NULL
@@ -66,6 +74,25 @@ export default async function DashboardPage() {
           ORDER BY started_at + make_interval(days => horizon_days)
           LIMIT 1) AS next_verdict_at,
         (SELECT MAX(synced_at)::text FROM amazon_campaigns) AS synced_at
+    `,
+
+    // ── Zone 2: experiments are their own truth layer ──
+    sql`
+      SELECT
+        id,
+        name,
+        hypothesis,
+        market,
+        started_at::text,
+        horizon_days,
+        (started_at + make_interval(days => horizon_days))::text AS verdict_at,
+        status
+      FROM experiments
+      WHERE status <> 'KILLED'
+      ORDER BY
+        CASE status WHEN 'LIVE' THEN 0 WHEN 'PROPOSED' THEN 1 ELSE 2 END,
+        started_at NULLS LAST,
+        id
     `,
 
     // ── Chart data: 90 days per profile ──
@@ -209,6 +236,21 @@ export default async function DashboardPage() {
     syncedAt:         sr?.synced_at ?? null,
   }
 
+  const experiments: ExperimentRow[] = (experimentRows as {
+    id: number; name: string; hypothesis: string; market: string;
+    started_at: string | null; horizon_days: number;
+    verdict_at: string | null; status: string;
+  }[]).map(r => ({
+    id:          r.id,
+    name:        r.name,
+    hypothesis:  r.hypothesis,
+    market:      r.market,
+    startedAt:   r.started_at,
+    horizonDays: r.horizon_days,
+    verdictAt:   r.verdict_at,
+    status:      r.status,
+  }))
+
   // ── Shape chart data ─────────────────────────────────────────────────────
   const profileMap: Record<string, MarketChartData> = {}
   for (const r of chartRows as {
@@ -276,6 +318,13 @@ export default async function DashboardPage() {
     spend: number; sales: number; orders: number;
     gp_per_order: number | null; currency_code: string
   }
+  const channelConsoleRows: ChannelConsoleRow[] = (longTermRows as LtRaw[]).map(r => ({
+    market: r.market,
+    year:   r.year,
+    month:  r.month,
+    spend:  r.spend,
+    orders: r.orders,
+  }))
   const ltByMarket: Record<string, LtRaw[]> = {}
   for (const r of longTermRows as LtRaw[]) {
     (ltByMarket[r.market] ??= []).push(r)
@@ -316,6 +365,12 @@ export default async function DashboardPage() {
     market: string; currency: string; year: number; month: number;
     units: number; net_revenue: number
   }
+  const channelVendorRows: ChannelVendorRow[] = (vendorRows as VendorRaw[]).map(r => ({
+    market: r.market,
+    year:   r.year,
+    month:  r.month,
+    units:  r.units,
+  }))
   const vendorByMarket: Record<string, VendorRaw[]> = {}
   for (const r of vendorRows as VendorRaw[]) {
     (vendorByMarket[r.market] ??= []).push(r)
@@ -366,8 +421,14 @@ export default async function DashboardPage() {
       <section className={styles.marketSection}>
         <div className={styles.zoneLabel}>This month, per market</div>
         <div className={styles.zoneCaption}>Last 30 days. The gauge is the whole story: where the dot sits against the margin tick is whether each order makes or loses money.</div>
-        <MarketCards rows={marketCards} />
+        <MarketCards
+          rows={marketCards}
+          consoleRows={channelConsoleRows}
+          vendorRows={channelVendorRows}
+        />
       </section>
+
+      <ExperimentsZone rows={experiments} />
 
       {/* 2 + 3. CHARTS (client wrapper for tab state) */}
       <h2 id="trends-90-days" style={{ marginBottom: '0.6rem' }}>Trends · 90 days</h2>
