@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CDL Ads — Dashboard redesign mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FAF8F3; --card:#FFFFFF; --ink:#20272E; --muted:#7A756B;
+    --line:#E7E2D8; --pos:#1E6E52; --neg:#B3402F; --posbg:#EAF3EE; --negbg:#F8ECE9;
+    --blue:#2B5DA8; --amber:#9A6B15; --amberbg:#F7F0E1;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:'IBM Plex Sans',sans-serif;font-size:14px;line-height:1.45;padding:28px 32px 60px}
+  .serif{font-family:'Source Serif 4',serif}
+  .mono{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+
+  header{display:flex;align-items:baseline;justify-content:space-between;border-bottom:2px solid var(--ink);padding-bottom:14px;margin-bottom:10px}
+  h1{font-family:'Source Serif 4',serif;font-size:26px;font-weight:700;letter-spacing:-.01em}
+  h1 span{color:var(--muted);font-weight:600}
+  .asof{color:var(--muted);font-size:13px}
+
+  .chips{display:flex;gap:10px;margin:14px 0 26px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid var(--line);border-radius:20px;background:var(--card);font-size:12.5px}
+  .chip b{font-weight:600}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .dot.red{background:var(--neg)} .dot.green{background:var(--pos)} .dot.amber{background:var(--amber)}
+
+  .zone-label{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 4px}
+  .zone-caption{color:var(--muted);font-size:13px;margin-bottom:14px}
+  section{margin-bottom:38px}
+
+  /* market cards */
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+  @media(max-width:1100px){.cards{grid-template-columns:repeat(2,1fr)}}
+  .mcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px 14px;position:relative}
+  .mcard .mkt{display:flex;justify-content:space-between;align-items:baseline}
+  .mcard .mkt .name{font-family:'Source Serif 4',serif;font-size:17px;font-weight:700}
+  .mcard .mkt .basis{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .gp{font-family:'IBM Plex Mono',monospace;font-size:27px;font-weight:600;margin:8px 0 2px}
+  .gp.pos{color:var(--pos)} .gp.neg{color:var(--neg)} .gp.na{color:var(--muted)}
+  .gp-sub{font-size:12px;color:var(--muted);margin-bottom:12px}
+
+  /* the margin gauge — signature element */
+  .gauge{margin:6px 0 4px}
+  .gauge .lbls{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);margin-bottom:3px}
+  .track{position:relative;height:14px;border-radius:7px;background:linear-gradient(to right,var(--posbg) 0 50%,var(--negbg) 50% 100%);border:1px solid var(--line)}
+  .tick{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--ink);left:50%}
+  .tick::after{content:'margin';position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-size:9.5px;color:var(--ink);letter-spacing:.04em}
+  .marker{position:absolute;top:50%;transform:translate(-50%,-50%);width:12px;height:12px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.25)}
+  .marker.pos{background:var(--pos)} .marker.neg{background:var(--neg)}
+  .gauge .read{font-size:12.5px;margin-top:7px}
+  .gauge .read .mono{font-weight:600}
+  .smallrow{display:flex;gap:14px;margin-top:12px;padding-top:10px;border-top:1px dashed var(--line);font-size:12px;color:var(--muted)}
+  .smallrow b{color:var(--ink);font-weight:600}
+  .navelink{position:absolute;top:14px;right:16px;font-size:11px;color:var(--blue)}
+
+  /* experiments */
+  .exps{display:flex;flex-direction:column;gap:10px}
+  .exp{display:grid;grid-template-columns:280px 1fr 210px;gap:18px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:13px 18px}
+  @media(max-width:1100px){.exp{grid-template-columns:1fr;gap:8px}}
+  .exp .ename{font-weight:600}
+  .exp .ehyp{font-size:12px;color:var(--muted)}
+  .ebar{position:relative;height:8px;border-radius:4px;background:var(--line)}
+  .ebar .fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;background:var(--blue)}
+  .ebar .vline{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--ink);right:0}
+  .edays{font-size:11px;color:var(--muted);margin-top:5px}
+  .estat{text-align:right;font-size:13px}
+  .estat .mono{font-weight:600}
+  .badge{display:inline-block;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;padding:3px 9px;border-radius:11px;font-weight:600}
+  .badge.live{background:var(--posbg);color:var(--pos)}
+  .badge.wait{background:var(--amberbg);color:var(--amber)}
+  .badge.na{background:#EFEDE7;color:var(--muted)}
+
+  /* year charts */
+  .yeargrid{display:grid;grid-template-columns:1.5fr 1fr;gap:16px}
+  @media(max-width:1100px){.yeargrid{grid-template-columns:1fr}}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .panel h3{font-family:'Source Serif 4',serif;font-size:15.5px;font-weight:700;margin-bottom:2px}
+  .panel .cap{font-size:12px;color:var(--muted);margin-bottom:12px}
+  .legend{display:flex;gap:16px;font-size:11.5px;color:var(--muted);margin-bottom:8px;flex-wrap:wrap}
+  .lk{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:16px;height:3px;border-radius:2px;display:inline-block}
+  .src{font-size:10.5px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-top:10px}
+
+  /* actions */
+  .actions{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:1100px){.actions{grid-template-columns:1fr}}
+  .act{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:10px;padding:14px 16px}
+  .act.urgent{border-left-color:var(--neg)}
+  .act.date{border-left-color:var(--amber)}
+  .act .what{font-weight:600;margin-bottom:3px}
+  .act .why{font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CDL Ads <span>· Amazon</span></h1>
+  <div class="asof mono">Sunday 30 Aug 2026 · nightly synced 06:07</div>
+</header>
+
+<div class="chips">
+  <span class="chip"><span class="dot red"></span> watchdog: <b>FR / IT sync stale</b> (known — markets dormant)</span>
+  <span class="chip"><span class="dot amber"></span> <b>1 approval waiting</b> — wave-2 rooms</span>
+  <span class="chip"><span class="dot green"></span> alerts delivering to WhatsApp</span>
+  <span class="chip">next verdict: <b>UK clusters · Sep 11</b></span>
+</div>
+
+<!-- ZONE 1 — the money -->
+<section>
+  <div class="zone-label">This month, per market</div>
+  <div class="zone-caption">Last 30 days. The gauge is the whole story: where the dot sits against the margin tick is whether each order makes or loses money.</div>
+  <div class="cards">
+
+    <div class="mcard">
+      <a class="navelink" href="#">90-day detail →</a>
+      <div class="mkt"><span class="name">Spain</span><span class="basis">margin €5.00 / order</span></div>
+      <div class="gp neg">−€158</div>
+      <div class="gp-sub">Ad GP, 30 days</div>
+      <div class="gauge">
+        <div class="lbls"><span>earning</span><span>losing</span></div>
+        <div class="track"><span class="tick"></span><span class="marker neg" style="left:73%"></span></div>
+        <div class="read">each order costs <span class="mono">€7.31</span> vs <span class="mono">€5.00</span> margin</div>
+      </div>
+      <div class="smallrow"><span>spend <b>€453</b></span><span>orders <b>62</b></span><span>heroes room live <b>day 2</b></span></div>
+    </div>
+
+    <div class="mcard">
+      <a class="navelink" href="#">90-day detail →</a>
+      <div class="mkt"><span class="name">United States</span><span class="basis">margin $4.40 / order</span></div>
+      <div class="gp neg">−$311</div>
+      <div class="gp-sub">Ad GP, 30 days</div>
+      <div class="gauge">
+        <div class="lbls"><span>earning</span><span>losing</span></div>
+        <div class="track"><span class="tick"></span><span class="marker neg" style="left:97%"></span></div>
+        <div class="read">each order costs <span class="mono">$8.55</span> vs <span class="mono">$4.40</span> margin</div>
+      </div>
+      <div class="smallrow"><span>spend <b>$641</b></span><span>orders <b>75</b></span><span>E&amp;F room <b>$2.91/order ✓</b></span></div>
+    </div>
+
+    <div class="mcard">
+      <a class="navelink" href="#">90-day detail →</a>
+      <div class="mkt"><span class="name">Mexico</span><span class="basis">no margin ruled — revenue basis</span></div>
+      <div class="gp na">+MX$3,637</div>
+      <div class="gp-sub">revenue − spend, 30 days <em>(pre-COGS)</em></div>
+      <div class="gauge">
+        <div class="lbls"><span>earning</span><span>losing</span></div>
+        <div class="track" style="background:#F1EFE9"><span class="tick" style="opacity:.25"></span></div>
+        <div class="read" style="color:var(--muted)">gauge unavailable — rule a MXN margin to enable</div>
+      </div>
+      <div class="smallrow"><span>spend <b>MX$1,630</b></span><span>ACoS <b>30.9%</b></span></div>
+    </div>
+
+    <div class="mcard">
+      <a class="navelink" href="#">90-day detail →</a>
+      <div class="mkt"><span class="name">United Kingdom</span><span class="basis">no margin ruled — revenue basis</span></div>
+      <div class="gp na">+£28</div>
+      <div class="gp-sub">revenue − spend, 30 days <em>(pre-COGS)</em></div>
+      <div class="gauge">
+        <div class="lbls"><span>earning</span><span>losing</span></div>
+        <div class="track" style="background:#F1EFE9"><span class="tick" style="opacity:.25"></span></div>
+        <div class="read" style="color:var(--muted)">gauge unavailable — rule a GBP margin to enable</div>
+      </div>
+      <div class="smallrow"><span>spend <b>£53</b></span><span>4 cluster bets <b>day 18</b></span></div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ZONE 2 — experiments -->
+<section>
+  <div class="zone-label">Running experiments</div>
+  <div class="zone-caption">Every live bet, its bar, and its clock. Nothing spends without a row here.</div>
+  <div class="exps">
+
+    <div class="exp">
+      <div><div class="ename">Heroes room · Spain</div><div class="ehyp">census-proven Spanish titles clear €5.00 at real budget</div></div>
+      <div><div class="ebar"><div class="fill" style="width:7%"></div><div class="vline"></div></div><div class="edays">day 2 of 30 · verdict ~27 Sep</div></div>
+      <div class="estat"><span class="badge live">live</span><br><span class="mono" style="color:var(--muted)">gathering data</span></div>
+    </div>
+
+    <div class="exp">
+      <div><div class="ename">Heroes room · US (Spanish editions)</div><div class="ehyp">census-proven Spanish titles clear $4.40 at real budget</div></div>
+      <div><div class="ebar"><div class="fill" style="width:7%"></div><div class="vline"></div></div><div class="edays">day 2 of 30 · verdict ~27 Sep</div></div>
+      <div class="estat"><span class="badge live">live</span><br><span class="mono" style="color:var(--muted)">gathering data</span></div>
+    </div>
+
+    <div class="exp">
+      <div><div class="ename">UK cluster rooms × 4</div><div class="ehyp">eng theme rooms clear £8/order · GP &gt; 0</div></div>
+      <div><div class="ebar"><div class="fill" style="width:60%"></div><div class="vline"></div></div><div class="edays">day 18 of 30 · verdict 11 Sep</div></div>
+      <div class="estat"><span class="badge live">live</span><br><span class="mono">2 of 4 converting</span></div>
+    </div>
+
+    <div class="exp">
+      <div><div class="ename">US eng replication — wave 2</div><div class="ehyp">does Emotions &amp; Feelings' win repeat in other clusters?</div></div>
+      <div><div class="ebar"></div><div class="edays">not started — Love &amp; Family + Adventure &amp; Fantasy await your approval</div></div>
+      <div class="estat"><span class="badge wait">awaiting approval</span></div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ZONE 3 — the year -->
+<section>
+  <div class="zone-label">The year, three truths</div>
+  <div class="zone-caption">Attributed (what ads claim) · vendor (what Amazon pays you) · the gap between them (what attribution can't see).</div>
+  <div class="yeargrid">
+
+    <div class="panel">
+      <h3>Spain, rolling 12 months</h3>
+      <div class="cap">Each point is a full year ending that month — seasonality removed.</div>
+      <div class="legend">
+        <span class="lk"><span class="sw" style="background:var(--blue)"></span> ad-claimed sales (retail €)</span>
+        <span class="lk"><span class="sw" style="background:#8A5BB8;border-bottom:2px dashed"></span> vendor revenue (your €, sell-in)</span>
+        <span class="lk"><span class="sw" style="background:var(--pos)"></span> ad GP at €5 margin</span>
+      </div>
+      <svg viewBox="0 0 560 190" width="100%">
+        <line x1="40" y1="150" x2="545" y2="150" stroke="#E7E2D8"/>
+        <line x1="40" y1="100" x2="545" y2="100" stroke="#F0EDE5"/>
+        <line x1="40" y1="50" x2="545" y2="50" stroke="#F0EDE5"/>
+        <text x="36" y="53" font-size="9" fill="#7A756B" text-anchor="end" font-family="IBM Plex Mono">€200k</text>
+        <text x="36" y="103" font-size="9" fill="#7A756B" text-anchor="end" font-family="IBM Plex Mono">€100k</text>
+        <text x="36" y="153" font-size="9" fill="#7A756B" text-anchor="end" font-family="IBM Plex Mono">€0</text>
+        <polyline points="45,49 87,49 129,50 171,51 213,52 255,56 297,54 339,52 381,51 423,53 465,54 507,54 545,55" fill="none" stroke="#2B5DA8" stroke-width="2.5"/>
+        <polyline points="507,66 545,68" fill="none" stroke="#8A5BB8" stroke-width="2.5" stroke-dasharray="6 4"/>
+        <circle cx="545" cy="68" r="3.5" fill="#8A5BB8"/>
+        <polyline points="45,146 87,146 129,147 171,147 213,149 255,152 297,152 339,152 381,152 423,152 465,152 507,152 545,151" fill="none" stroke="#1E6E52" stroke-width="2.5"/>
+        <text x="551" y="58" font-size="10" fill="#2B5DA8" font-family="IBM Plex Mono">190k</text>
+        <text x="551" y="72" font-size="10" fill="#8A5BB8" font-family="IBM Plex Mono">165k</text>
+        <text x="551" y="155" font-size="10" fill="#1E6E52" font-family="IBM Plex Mono">−3k</text>
+        <text x="45" y="172" font-size="9.5" fill="#7A756B" font-family="IBM Plex Mono">Jul 25</text>
+        <text x="520" y="172" font-size="9.5" fill="#7A756B" font-family="IBM Plex Mono">Jul 26</text>
+      </svg>
+      <div class="src">sources: console exports (all ad types) · vendor invoices (sell-in)</div>
+    </div>
+
+    <div class="panel">
+      <h3>What ads can't see</h3>
+      <div class="cap">Amazon bought 19,147 books from you this year. Ads claim 11,645 orders. The shaded gap is the rest of your business.</div>
+      <svg viewBox="0 0 340 190" width="100%">
+        <line x1="40" y1="150" x2="330" y2="150" stroke="#E7E2D8"/>
+        <polygon points="200,40 300,42 300,86 200,84" fill="#8A5BB8" fill-opacity=".10"/>
+        <polyline points="200,40 300,42" fill="none" stroke="#8A5BB8" stroke-width="2.5" stroke-dasharray="6 4"/>
+        <polyline points="200,84 300,86" fill="none" stroke="#2B5DA8" stroke-width="2.5"/>
+        <circle cx="300" cy="42" r="3.5" fill="#8A5BB8"/><circle cx="300" cy="86" r="3.5" fill="#2B5DA8"/>
+        <text x="306" y="45" font-size="10" fill="#8A5BB8" font-family="IBM Plex Mono">19,147</text>
+        <text x="306" y="89" font-size="10" fill="#2B5DA8" font-family="IBM Plex Mono">11,645</text>
+        <text x="245" y="70" font-size="10" fill="#8A5BB8" font-family="IBM Plex Sans" font-style="italic" text-anchor="middle">the gap: ~39%</text>
+        <text x="200" y="172" font-size="9.5" fill="#7A756B" font-family="IBM Plex Mono">Jun 26</text>
+        <text x="285" y="172" font-size="9.5" fill="#7A756B" font-family="IBM Plex Mono">Jul 26</text>
+      </svg>
+      <div class="src">fills in monthly as invoices are imported · read quarterly, sell-in lags</div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ZONE 4 — needs you -->
+<section>
+  <div class="zone-label">Needs you</div>
+  <div class="zone-caption">Everything on this dashboard that waits for a decision or a date.</div>
+  <div class="actions">
+    <div class="act urgent">
+      <div class="what">Approve wave-2 rooms</div>
+      <div class="why">Love &amp; Family + Adventure &amp; Fantasy drafted and waiting. September is their runway.</div>
+    </div>
+    <div class="act date">
+      <div class="what">UK verdicts due 11 Sep</div>
+      <div class="why">Four cluster bets reach day 30. Rule each: scale, hold, or kill.</div>
+    </div>
+    <div class="act">
+      <div class="what">Monthly export ritual</div>
+      <div class="why">First weekend of Sep: console (NA + EU) and vendor invoice → importer. Keeps all three truth layers alive.</div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

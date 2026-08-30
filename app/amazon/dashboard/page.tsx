@@ -2,10 +2,11 @@ export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
 import { profileGP } from '../../lib/scorecard'
-import VerdictStrip,  { type MarketVerdictRow }  from './components/VerdictStrip'
 import ChartSection,  { type MarketChartData }   from './components/ChartSection'
 import MoversRow,     { type MoverRow, type ClusterStats } from './components/MoversRow'
 import MachineFooter, { type MachineData }       from './components/MachineFooter'
+import MarketCards,   { type MarketCardRow }     from './components/MarketCards'
+import StatusChips,   { type DashboardStatus }   from './components/StatusChips'
 import LongTermSection, {
   type LongTermMarket,
   type LongTermPoint,
@@ -13,12 +14,14 @@ import LongTermSection, {
   type VendorLongTermPoint,
 } from './components/LongTermSection'
 import type { ChartPoint } from './components/SalesSpendChart'
+import styles from './components/DashboardZoneOne.module.css'
 
 export default async function DashboardPage() {
   const sql = neon(process.env.DATABASE_URL!)
 
   const [
-    verdictRows,
+    marketCardRows,
+    statusRows,
     chartRows,
     clusterRows,
     moverRows,
@@ -28,37 +31,41 @@ export default async function DashboardPage() {
     vendorRows,
   ] = await Promise.all([
 
-    // ── Verdict strip: this week + 4-week prior-avg, per profile/currency ──
-    // L3.2: gp_per_order + orders fetched for basis-resolved GP display.
+    // ── Zone 1: one 30-day card per profile with material spend ──
     sql`
       SELECT
+        p.profile_id::text,
         p.country_code,
         p.currency_code,
-        p.target_acos::float,
         p.gp_per_order::float,
-        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.sales  ELSE 0 END),0)::float AS sales_this,
-        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.spend  ELSE 0 END),0)::float AS spend_this,
-        COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-7  AND dr.date < CURRENT_DATE THEN dr.orders ELSE 0 END),0)::float AS orders_this,
-        ((COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-14 AND dr.date < CURRENT_DATE-7  THEN dr.sales ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-21 AND dr.date < CURRENT_DATE-14 THEN dr.sales ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-28 AND dr.date < CURRENT_DATE-21 THEN dr.sales ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-35 AND dr.date < CURRENT_DATE-28 THEN dr.sales ELSE 0 END),0)
-        )/4.0)::float AS sales_prior_avg,
-        ((COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-14 AND dr.date < CURRENT_DATE-7  THEN dr.spend ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-21 AND dr.date < CURRENT_DATE-14 THEN dr.spend ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-28 AND dr.date < CURRENT_DATE-21 THEN dr.spend ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-35 AND dr.date < CURRENT_DATE-28 THEN dr.spend ELSE 0 END),0)
-        )/4.0)::float AS spend_prior_avg,
-        ((COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-14 AND dr.date < CURRENT_DATE-7  THEN dr.orders ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-21 AND dr.date < CURRENT_DATE-14 THEN dr.orders ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-28 AND dr.date < CURRENT_DATE-21 THEN dr.orders ELSE 0 END),0)+
-          COALESCE(SUM(CASE WHEN dr.date >= CURRENT_DATE-35 AND dr.date < CURRENT_DATE-28 THEN dr.orders ELSE 0 END),0)
-        )/4.0)::float AS orders_prior_avg
+        COALESCE(SUM(dr.spend), 0)::float AS spend,
+        COALESCE(SUM(dr.sales), 0)::float AS sales,
+        COALESCE(SUM(dr.orders), 0)::float AS orders
       FROM daily_rollup dr
       JOIN amazon_profiles p USING (profile_id)
-      WHERE dr.date >= CURRENT_DATE - 35
-      GROUP BY p.country_code, p.currency_code, p.target_acos, p.gp_per_order
-      ORDER BY spend_this DESC
+      WHERE dr.date >= CURRENT_DATE - INTERVAL '30 days'
+      GROUP BY p.profile_id, p.country_code, p.currency_code, p.gp_per_order
+      HAVING COALESCE(SUM(dr.spend), 0) > 10
+      ORDER BY spend DESC
+    `,
+
+    // ── Zone 1: DB-derivable status chips only ──
+    sql`
+      SELECT
+        (SELECT COUNT(*)::int
+           FROM recommendations
+          WHERE status = 'APPROVED') AS approvals_waiting,
+        (SELECT name
+           FROM experiments
+          WHERE status = 'LIVE' AND started_at IS NOT NULL
+          ORDER BY started_at + make_interval(days => horizon_days)
+          LIMIT 1) AS next_verdict_name,
+        (SELECT (started_at + make_interval(days => horizon_days))::text
+           FROM experiments
+          WHERE status = 'LIVE' AND started_at IS NOT NULL
+          ORDER BY started_at + make_interval(days => horizon_days)
+          LIMIT 1) AS next_verdict_at,
+        (SELECT MAX(synced_at)::text FROM amazon_campaigns) AS synced_at
     `,
 
     // ── Chart data: 90 days per profile ──
@@ -177,23 +184,30 @@ export default async function DashboardPage() {
     `,
   ])
 
-  // ── Shape verdict rows ───────────────────────────────────────────────────
-  const verdict: MarketVerdictRow[] = (verdictRows as {
-    country_code: string; currency_code: string; target_acos: number; gp_per_order: number | null;
-    sales_this: number; spend_this: number; orders_this: number;
-    sales_prior_avg: number; spend_prior_avg: number; orders_prior_avg: number;
+  // ── Shape Zone 1 cards and status ────────────────────────────────────────
+  const marketCards: MarketCardRow[] = (marketCardRows as {
+    profile_id: string; country_code: string; currency_code: string;
+    gp_per_order: number | null; spend: number; sales: number; orders: number;
   }[]).map(r => ({
-    country:        r.country_code,
-    currency:       r.currency_code,
-    targetAcos:     r.target_acos,
-    gpPerOrder:     r.gp_per_order ?? null,
-    salesThis:      r.sales_this,
-    salesPriorAvg:  r.sales_prior_avg,
-    spendThis:      r.spend_this,
-    spendPriorAvg:  r.spend_prior_avg,
-    ordersThis:     r.orders_this,
-    ordersPriorAvg: r.orders_prior_avg,
+    profileId:  r.profile_id,
+    country:    r.country_code,
+    currency:   r.currency_code,
+    gpPerOrder: r.gp_per_order ?? null,
+    spend:      r.spend,
+    sales:      r.sales,
+    orders:     r.orders,
   }))
+
+  const sr = (statusRows as {
+    approvals_waiting: number; next_verdict_name: string | null;
+    next_verdict_at: string | null; synced_at: string | null;
+  }[])[0]
+  const status: DashboardStatus = {
+    approvalsWaiting: sr?.approvals_waiting ?? 0,
+    nextVerdictName:  sr?.next_verdict_name ?? null,
+    nextVerdictAt:    sr?.next_verdict_at ?? null,
+    syncedAt:         sr?.synced_at ?? null,
+  }
 
   // ── Shape chart data ─────────────────────────────────────────────────────
   const profileMap: Record<string, MarketChartData> = {}
@@ -341,14 +355,22 @@ export default async function DashboardPage() {
   }
 
   return (
-    <div>
-      <h1 style={{ marginBottom: '1rem' }}>Dashboard</h1>
+    <div className={styles.dashboard}>
+      <header className={styles.header}>
+        <h1 className={styles.title}>CDL Ads <span>· Amazon</span></h1>
+        <div className={`${styles.asOf} ${styles.mono}`}>{formatDashboardDate(new Date())}</div>
+      </header>
 
-      {/* 1. VERDICT STRIP */}
-      <VerdictStrip rows={verdict} />
+      <StatusChips status={status} />
+
+      <section className={styles.marketSection}>
+        <div className={styles.zoneLabel}>This month, per market</div>
+        <div className={styles.zoneCaption}>Last 30 days. The gauge is the whole story: where the dot sits against the margin tick is whether each order makes or loses money.</div>
+        <MarketCards rows={marketCards} />
+      </section>
 
       {/* 2 + 3. CHARTS (client wrapper for tab state) */}
-      <h2 style={{ marginBottom: '0.6rem' }}>Trends · 90 days</h2>
+      <h2 id="trends-90-days" style={{ marginBottom: '0.6rem' }}>Trends · 90 days</h2>
       <ChartSection markets={markets} />
 
       {/* LONG-TERM · ROLLING-12 — clearly separate from 90-day trends */}
@@ -362,4 +384,14 @@ export default async function DashboardPage() {
       <MachineFooter data={machine} />
     </div>
   )
+}
+
+function formatDashboardDate(date: Date) {
+  return new Intl.DateTimeFormat('en-GB', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Europe/Madrid',
+  }).format(date)
 }
