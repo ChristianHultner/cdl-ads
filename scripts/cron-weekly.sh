@@ -5,6 +5,9 @@ set -a
 . /Users/christianhultner/secrets/cdl-ads-lwa.env
 set +a
 
+echo "=== reject-stale-recommendations (pre-generation) ==="
+/opt/homebrew/bin/node scripts/reject-stale-recommendations.mjs || exit 1
+
 for P in 2263723137827296 139446882235960 395707988492653 350599867165328 1711934819800765 2213278747143677 3035560362970447 2286455750996728; do
   /opt/homebrew/bin/node scripts/fetch-bid-recommendations.mjs \
     --profile "${P}" || echo "PROFILE ${P} bid-recs FAILED (non-fatal)"

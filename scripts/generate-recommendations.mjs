@@ -443,7 +443,73 @@ for (const row of termRows) {
 let written         = 0;
 let skippedExisting = 0;
 let skippedRejected = 0;
+let skippedDestinationNotEnabled = 0;
 const countsByType  = { NEGATE_TERM: 0, NEGATE_TARGET: 0, PROMOTE_TERM: 0, PROMOTE_ASIN: 0, BID_ADJUST: 0, DEFUSE: 0, CREATE_STRUCTURE: 0, BUDGET_ADJUST: 0, PAUSE_CAMPAIGN: 0, REPLACE_PRODUCT_AD: 0 };
+
+function resolveDestination(campaignId, evidence) {
+  return {
+    campaignId: campaignId
+      ?? evidence?.resolved_destination?.campaign_id
+      ?? evidence?.campaign_id
+      ?? evidence?.primary_placement?.campaign_id
+      ?? null,
+    adGroupId: evidence?.resolved_destination?.ad_group_id
+      ?? evidence?.ad_group_id
+      ?? evidence?.primary_placement?.ad_group_id
+      ?? null,
+  };
+}
+
+// Destination-bearing drafts are inserted only while their destination is
+// ENABLED. The state predicate is part of the INSERT so the check is atomic at
+// draft time. CREATE_STRUCTURE uses its existing direct INSERT path: it has no
+// existing destination and is exempt from this guard.
+async function insertDestinationDraft(recType, campaignId, targetText, proposal, evidence) {
+  const destination = resolveDestination(campaignId, evidence);
+  const result = await pool.query(
+    `INSERT INTO recommendations
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
+     SELECT $1, $2, $3, $4, $5, $6::jsonb
+      WHERE EXISTS (
+              SELECT 1
+                FROM amazon_campaigns c
+               WHERE c.profile_id  = $2
+                 AND c.campaign_id = $7
+                 AND c.state       = 'ENABLED'
+            )
+        AND (
+              $8::text IS NULL
+              OR EXISTS (
+                SELECT 1
+                  FROM amazon_ad_groups ag
+                 WHERE ag.profile_id  = $2
+                   AND ag.ad_group_id = $8
+                   AND ag.campaign_id = $7
+                   AND ag.state       = 'ENABLED'
+              )
+            )
+     RETURNING id`,
+    [
+      recType,
+      profileId,
+      campaignId,
+      targetText,
+      proposal,
+      JSON.stringify(evidence),
+      destination.campaignId,
+      destination.adGroupId,
+    ],
+  );
+
+  if (result.rowCount === 1) return true;
+
+  skippedDestinationNotEnabled++;
+  console.log(
+    `  skipped (destination not enabled): [${recType}] ${targetText}` +
+    ` campaign=${destination.campaignId ?? 'missing'} ad_group=${destination.adGroupId ?? 'none'}`,
+  );
+  return false;
+}
 
 if (candidates.length > 0) {
   // Fetch any existing rows for these terms in a single query.
@@ -837,12 +903,7 @@ if (candidates.length > 0) {
       };
     }
 
-    await pool.query(
-      `INSERT INTO recommendations
-         (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-       VALUES ($1, $2, NULL, $3, $4, $5)`,
-      [finalRecType, profileId, c.searchTerm, proposal, JSON.stringify(evidence)],
-    );
+    if (!await insertDestinationDraft(finalRecType, null, c.searchTerm, proposal, evidence)) continue;
     written++;
   }
 } else {
@@ -1131,12 +1192,7 @@ for (const entity of bidEligible) {
     rule_track_record: getTrackRecord('BID_ADJUST', _bidDir, countryCode) ?? undefined,
   };
 
-  await pool.query(
-    `INSERT INTO recommendations
-       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-     VALUES ($1, $2, NULL, $3, $4, $5)`,
-    ['BID_ADJUST', profileId, entity.entity_id, proposal, JSON.stringify(bidEvidence)],
-  );
+  if (!await insertDestinationDraft('BID_ADJUST', null, entity.entity_id, proposal, bidEvidence)) continue;
 
   const tag = isDefuse ? 'DEFUSE' : direction.toUpperCase();
   countsByType['BID_ADJUST']++;
@@ -1576,12 +1632,7 @@ for (const row of budgetCampRows) {
     target_acos:     params.target_acos,
   };
 
-  await pool.query(
-    `INSERT INTO recommendations
-       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    ['BUDGET_ADJUST', profileId, row.campaign_id, row.campaign_id, proposal, JSON.stringify(evidence)],
-  );
+  if (!await insertDestinationDraft('BUDGET_ADJUST', row.campaign_id, row.campaign_id, proposal, evidence)) continue;
   countsByType['BUDGET_ADJUST']++;
   written++;
   console.log(`  [BUDGET_ADJUST] '${row.name}': ${curFmt} \u2192 ${propFmt} (${pctFmt}% of cap, ${acosPct}% ACoS)`);
@@ -1663,12 +1714,7 @@ for (const row of pauseCandRows) {
     target_acos:   params.target_acos,
   };
 
-  await pool.query(
-    `INSERT INTO recommendations
-       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    ['PAUSE_CAMPAIGN', profileId, row.campaign_id, row.campaign_id, proposal, JSON.stringify(evidence)],
-  );
+  if (!await insertDestinationDraft('PAUSE_CAMPAIGN', row.campaign_id, row.campaign_id, proposal, evidence)) continue;
   countsByType['PAUSE_CAMPAIGN']++;
   written++;
   if (isZeroSales) {
@@ -1895,12 +1941,7 @@ for (const row of reviveCandRows) {
     ...(perEntity ? { per_entity: perEntity } : {}),
   };
 
-  await pool.query(
-    `INSERT INTO recommendations
-       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    ['BID_ADJUST', profileId, campId, campId, proposal, JSON.stringify(evidence)],
-  );
+  if (!await insertDestinationDraft('BID_ADJUST', campId, campId, proposal, evidence)) continue;
   countsByType['BID_ADJUST']++;
   written++;
   console.log(`  [REVIVE] '${row.name}': ${nEntities} bid(s), max ${currSym}${currentMax.toFixed(2)} \u2192 ${floorFmt}`);
@@ -1993,12 +2034,7 @@ for (const row of dormantCandRows) {
     budget_amount:        row.budget_amount,
   };
 
-  await pool.query(
-    `INSERT INTO recommendations
-       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    ['PAUSE_CAMPAIGN', profileId, campId, campId, proposal, JSON.stringify(evidence)],
-  );
+  if (!await insertDestinationDraft('PAUSE_CAMPAIGN', campId, campId, proposal, evidence)) continue;
   countsByType['PAUSE_CAMPAIGN']++;
   written++;
   console.log(`  [DORMANT-PAUSE] '${row.name}': ${impr.toLocaleString('en')} impr, ${currSym}${row.lifetime_spend.toFixed(2)} lifetime spend`);
@@ -2082,12 +2118,7 @@ for (const row of replaceAdRows) {
     ad_id:       adId,
   };
 
-  await pool.query(
-    `INSERT INTO recommendations
-       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    ['REPLACE_PRODUCT_AD', profileId, row.campaign_id, adId, proposal, JSON.stringify(evidence)],
-  );
+  if (!await insertDestinationDraft('REPLACE_PRODUCT_AD', row.campaign_id, adId, proposal, evidence)) continue;
   countsByType['REPLACE_PRODUCT_AD']++;
   written++;
   console.log(`  [REPLACE_PRODUCT_AD] Kindle ad ${adId} (${b0Asin}) → HC ${hcIsbn10} in '${campName}'`);
@@ -2610,6 +2641,7 @@ if (Object.values(countsByType).every((n) => n === 0)) {
 console.log(`  Written:            ${written}`);
 console.log(`  Skipped (exists):   ${skippedExisting}`);
 console.log(`  Skipped (rejected): ${skippedRejected}`);
+console.log(`  skipped_destination_not_enabled: ${skippedDestinationNotEnabled}`);
 console.log('─────────────────────────────────────────────────────────────────');
 
 process.exit(0);

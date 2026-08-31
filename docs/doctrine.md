@@ -7,7 +7,7 @@
 >
 > **FRAME RULE: Any frame that touches generation/push/grading logic MUST update this file in the same commit.**
 
-Sources: `scripts/generate-recommendations.mjs` · `scripts/stamp-outcomes.mjs` · `scripts/scorecard.mjs` · `scripts/push-negatives.mjs` · `scripts/push-negative-targets.mjs` · `scripts/push-keywords.mjs` · `scripts/push-bid-adjustments.mjs` · `scripts/push-structure.mjs` · `app/amazon/recommendations/actions.ts` · `app/lib/rec-scope.ts`
+Sources: `scripts/generate-recommendations.mjs` · `scripts/reject-stale-recommendations.mjs` · `scripts/stamp-outcomes.mjs` · `scripts/scorecard.mjs` · `scripts/push-negatives.mjs` · `scripts/push-negative-targets.mjs` · `scripts/push-keywords.mjs` · `scripts/push-bid-adjustments.mjs` · `scripts/push-structure.mjs` · `app/amazon/recommendations/actions.ts` · `app/lib/rec-scope.ts`
 
 ---
 
@@ -414,6 +414,14 @@ stateDiagram-v2
 **PUSHED in openSet**: prevents duplicate recommendations for already-executed terms.
 
 **RETIRED gap**: RETIRED is written by push-keywords.mjs (terminal duplicate skip, execute mode) but is absent from both `openSet` and `rejectedSet` checks in generation. See Findings #7.
+
+### Destination-state rulings (2026-08-31)
+
+1. **Generation guard.** A destination-bearing recommendation may be drafted only when its destination campaign and, when present, destination ad group are both `state='ENABLED'` at insert time. This applies to `PROMOTE_TERM`, `PROMOTE_ASIN`, `BID_ADJUST`, `NEGATE_TERM`, `NEGATE_TARGET`, `BUDGET_ADJUST`, `CREATIVE_KEYWORD`, `CREATIVE_TARGET`, and every other recommendation type with an existing destination. The insert-time guard is a skip, never a silent drop; every generator run reports `skipped_destination_not_enabled: N` in its summary.
+
+2. **Destination resolution.** Campaign resolution order is `recommendations.campaign_id`, `evidence.resolved_destination.campaign_id`, `evidence.campaign_id`, then `evidence.primary_placement.campaign_id`. Ad-group resolution order is `evidence.resolved_destination.ad_group_id`, `evidence.ad_group_id`, then `evidence.primary_placement.ad_group_id`. The ad group must belong to the resolved campaign. `CREATE_STRUCTURE` is exempt because no existing destination exists yet.
+
+3. **Nightly staleness sweep.** After campaign-state sync, `scripts/reject-stale-recommendations.mjs` examines all `DRAFT` and `APPROVED` recommendations except `CREATE_STRUCTURE`. If the resolved destination campaign or ad group is no longer `ENABLED` (including a missing destination row), the sweep keeps the recommendation row and changes only its lifecycle state: `status='REJECTED'`, `ruled_at=now()`, and `evidence.reject_reason='destination_not_enabled'`. Reversal never deletes history. Each run logs the rejected count and recommendation ids. The same sweep is a fail-closed pre-generation step in the weekly orchestrator.
 
 ---
 
