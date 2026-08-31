@@ -445,7 +445,7 @@ async function buildCampaign({ customer, campaignSpec, execute }) {
           target_content_network: false,
           target_partner_search_network: false,
         },
-        maximize_clicks: {
+        target_spend: {
           cpc_bid_ceiling_micros: Math.round(
             campaignSpec.bidding.cpc_ceiling_eur * 1_000_000,
           ),
