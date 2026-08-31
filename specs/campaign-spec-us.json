@@ -1,0 +1,263 @@
+{
+  "schema_version": "1",
+  "campaigns": [
+    {
+      "name": "S I books/US-EN",
+      "type": "SEARCH",
+      "networks": {
+        "search_partners": false,
+        "display": false
+      },
+      "geo": {
+        "country": "US",
+        "presence_only": true
+      },
+      "language": "en",
+      "budget_eur_day": 3.00,
+      "bidding": {
+        "strategy": "MAXIMIZE_CLICKS",
+        "cpc_ceiling_eur": 0.60
+      },
+      "born_paused": true,
+      "ad_groups": [
+        {
+          "name": "AG1 Category",
+          "keywords": {
+            "phrase": [
+              "children's books about kindness",
+              "children's books about emotions",
+              "diverse children's books",
+              "children's books about nature",
+              "social emotional learning books for kids",
+              "mindfulness books for children",
+              "picture books about feelings"
+            ],
+            "broad": [
+              "children's books values",
+              "SEL picture books"
+            ]
+          },
+          "rsa": {
+            "headlines": [
+              "Children's Books With Values",
+              "Stories That Grow Kind Hearts",
+              "Award-Winning Picture Books",
+              "Books About Feelings & Nature",
+              "Beautifully Illustrated Books",
+              "100+ International Awards"
+            ],
+            "descriptions": [
+              "Picture books celebrating kindness, diversity and our planet. Printed on stone paper.",
+              "Award-winning stories for ages 3-8, loved by families and educators worldwide."
+            ],
+            "final_url": ""
+          }
+        },
+        {
+          "name": "AG2 Brand Titles",
+          "keywords": {
+            "exact": [
+              "cuento de luz",
+              "Lucy's Light",
+              "The Quilt of Our Memories",
+              "The Map of Good Memories",
+              "The Magic Hat Shop",
+              "The Lonely Mailman"
+            ],
+            "phrase": [
+              "cuento de luz",
+              "Lucy's Light",
+              "The Quilt of Our Memories",
+              "The Map of Good Memories",
+              "The Magic Hat Shop",
+              "The Lonely Mailman"
+            ]
+          },
+          "rsa": {
+            "headlines": [
+              "Cuento de Luz Official Site",
+              "Lucy's Light & More",
+              "The Quilt of Our Memories",
+              "Award-Winning Picture Books",
+              "Shop Our Full Collection"
+            ],
+            "descriptions": [
+              "Discover the books families love - Lucy's Light, The Quilt of Our Memories and more.",
+              "From Madrid to your bookshelf: stories with light, printed on stone paper."
+            ],
+            "final_url": ""
+          }
+        }
+      ],
+      "negatives": [
+        "cursos",
+        "jokes",
+        "free pdf",
+        "download",
+        "used books",
+        "coloring pages",
+        "gratis pdf",
+        "descargar"
+      ],
+      "sitelinks": [
+        {
+          "text": "Our Books",
+          "final_url": ""
+        },
+        {
+          "text": "About Cuento de Luz",
+          "final_url": ""
+        },
+        {
+          "text": "Awards",
+          "final_url": ""
+        },
+        {
+          "text": "New Releases",
+          "final_url": ""
+        }
+      ]
+    },
+    {
+      "name": "S I books/US-ES",
+      "type": "SEARCH",
+      "networks": {
+        "search_partners": false,
+        "display": false
+      },
+      "geo": {
+        "country": "US",
+        "presence_only": true
+      },
+      "language": "es",
+      "budget_eur_day": 3.00,
+      "bidding": {
+        "strategy": "MAXIMIZE_CLICKS",
+        "cpc_ceiling_eur": 0.60
+      },
+      "born_paused": true,
+      "ad_groups": [
+        {
+          "name": "AG1 Categoria ES",
+          "keywords": {
+            "phrase": [
+              "libros infantiles en español",
+              "libros para niños en español",
+              "cuentos infantiles en español",
+              "libros bilingües para niños",
+              "libros en español para niños estados unidos",
+              "cuentos para niños pequeños"
+            ]
+          },
+          "rsa": {
+            "headlines": [
+              "Libros Infantiles en Español",
+              "Cuentos Que Iluminan",
+              "Historias Sobre la Familia",
+              "Premiados Internacionalmente",
+              "Envío desde Amazon EE.UU.",
+              "Ilustraciones Preciosas"
+            ],
+            "descriptions": [
+              "Libros en español para niños de 3 a 8 años. Historias de familia, valores y naturaleza.",
+              "Editorial de Madrid, disponibles en Amazon Estados Unidos. Impresos en papel de piedra."
+            ],
+            "final_url": ""
+          }
+        },
+        {
+          "name": "AG2 Tema Familia",
+          "keywords": {
+            "phrase": [
+              "libros para niños sobre la familia",
+              "libros sobre hermanos para niños",
+              "cuentos sobre la familia",
+              "libros para regalar a mamá",
+              "cuentos sobre abuelos"
+            ]
+          },
+          "rsa": {
+            "headlines": [
+              "Libros Infantiles en Español",
+              "Cuentos Que Iluminan",
+              "Historias Sobre la Familia",
+              "Premiados Internacionalmente",
+              "Envío desde Amazon EE.UU.",
+              "Ilustraciones Preciosas"
+            ],
+            "descriptions": [
+              "Libros en español para niños de 3 a 8 años. Historias de familia, valores y naturaleza.",
+              "Editorial de Madrid, disponibles en Amazon Estados Unidos. Impresos en papel de piedra."
+            ],
+            "final_url": ""
+          }
+        },
+        {
+          "name": "AG3 Marca Titulos",
+          "keywords": {
+            "exact": [
+              "cuento de luz",
+              "Hermanos libro",
+              "La luz de Lucía",
+              "La gallina Cocorina",
+              "Hijo libro",
+              "Hija libro",
+              "La colcha de nuestros recuerdos"
+            ],
+            "phrase": [
+              "cuento de luz",
+              "Hermanos libro",
+              "La luz de Lucía",
+              "La gallina Cocorina",
+              "Hijo libro",
+              "Hija libro",
+              "La colcha de nuestros recuerdos"
+            ]
+          },
+          "rsa": {
+            "headlines": [
+              "Hermanos — El Libro Favorito",
+              "La Luz de Lucía",
+              "La Gallina Cocorina",
+              "Cuento de Luz Oficial",
+              "Los Libros Más Queridos"
+            ],
+            "descriptions": [
+              "Hermanos, La luz de Lucía, La gallina Cocorina y más. Los favoritos de las familias.",
+              "Ediciones en español, envío rápido desde Amazon EE.UU."
+            ],
+            "final_url": ""
+          }
+        }
+      ],
+      "negatives": [
+        "cursos",
+        "jokes",
+        "free pdf",
+        "download",
+        "used books",
+        "coloring pages",
+        "gratis pdf",
+        "descargar"
+      ],
+      "sitelinks": [
+        {
+          "text": "Nuestros Libros",
+          "final_url": ""
+        },
+        {
+          "text": "Sobre Cuento de Luz",
+          "final_url": ""
+        },
+        {
+          "text": "Premios",
+          "final_url": ""
+        },
+        {
+          "text": "Novedades",
+          "final_url": ""
+        }
+      ]
+    }
+  ]
+}

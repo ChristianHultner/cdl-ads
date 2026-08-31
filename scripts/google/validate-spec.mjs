@@ -1,0 +1,283 @@
+#!/usr/bin/env node
+
+import { readFile } from "node:fs/promises";
+
+const specPath = process.argv[2];
+
+if (!specPath) {
+  console.error("Usage: node scripts/google/validate-spec.mjs <spec.json>");
+  process.exit(1);
+}
+
+const errors = [];
+let spec;
+
+try {
+  spec = JSON.parse(await readFile(specPath, "utf8"));
+} catch (error) {
+  console.error(`SPEC INVALID:\n- ${specPath}: ${error.message}`);
+  process.exit(1);
+}
+
+const isObject = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const charCount = (value) => Array.from(value).length;
+const addError = (path, message) => errors.push(`${path}: ${message}`);
+
+function requireObject(value, path) {
+  if (!isObject(value)) {
+    addError(path, "must be an object");
+    return false;
+  }
+  return true;
+}
+
+function requireString(value, path, { allowEmpty = false } = {}) {
+  if (typeof value !== "string") {
+    addError(path, "must be a string");
+    return false;
+  }
+  if (!allowEmpty && value.trim() === "") {
+    addError(path, "must not be empty");
+    return false;
+  }
+  return true;
+}
+
+function requireBoolean(value, path) {
+  if (typeof value !== "boolean") {
+    addError(path, "must be a boolean");
+    return false;
+  }
+  return true;
+}
+
+function requireNumber(value, path, { minimum = 0 } = {}) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    addError(path, "must be a finite number");
+    return false;
+  }
+  if (value < minimum) {
+    addError(path, `must be >= ${minimum}`);
+    return false;
+  }
+  return true;
+}
+
+function requireStringArray(value, path, { minimum = 1 } = {}) {
+  if (!Array.isArray(value)) {
+    addError(path, "must be an array");
+    return false;
+  }
+  if (value.length < minimum) {
+    addError(path, `must contain at least ${minimum} item(s)`);
+  }
+  value.forEach((item, index) => requireString(item, `${path}[${index}]`));
+  return true;
+}
+
+function validateRsa(rsa, path) {
+  if (!requireObject(rsa, path)) return;
+
+  if (requireStringArray(rsa.headlines, `${path}.headlines`, { minimum: 3 })) {
+    rsa.headlines.forEach((headline, index) => {
+      if (typeof headline === "string" && charCount(headline) > 30) {
+        addError(
+          `${path}.headlines[${index}]`,
+          `must be <= 30 characters (received ${charCount(headline)})`,
+        );
+      }
+    });
+  }
+
+  if (
+    requireStringArray(rsa.descriptions, `${path}.descriptions`, { minimum: 2 })
+  ) {
+    rsa.descriptions.forEach((description, index) => {
+      if (typeof description === "string" && charCount(description) > 90) {
+        addError(
+          `${path}.descriptions[${index}]`,
+          `must be <= 90 characters (received ${charCount(description)})`,
+        );
+      }
+    });
+  }
+
+  requireString(rsa.final_url, `${path}.final_url`, { allowEmpty: true });
+}
+
+const matchTypes = new Set(["exact", "phrase", "broad"]);
+let adGroupCount = 0;
+let keywordCount = 0;
+let rsaCount = 0;
+
+function validateKeywords(keywords, path) {
+  if (!requireObject(keywords, path)) return;
+
+  const entries = Object.entries(keywords);
+  if (entries.length === 0) {
+    addError(path, "must contain at least one match type");
+    return;
+  }
+
+  for (const [matchType, terms] of entries) {
+    const matchPath = `${path}.${matchType}`;
+    if (!matchTypes.has(matchType)) {
+      addError(matchPath, "unsupported match type; use exact, phrase, or broad");
+      continue;
+    }
+    if (!requireStringArray(terms, matchPath)) continue;
+
+    keywordCount += terms.length;
+    const seenTerms = new Set();
+    terms.forEach((term, index) => {
+      if (typeof term !== "string") return;
+      if (term !== term.trim()) {
+        addError(`${matchPath}[${index}]`, "must not have surrounding whitespace");
+      }
+      if (/^[\[\"]|[\]\"]$/.test(term)) {
+        addError(
+          `${matchPath}[${index}]`,
+          "must not include match-type brackets or quotation marks",
+        );
+      }
+      const normalized = term.toLocaleLowerCase();
+      if (seenTerms.has(normalized)) {
+        addError(`${matchPath}[${index}]`, "duplicate keyword in match type");
+      }
+      seenTerms.add(normalized);
+    });
+  }
+}
+
+if (!requireObject(spec, "spec")) {
+  // The itemized root error is sufficient.
+} else {
+  if (spec.schema_version !== "1") {
+    addError("schema_version", 'must equal "1"');
+  }
+
+  if (!Array.isArray(spec.campaigns)) {
+    addError("campaigns", "must be an array");
+  } else {
+    if (spec.campaigns.length !== 2) {
+      addError("campaigns", "must contain exactly 2 campaigns");
+    }
+
+    const campaignNames = new Set();
+    spec.campaigns.forEach((campaign, campaignIndex) => {
+      const campaignPath = `campaigns[${campaignIndex}]`;
+      if (!requireObject(campaign, campaignPath)) return;
+
+      if (requireString(campaign.name, `${campaignPath}.name`)) {
+        if (campaignNames.has(campaign.name)) {
+          addError(`${campaignPath}.name`, "duplicate campaign name");
+        }
+        campaignNames.add(campaign.name);
+      }
+
+      if (campaign.type !== "SEARCH") {
+        addError(`${campaignPath}.type`, 'must equal "SEARCH"');
+      }
+
+      if (requireObject(campaign.networks, `${campaignPath}.networks`)) {
+        requireBoolean(
+          campaign.networks.search_partners,
+          `${campaignPath}.networks.search_partners`,
+        );
+        requireBoolean(
+          campaign.networks.display,
+          `${campaignPath}.networks.display`,
+        );
+      }
+
+      if (requireObject(campaign.geo, `${campaignPath}.geo`)) {
+        requireString(campaign.geo.country, `${campaignPath}.geo.country`);
+        requireBoolean(
+          campaign.geo.presence_only,
+          `${campaignPath}.geo.presence_only`,
+        );
+      }
+
+      requireString(campaign.language, `${campaignPath}.language`);
+      requireNumber(campaign.budget_eur_day, `${campaignPath}.budget_eur_day`, {
+        minimum: 0.01,
+      });
+
+      if (requireObject(campaign.bidding, `${campaignPath}.bidding`)) {
+        requireString(
+          campaign.bidding.strategy,
+          `${campaignPath}.bidding.strategy`,
+        );
+        requireNumber(
+          campaign.bidding.cpc_ceiling_eur,
+          `${campaignPath}.bidding.cpc_ceiling_eur`,
+          { minimum: 0 },
+        );
+      }
+
+      if (campaign.born_paused !== true) {
+        addError(`${campaignPath}.born_paused`, "must be exactly true");
+      }
+
+      if (!Array.isArray(campaign.ad_groups)) {
+        addError(`${campaignPath}.ad_groups`, "must be an array");
+      } else {
+        if (campaign.ad_groups.length === 0) {
+          addError(`${campaignPath}.ad_groups`, "must not be empty");
+        }
+        const adGroupNames = new Set();
+        campaign.ad_groups.forEach((adGroup, adGroupIndex) => {
+          const adGroupPath = `${campaignPath}.ad_groups[${adGroupIndex}]`;
+          if (!requireObject(adGroup, adGroupPath)) return;
+
+          adGroupCount += 1;
+          if (requireString(adGroup.name, `${adGroupPath}.name`)) {
+            if (adGroupNames.has(adGroup.name)) {
+              addError(`${adGroupPath}.name`, "duplicate ad group name in campaign");
+            }
+            adGroupNames.add(adGroup.name);
+          }
+
+          validateKeywords(adGroup.keywords, `${adGroupPath}.keywords`);
+          if (isObject(adGroup.rsa)) rsaCount += 1;
+          validateRsa(adGroup.rsa, `${adGroupPath}.rsa`);
+        });
+      }
+
+      requireStringArray(campaign.negatives, `${campaignPath}.negatives`);
+
+      if (!Array.isArray(campaign.sitelinks)) {
+        addError(`${campaignPath}.sitelinks`, "must be an array");
+      } else {
+        if (campaign.sitelinks.length === 0) {
+          addError(`${campaignPath}.sitelinks`, "must not be empty");
+        }
+        const sitelinkTexts = new Set();
+        campaign.sitelinks.forEach((sitelink, sitelinkIndex) => {
+          const sitelinkPath = `${campaignPath}.sitelinks[${sitelinkIndex}]`;
+          if (!requireObject(sitelink, sitelinkPath)) return;
+          if (requireString(sitelink.text, `${sitelinkPath}.text`)) {
+            if (sitelinkTexts.has(sitelink.text)) {
+              addError(`${sitelinkPath}.text`, "duplicate sitelink text in campaign");
+            }
+            sitelinkTexts.add(sitelink.text);
+          }
+          requireString(sitelink.final_url, `${sitelinkPath}.final_url`, {
+            allowEmpty: true,
+          });
+        });
+      }
+    });
+  }
+}
+
+if (errors.length > 0) {
+  console.error("SPEC INVALID:");
+  errors.forEach((error) => console.error(`- ${error}`));
+  process.exit(1);
+}
+
+console.log(
+  `SPEC VALID: ${spec.campaigns.length} campaigns, ${adGroupCount} ad groups, ${keywordCount} keywords, ${rsaCount} RSAs`,
+);
