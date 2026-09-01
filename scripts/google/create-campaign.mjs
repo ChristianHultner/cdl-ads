@@ -440,6 +440,8 @@ async function buildCampaign({ customer, campaignSpec, execute }) {
         campaign_budget: budgetResourceName,
         advertising_channel_type: enums.AdvertisingChannelType.SEARCH,
         status: enums.CampaignStatus.PAUSED,
+        contains_eu_political_advertising:
+          enums.EuPoliticalAdvertisingStatus.DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING,
         network_settings: {
           target_google_search: true,
           target_search_network: false,
