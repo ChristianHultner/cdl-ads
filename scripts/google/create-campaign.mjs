@@ -330,9 +330,7 @@ async function findCampaignSitelink(
   );
 }
 
-function createMutator(customer, execute) {
-  const validationChain = [];
-
+function createMutator(customer, execute, validationChain) {
   return async function createResource({
     entity,
     resource,
@@ -354,10 +352,7 @@ function createMutator(customer, execute) {
     }
 
     validationChain.push(operation);
-    await customer.mutateResources([...validationChain], {
-      validate_only: true,
-    });
-    console.log(`VALIDATE OK ${resourceType} ${name}`);
+    console.log(`QUEUED ${resourceType} ${name}`);
 
     if (!fallbackResourceName) {
       return `${resourceType}:${name}`;
@@ -367,7 +362,8 @@ function createMutator(customer, execute) {
 }
 
 async function buildCampaign({ customer, campaignSpec, execute }) {
-  const createResource = createMutator(customer, execute);
+  const validationChain = [];
+  const createResource = createMutator(customer, execute, validationChain);
   const skipped = [];
   const counts = {
     adGroups: 0,
@@ -698,6 +694,11 @@ async function buildCampaign({ customer, campaignSpec, execute }) {
       });
       counts.sitelinks += 1;
     }
+  }
+
+  if (!execute) {
+    await customer.mutateResources(validationChain, { validate_only: true });
+    console.log(`VALIDATE OK: ${validationChain.length} operations in one request`);
   }
 
   console.log(
