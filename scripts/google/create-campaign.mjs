@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inspect } from 'node:util';
 import { neon } from '@neondatabase/serverless';
 import {
   GoogleAdsApi,
@@ -743,6 +744,10 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  console.error(JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+  console.error(inspect(error, { depth: 12, breakLength: 140 }));
+  for (const e of error?.errors ?? []) {
+    console.error('FIELD:', JSON.stringify(e?.location?.field_path_elements ?? null));
+    console.error('CODE:', JSON.stringify(e?.error_code ?? null), 'MSG:', e?.message);
+  }
   process.exit(1);
 }
