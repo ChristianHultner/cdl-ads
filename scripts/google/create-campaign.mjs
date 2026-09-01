@@ -743,6 +743,6 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  console.error(error);
+  console.error(JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
   process.exit(1);
 }
