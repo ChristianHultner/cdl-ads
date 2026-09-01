@@ -1,180 +1,284 @@
-// Inline SVG sales + spend line chart. No chart library. 900×260 viewBox.
-// Receives up to 120 days; plots last 90 with 30-day rolling averages (bold).
-// Daily values shown as faint thin lines (~25% opacity) behind the rolling pair.
-// Rolling window = 30: each plotted point = mean of that day + prior 29.
-// GP series: basis-resolved via profileGP — unit-basis uses gp_per_order×orders;
-// revenue-basis falls back to sales−spend and labels the line '(rev)'.
-// Y-axis: yMin = min(0, 1.1 × lowest rolling series point); when yMin < 0 the
-// y=0 gridline is rendered heavier/darker so the sign crossing is legible.
+'use client'
 
-import { profileGP } from '../../../lib/scorecard'
+// Receives up to 120 days and preserves the existing 30-day rolling display series.
+// The daily toggle adds the unchanged raw daily sales/spend lines behind the rolling lines.
+
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  type TooltipContentProps,
+} from 'recharts'
+import styles from './DashboardZoneOne.module.css'
 
 export interface ChartPoint {
-  date:   string       // YYYY-MM-DD
+  date:   string
   sales:  number
   spend:  number
   orders: number
   acos:   number | null
 }
 
-const W = 900, H = 260
-const L = 64, R = 14, T = 14, B = 32
-const PW = W - L - R
-const PH = H - T - B
 const PLOT_DAYS = 90
-const ROLL_WIN  = 30
+const ROLL_WIN = 30
 
-function tx(i: number, n: number) { return n <= 1 ? L : L + (i / (n - 1)) * PW }
-function ty(v: number, minV: number, maxV: number) {
-  const range = maxV - minV
-  if (range === 0) return T + PH
-  return T + PH - ((v - minV) / range) * PH
+interface TooltipSeries {
+  key: string
+  name: string
+  color: string
 }
-function polyline(pts: { x: number; y: number }[]) {
-  return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
-}
-function niceMax(v: number): number {
-  if (v <= 0) return 100
-  const mag = Math.pow(10, Math.floor(Math.log10(v)))
-  const candidates = [1, 2, 2.5, 5, 10].map(f => f * mag)
-  return candidates.find(c => c >= v) ?? v * 1.1
-}
-function rollingAvg(vals: number[], window: number): number[] {
-  return vals.map((_, i) => {
-    const start = Math.max(0, i - window + 1)
-    const slice = vals.slice(start, i + 1)
-    return slice.reduce((a, b) => a + b, 0) / slice.length
+
+function rollingAvg(values: number[], window: number): number[] {
+  return values.map((_, index) => {
+    const start = Math.max(0, index - window + 1)
+    const slice = values.slice(start, index + 1)
+    return slice.reduce((sum, value) => sum + value, 0) / slice.length
   })
 }
 
-const SYM: Record<string, string> = { EUR: '€', USD: '$', MXN: 'MX$', GBP: '£', CAD: 'CA$' }
-
-export default function SalesSpendChart({ points, currency, showDaily, gpPerOrder }: { points: ChartPoint[]; currency: string; showDaily: boolean; gpPerOrder: number | null }) {
-  if (points.length === 0) {
-    return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
-        No data
-      </div>
-    )
+function compactNumber(value: number): string {
+  const absolute = Math.abs(value)
+  if (absolute >= 1_000_000) {
+    const millions = absolute / 1_000_000
+    return `${Number.isInteger(millions) ? millions.toFixed(0) : millions.toFixed(1)}m`
   }
-
-  // Compute rolling over full input (up to 120 days), slice to last 90 for plotting
-  const rollSalesAll  = rollingAvg(points.map(p => p.sales),  ROLL_WIN)
-  const rollSpendAll  = rollingAvg(points.map(p => p.spend),  ROLL_WIN)
-  const rollOrdersAll = rollingAvg(points.map(p => p.orders), ROLL_WIN)
-  const plot          = points.slice(-PLOT_DAYS)
-  const rSalesPlot    = rollSalesAll.slice(-PLOT_DAYS)
-  const rSpendPlot    = rollSpendAll.slice(-PLOT_DAYS)
-  const rOrdersPlot   = rollOrdersAll.slice(-PLOT_DAYS)
-  const n             = plot.length
-
-  const sym     = SYM[currency] ?? currency
-  const rollMax = Math.max(...rSalesPlot, ...rSpendPlot)
-  const maxV    = niceMax(rollMax * 1.3)   // y-axis max: rolling series only, unchanged
-
-  // GP series: unit-basis = gp_per_order × rolling_orders − rolling_spend;
-  // revenue-basis = rolling_sales − rolling_spend (same arithmetic as profileGP).
-  const rGPPlot = gpPerOrder != null
-    ? rOrdersPlot.map((o, i) => gpPerOrder * o - rSpendPlot[i])
-    : rSalesPlot.map((s, i)  => s - rSpendPlot[i])
-  const gpLabel = gpPerOrder != null ? 'Ad GP (30d)' : 'Ad GP (30d) (rev)'
-
-  // Y-axis domain: yMin = min(0, 1.1 × lowest point across all rolling series).
-  const rawMin = Math.min(...rSalesPlot, ...rSpendPlot, ...rGPPlot)
-  const minV   = Math.min(0, rawMin * 1.1)
-  // Pre-computed zero-line pixel position (only rendered when minV < 0).
-  const zeroLineY = minV < 0 ? ty(0, minV, maxV) : null
-
-  // Daily faint points
-  const dailySalePts  = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.sales, minV, maxV) }))
-  const dailySpendPts = plot.map((p, i) => ({ x: tx(i, n), y: ty(p.spend, minV, maxV) }))
-  // Rolling bold points
-  const rollSalePts   = rSalesPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, minV, maxV) }))
-  const rollSpendPts  = rSpendPlot.map((v, i) => ({ x: tx(i, n), y: ty(v, minV, maxV) }))
-  const rollGPPts     = rGPPlot.map((v, i)    => ({ x: tx(i, n), y: ty(v, minV, maxV) }))
-
-  // GP shaded fill path: forward along rolling sales, backward along rolling spend
-  const gpFillPath = [
-    ...rollSalePts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`),
-    ...[...rollSpendPts].reverse().map(p => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`),
-    'Z',
-  ].join(' ')
-
-  // Weekly x-ticks
-  const xTicks: { x: number; label: string }[] = []
-  for (let i = 0; i < n; i += 7) {
-    const d = new Date(plot[i].date + 'T00:00:00Z')
-    xTicks.push({
-      x: tx(i, n),
-      label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }),
-    })
+  if (absolute >= 1_000) {
+    const thousands = absolute / 1_000
+    return `${Number.isInteger(thousands) ? thousands.toFixed(0) : thousands.toFixed(1)}k`
   }
+  return Math.round(absolute).toLocaleString('en-US')
+}
 
-  // Y-axis ticks (bottom→top, 5 evenly-spaced steps across [minV, maxV])
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => ({
-    y: T + PH - f * PH,
-    label: `${sym}${Math.round(minV + f * (maxV - minV)).toLocaleString('en-US')}`,
-  }))
+function formatAxisMoney(value: number, currency: string): string {
+  return `${value < 0 ? '−' : ''}${currency} ${compactNumber(value)}`
+}
+
+function formatMoney(value: number, currency: string): string {
+  return `${value < 0 ? '−' : ''}${currency} ${Math.round(Math.abs(value)).toLocaleString('en-US')}`
+}
+
+function formatDate(date: string): string {
+  return new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  })
+}
+
+function niceStep(value: number): number {
+  if (value <= 0) return 1
+  const magnitude = 10 ** Math.floor(Math.log10(value))
+  const normalized = value / magnitude
+  const factor = [1, 2, 2.5, 5, 10].find(candidate => candidate >= normalized) ?? 10
+  return factor * magnitude
+}
+
+function niceDomain(values: number[]): { domain: [number, number]; ticks: number[] } {
+  const rawMin = Math.min(...values)
+  const rawMax = Math.max(...values)
+  const lower = Math.min(0, rawMin)
+  const span = Math.max(rawMax - lower, 1)
+  const step = niceStep(span / 4)
+  const min = lower < 0 ? Math.floor(lower / step) * step : 0
+  const max = Math.max(step, Math.ceil(rawMax / step) * step)
+  const ticks: number[] = []
+  for (let value = min; value <= max + step / 2; value += step) ticks.push(value)
+  return { domain: [min, max], ticks }
+}
+
+function SalesTooltip({
+  active,
+  label,
+  payload,
+  series,
+  currency,
+}: TooltipContentProps & {
+  series: TooltipSeries[]
+  currency: string
+}) {
+  if (!active || !payload?.length) return null
+  const datum = payload[0]?.payload as Record<string, unknown> | undefined
+  if (!datum) return null
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible', fontFamily: 'var(--font-ibm-plex-mono), monospace' }}>
-      <defs>
-        <clipPath id="cdl-ss-clip">
-          <rect x={L} y={T} width={PW} height={PH} />
-        </clipPath>
-      </defs>
+    <div className={styles.chartTooltip}>
+      <div className={styles.tooltipMonth}>{formatDate(String(label ?? ''))}</div>
+      {series.map(item => {
+        const value = datum[item.key]
+        return (
+          <div className={styles.tooltipRow} key={item.key}>
+            <span className={styles.tooltipSwatch} style={{ backgroundColor: item.color }} />
+            <span className={styles.tooltipName}>{item.name}</span>
+            <span className={styles.tooltipValue}>
+              {typeof value === 'number' ? formatMoney(value, currency) : '—'}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
-      {/* Y gridlines + labels */}
-      {yTicks.map((t, i) => (
-        <g key={i}>
-          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="var(--line)" strokeWidth={1} />
-          <text x={L - 5} y={t.y + 4} textAnchor="end" fontSize={10} fill="var(--muted)">{t.label}</text>
-        </g>
-      ))}
-      {/* Zero gridline — heavier and darker when domain spans negative values */}
-      {zeroLineY !== null && (
-        <line x1={L} y1={zeroLineY} x2={L + PW} y2={zeroLineY} stroke="var(--ink)" strokeWidth={1.5} />
-      )}
+const axisTick = {
+  fill: 'var(--muted)',
+  fontFamily: 'var(--font-ibm-plex-mono), monospace',
+  fontSize: 11,
+}
 
-      {/* X ticks + labels */}
-      {xTicks.map((t, i) => (
-        <g key={i}>
-          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="var(--line)" strokeWidth={1} />
-          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9.5} fill="var(--muted)">{t.label}</text>
-        </g>
-      ))}
+const legendStyle = {
+  color: 'var(--ink)',
+  fontFamily: 'var(--font-nunito-sans), sans-serif',
+  fontSize: 12.5,
+  paddingBottom: 8,
+}
 
-      {/* Axis borders */}
-      <line x1={L} y1={T} x2={L} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
-      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
+export default function SalesSpendChart({
+  points,
+  currency,
+  showDaily,
+  gpPerOrder,
+}: {
+  points: ChartPoint[]
+  currency: string
+  showDaily: boolean
+  gpPerOrder: number | null
+}) {
+  if (points.length === 0) {
+    return <div className={styles.salesSpendEmpty}>No data</div>
+  }
 
-      {/* GP shaded fill — the gap between sales and spend IS the Ad GP */}
-      <path d={gpFillPath} fill="var(--pos)" fillOpacity={0.12} stroke="none" clipPath="url(#cdl-ss-clip)" />
+  const rollingSales = rollingAvg(points.map(point => point.sales), ROLL_WIN)
+  const rollingSpend = rollingAvg(points.map(point => point.spend), ROLL_WIN)
+  const rollingOrders = rollingAvg(points.map(point => point.orders), ROLL_WIN)
+  const plot = points.slice(-PLOT_DAYS)
+  const salesPlot = rollingSales.slice(-PLOT_DAYS)
+  const spendPlot = rollingSpend.slice(-PLOT_DAYS)
+  const ordersPlot = rollingOrders.slice(-PLOT_DAYS)
+  const gpPlot = gpPerOrder != null
+    ? ordersPlot.map((orders, index) => gpPerOrder * orders - spendPlot[index])
+    : salesPlot.map((sales, index) => sales - spendPlot[index])
+  const gpLabel = gpPerOrder != null ? 'Ad GP (30d)' : 'Ad GP (30d) (rev)'
+  const data = plot.map((point, index) => ({
+    date: point.date,
+    dailySales: point.sales,
+    dailySpend: point.spend,
+    rollingSales: salesPlot[index],
+    rollingSpend: spendPlot[index],
+    rollingGP: gpPlot[index],
+  }))
+  const { domain, ticks } = niceDomain([...salesPlot, ...spendPlot, ...gpPlot])
+  const crossesZero = domain[0] < 0 && domain[1] > 0
+  const weeklyTicks = data.filter((_, index) => index % 7 === 0).map(point => point.date)
+  const series: TooltipSeries[] = [
+    ...(showDaily
+      ? [
+          { key: 'dailySales', name: 'Daily sales', color: 'var(--blue)' },
+          { key: 'dailySpend', name: 'Daily spend', color: 'var(--neg)' },
+        ]
+      : []),
+    { key: 'rollingSales', name: 'Sales (30d avg)', color: 'var(--blue)' },
+    { key: 'rollingSpend', name: 'Spend (30d avg)', color: 'var(--neg)' },
+    { key: 'rollingGP', name: gpLabel, color: 'var(--pos)' },
+  ]
 
-      {/* Daily faint lines — hidden by default; clipped to plot area when shown */}
-      {showDaily && (
-        <>
-          <path d={polyline(dailySpendPts)} fill="none" stroke="var(--neg)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
-          <path d={polyline(dailySalePts)}  fill="none" stroke="var(--blue)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ss-clip)" />
-        </>
-      )}
-
-      {/* Rolling bold lines */}
-      <path d={polyline(rollSpendPts)} fill="none" stroke="var(--neg)" strokeWidth={2} strokeOpacity={0.85} />
-      <path d={polyline(rollSalePts)}  fill="none" stroke="var(--blue)" strokeWidth={2.5} />
-
-      {/* Ad GP (30d) — rolling sales minus rolling spend, bold deep-green line */}
-      <path d={polyline(rollGPPts)} fill="none" stroke="var(--pos)" strokeWidth={2.5} />
-
-      {/* Inline legend — 3 items */}
-      <g transform={`translate(${L + PW - 328}, ${T + 6})`}>
-        <line x1={0} y1={5} x2={16} y2={5} stroke="var(--blue)" strokeWidth={2.5} />
-        <text x={20} y={9} fontSize={10} fill="var(--ink)">Sales (30d avg)</text>
-        <line x1={112} y1={5} x2={128} y2={5} stroke="var(--neg)" strokeWidth={2} strokeOpacity={0.85} />
-        <text x={132} y={9} fontSize={10} fill="var(--ink)">Spend (30d avg)</text>
-        <line x1={224} y1={5} x2={240} y2={5} stroke="var(--pos)" strokeWidth={2.5} />
-        <text x={244} y={9} fontSize={10} fill="var(--ink)">{gpLabel}</text>
-      </g>
-    </svg>
+  return (
+    <ResponsiveContainer width="100%" height={360} minWidth={0}>
+      <LineChart data={data} margin={{ top: 12, right: 24, bottom: 8, left: 12 }} accessibilityLayer>
+        <CartesianGrid vertical={false} stroke="var(--line)" strokeWidth={1} />
+        <XAxis
+          dataKey="date"
+          ticks={weeklyTicks}
+          interval={0}
+          axisLine={{ stroke: 'var(--line)', strokeWidth: 1 }}
+          tickLine={false}
+          tick={axisTick}
+          tickFormatter={formatDate}
+          tickMargin={9}
+        />
+        <YAxis
+          domain={domain}
+          ticks={ticks}
+          allowDataOverflow
+          axisLine={false}
+          tickLine={false}
+          tick={axisTick}
+          tickFormatter={value => formatAxisMoney(Number(value), currency)}
+          width={76}
+        />
+        <Tooltip
+          shared
+          cursor={{ stroke: 'var(--line)', strokeWidth: 1 }}
+          content={props => <SalesTooltip {...props} series={series} currency={currency} />}
+        />
+        <Legend
+          position="top"
+          iconType="plainline"
+          iconSize={18}
+          itemSorter={null}
+          wrapperStyle={legendStyle}
+          labelStyle={{ color: 'var(--ink)' }}
+        />
+        {crossesZero && <ReferenceLine y={0} stroke="var(--ink)" strokeWidth={1.5} />}
+        {showDaily && (
+          <>
+            <Line
+              dataKey="dailySales"
+              name="Daily sales"
+              stroke="var(--blue)"
+              strokeWidth={1}
+              strokeOpacity={0.25}
+              dot={false}
+              activeDot={{ r: 3, strokeWidth: 0 }}
+              legendType="none"
+              isAnimationActive={false}
+            />
+            <Line
+              dataKey="dailySpend"
+              name="Daily spend"
+              stroke="var(--neg)"
+              strokeWidth={1}
+              strokeOpacity={0.25}
+              dot={false}
+              activeDot={{ r: 3, strokeWidth: 0 }}
+              legendType="none"
+              isAnimationActive={false}
+            />
+          </>
+        )}
+        <Line
+          dataKey="rollingSales"
+          name="Sales (30d avg)"
+          stroke="var(--blue)"
+          strokeWidth={1.75}
+          dot={false}
+          activeDot={{ r: 3, strokeWidth: 0 }}
+          isAnimationActive={false}
+        />
+        <Line
+          dataKey="rollingSpend"
+          name="Spend (30d avg)"
+          stroke="var(--neg)"
+          strokeWidth={1.75}
+          dot={false}
+          activeDot={{ r: 3, strokeWidth: 0 }}
+          isAnimationActive={false}
+        />
+        <Line
+          dataKey="rollingGP"
+          name={gpLabel}
+          stroke="var(--pos)"
+          strokeWidth={1.75}
+          dot={false}
+          activeDot={{ r: 3, strokeWidth: 0 }}
+          isAnimationActive={false}
+        />
+      </LineChart>
+    </ResponsiveContainer>
   )
 }

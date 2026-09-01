@@ -1,149 +1,216 @@
-// ACoS line chart, 900×160 viewBox. Dashed reference line at profile target_acos.
-// Rolling ACoS = rolling_spend / rolling_sales (ratio of sums, NOT avg of daily ratios).
-// Daily faint line behind rolling bold line. Receives up to 120 days; plots last 90.
+'use client'
 
+// Rolling ACoS remains rolling spend / rolling sales (ratio of sums, never an average of ratios).
+// The daily toggle adds the unchanged daily ACoS series behind the rolling line.
+
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  type TooltipContentProps,
+} from 'recharts'
 import type { ChartPoint } from './SalesSpendChart'
+import styles from './DashboardZoneOne.module.css'
 
-const W = 900, H = 160
-const L = 50, R = 56, T = 10, B = 28
-const PW = W - L - R
-const PH = H - T - B
 const PLOT_DAYS = 90
-const ROLL_WIN  = 30
+const ROLL_WIN = 30
 
-function tx(i: number, n: number) { return n <= 1 ? L : L + (i / (n - 1)) * PW }
-function ty(v: number, maxV: number) {
-  if (maxV === 0) return T + PH
-  return T + PH - Math.min(v / maxV, 1.05) * PH
-}
-function polyline(pts: { x: number; y: number }[]) {
-  return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+interface TooltipSeries {
+  key: string
+  name: string
+  color: string
 }
 
-// Rolling ACoS: ratio of rolling spend sum / rolling sales sum — never avg of ratios
 function rollingAcosArr(points: ChartPoint[], window: number): (number | null)[] {
-  return points.map((_, i) => {
-    const start = Math.max(0, i - window + 1)
-    const slice = points.slice(start, i + 1)
-    const spend = slice.reduce((a, b) => a + b.spend, 0)
-    const sales = slice.reduce((a, b) => a + b.sales, 0)
+  return points.map((_, index) => {
+    const start = Math.max(0, index - window + 1)
+    const slice = points.slice(start, index + 1)
+    const spend = slice.reduce((sum, point) => sum + point.spend, 0)
+    const sales = slice.reduce((sum, point) => sum + point.sales, 0)
     return sales > 0 ? spend / sales : null
   })
 }
 
-// Split a sequence of nullable points into contiguous non-null segments for polyline
-function segments(
-  n: number,
-  getValue: (i: number) => number | null,
-  getX: (i: number) => number,
-  getY: (v: number) => number,
-): { x: number; y: number }[][] {
-  const result: { x: number; y: number }[][] = []
-  let seg: { x: number; y: number }[] = []
-  for (let i = 0; i < n; i++) {
-    const v = getValue(i)
-    if (v !== null) {
-      seg.push({ x: getX(i), y: getY(v) })
-    } else {
-      if (seg.length > 1) result.push(seg)
-      seg = []
-    }
-  }
-  if (seg.length > 1) result.push(seg)
-  return result
+function formatDate(date: string): string {
+  return new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  })
 }
 
-export default function AcosChart({ points, targetAcos, showDaily }: { points: ChartPoint[]; targetAcos: number; showDaily: boolean }) {
-  if (points.length === 0) {
-    return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
-        No ACoS data
-      </div>
-    )
-  }
+function formatPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`
+}
 
-  // Compute rolling over full input, take last PLOT_DAYS for display
-  const rollAll  = rollingAcosArr(points, ROLL_WIN)
-  const plot     = points.slice(-PLOT_DAYS)
-  const rollPlot = rollAll.slice(-PLOT_DAYS)
-  const n        = plot.length
+function percentScale(peak: number): { max: number; ticks: number[] } {
+  const rawMax = Math.min(peak * 1.3, 2.5)
+  const desiredStep = rawMax / 4
+  const step = [0.05, 0.1, 0.25, 0.5].find(candidate => candidate >= desiredStep) ?? 0.5
+  const max = Math.min(2.5, Math.max(step, Math.ceil(rawMax / step) * step))
+  const intervals = Math.round(max / step)
+  const ticks = Array.from({ length: intervals + 1 }, (_, index) => Number((index * step).toFixed(10)))
+  return { max, ticks }
+}
 
-  const validRoll = rollPlot.filter((v): v is number => v !== null)
-  if (validRoll.length === 0) {
-    return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
-        No ACoS data
-      </div>
-    )
-  }
-
-  const peak = Math.max(...validRoll, targetAcos)
-  const maxV = Math.min(peak * 1.3, 2.5)   // cap at 250% — avoids degenerate scale; 1.3× rolling headroom
-
-  const refY = ty(targetAcos, maxV)
-
-  const dailySegs = segments(n, i => plot[i].acos,   i => tx(i, n), v => ty(v, maxV))
-  const rollSegs  = segments(n, i => rollPlot[i],     i => tx(i, n), v => ty(v, maxV))
-
-  // Weekly x-ticks
-  const xTicks: { x: number; label: string }[] = []
-  for (let i = 0; i < n; i += 7) {
-    const d = new Date(plot[i].date + 'T00:00:00Z')
-    xTicks.push({
-      x: tx(i, n),
-      label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }),
-    })
-  }
-
-  // Y ticks: 0 / 50% / 100% of scale
-  const yTicks = [0, 0.5, 1].map(f => ({
-    y: T + PH - f * PH,
-    label: `${(f * maxV * 100).toFixed(0)}%`,
-  }))
+function AcosTooltip({
+  active,
+  label,
+  payload,
+  series,
+}: TooltipContentProps & {
+  series: TooltipSeries[]
+}) {
+  if (!active || !payload?.length) return null
+  const datum = payload[0]?.payload as Record<string, unknown> | undefined
+  if (!datum) return null
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', overflow: 'visible', fontFamily: 'var(--font-ibm-plex-mono), monospace' }}>
-      <defs>
-        <clipPath id="cdl-ac-clip">
-          <rect x={L} y={T} width={PW} height={PH} />
-        </clipPath>
-      </defs>
+    <div className={styles.chartTooltip}>
+      <div className={styles.tooltipMonth}>{formatDate(String(label ?? ''))}</div>
+      {series.map(item => {
+        const value = datum[item.key]
+        return (
+          <div className={styles.tooltipRow} key={item.key}>
+            <span className={styles.tooltipSwatch} style={{ backgroundColor: item.color }} />
+            <span className={styles.tooltipName}>{item.name}</span>
+            <span className={styles.tooltipValue}>
+              {typeof value === 'number' ? formatPercent(value) : '—'}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
-      {/* Gridlines + Y labels */}
-      {yTicks.map((t, i) => (
-        <g key={i}>
-          <line x1={L} y1={t.y} x2={L + PW} y2={t.y} stroke="var(--line)" strokeWidth={1} />
-          <text x={L - 4} y={t.y + 4} textAnchor="end" fontSize={9.5} fill="var(--muted)">{t.label}</text>
-        </g>
-      ))}
+const axisTick = {
+  fill: 'var(--muted)',
+  fontFamily: 'var(--font-ibm-plex-mono), monospace',
+  fontSize: 11,
+}
 
-      {/* Target ACoS reference line */}
-      <line x1={L} y1={refY} x2={L + PW} y2={refY} stroke="var(--ink)" strokeWidth={1.2} strokeDasharray="5 3" />
-      <text x={L + PW + 4} y={refY + 4} fontSize={9.5} fill="var(--muted)" dominantBaseline="middle">
-        target {(targetAcos * 100).toFixed(0)}%
-      </text>
+const legendStyle = {
+  color: 'var(--ink)',
+  fontFamily: 'var(--font-nunito-sans), sans-serif',
+  fontSize: 12.5,
+  paddingBottom: 8,
+}
 
-      {/* X ticks */}
-      {xTicks.map((t, i) => (
-        <g key={i}>
-          <line x1={t.x} y1={T + PH} x2={t.x} y2={T + PH + 4} stroke="var(--line)" strokeWidth={1} />
-          <text x={t.x} y={T + PH + 15} textAnchor="middle" fontSize={9.5} fill="var(--muted)">{t.label}</text>
-        </g>
-      ))}
+export default function AcosChart({
+  points,
+  targetAcos,
+  showDaily,
+}: {
+  points: ChartPoint[]
+  targetAcos: number
+  showDaily: boolean
+}) {
+  if (points.length === 0) {
+    return <div className={styles.acosEmpty}>No ACoS data</div>
+  }
 
-      {/* Axes */}
-      <line x1={L} y1={T} x2={L} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
-      <line x1={L} y1={T + PH} x2={L + PW} y2={T + PH} stroke="var(--line)" strokeWidth={1} />
+  const rolling = rollingAcosArr(points, ROLL_WIN)
+  const plot = points.slice(-PLOT_DAYS)
+  const rollingPlot = rolling.slice(-PLOT_DAYS)
+  const validRolling = rollingPlot.filter((value): value is number => value !== null)
+  if (validRolling.length === 0) {
+    return <div className={styles.acosEmpty}>No ACoS data</div>
+  }
 
-      {/* Daily faint lines — hidden by default; clipped to plot area when shown */}
-      {showDaily && dailySegs.map((seg, i) => (
-        <path key={i} d={polyline(seg)} fill="none" stroke="var(--blue)" strokeWidth={1} strokeOpacity={0.25} clipPath="url(#cdl-ac-clip)" />
-      ))}
+  const data = plot.map((point, index) => ({
+    date: point.date,
+    dailyAcos: point.acos,
+    rollingAcos: rollingPlot[index],
+  }))
+  const { max, ticks } = percentScale(Math.max(...validRolling, targetAcos))
+  const weeklyTicks = data.filter((_, index) => index % 7 === 0).map(point => point.date)
+  const series: TooltipSeries[] = [
+    ...(showDaily ? [{ key: 'dailyAcos', name: 'Daily ACoS', color: 'var(--blue)' }] : []),
+    { key: 'rollingAcos', name: 'ACoS (30d)', color: 'var(--blue)' },
+  ]
 
-      {/* Rolling bold lines */}
-      {rollSegs.map((seg, i) => (
-        <path key={i} d={polyline(seg)} fill="none" stroke="var(--blue)" strokeWidth={2} />
-      ))}
-    </svg>
+  return (
+    <ResponsiveContainer width="100%" height={220} minWidth={0}>
+      <LineChart data={data} margin={{ top: 12, right: 24, bottom: 8, left: 12 }} accessibilityLayer>
+        <CartesianGrid vertical={false} stroke="var(--line)" strokeWidth={1} />
+        <XAxis
+          dataKey="date"
+          ticks={weeklyTicks}
+          interval={0}
+          axisLine={{ stroke: 'var(--line)', strokeWidth: 1 }}
+          tickLine={false}
+          tick={axisTick}
+          tickFormatter={formatDate}
+          tickMargin={9}
+        />
+        <YAxis
+          domain={[0, max]}
+          ticks={ticks}
+          allowDataOverflow
+          axisLine={false}
+          tickLine={false}
+          tick={axisTick}
+          tickFormatter={value => `${Math.round(Number(value) * 100)}%`}
+          width={58}
+        />
+        <Tooltip
+          shared
+          cursor={{ stroke: 'var(--line)', strokeWidth: 1 }}
+          content={props => <AcosTooltip {...props} series={series} />}
+        />
+        <Legend
+          position="top"
+          iconType="plainline"
+          iconSize={18}
+          itemSorter={null}
+          wrapperStyle={legendStyle}
+          labelStyle={{ color: 'var(--ink)' }}
+        />
+        <ReferenceLine
+          y={targetAcos}
+          stroke="var(--ink)"
+          strokeWidth={1.25}
+          strokeDasharray="5 3"
+          label={{
+            value: `target ${Math.round(targetAcos * 100)}%`,
+            position: 'insideTopRight',
+            fill: 'var(--muted)',
+            fontFamily: 'var(--font-ibm-plex-mono), monospace',
+            fontSize: 10.5,
+          }}
+        />
+        {showDaily && (
+          <Line
+            dataKey="dailyAcos"
+            name="Daily ACoS"
+            stroke="var(--blue)"
+            strokeWidth={1}
+            strokeOpacity={0.25}
+            connectNulls={false}
+            dot={false}
+            activeDot={{ r: 3, strokeWidth: 0 }}
+            legendType="none"
+            isAnimationActive={false}
+          />
+        )}
+        <Line
+          dataKey="rollingAcos"
+          name="ACoS (30d)"
+          stroke="var(--blue)"
+          strokeWidth={1.75}
+          connectNulls={false}
+          dot={false}
+          activeDot={{ r: 3, strokeWidth: 0 }}
+          isAnimationActive={false}
+        />
+      </LineChart>
+    </ResponsiveContainer>
   )
 }

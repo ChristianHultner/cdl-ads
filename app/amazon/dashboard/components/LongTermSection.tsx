@@ -1,12 +1,13 @@
 'use client'
 
 // Long-term display layer for the already-shaped rolling-12 console and vendor series.
-// The values toggle intentionally labels endpoints only; complete monthly detail stays in the tooltip.
+// The values toggle labels every plotted point; complete monthly detail also stays in the tooltip.
 
 import { useState } from 'react'
 import {
   Area,
   CartesianGrid,
+  LabelList,
   Legend,
   Line,
   LineChart,
@@ -53,8 +54,6 @@ const COUNTRY_NAMES: Record<string, string> = {
   IT: 'Italy', MX: 'Mexico', UK: 'United Kingdom', US: 'United States',
 }
 
-type ChartValue = number | null | undefined
-
 interface TooltipSeries {
   key: string
   name: string
@@ -93,38 +92,26 @@ function formatUnits(value: number): string {
   return Math.round(value).toLocaleString('en-US')
 }
 
-function endpointIndexes<T>(data: readonly T[], value: (datum: T) => ChartValue): Set<number> {
-  const indexes = data.flatMap((datum, index) => typeof value(datum) === 'number' ? [index] : [])
-  if (indexes.length === 0) return new Set()
-  return new Set([indexes[0], indexes[indexes.length - 1]])
-}
-
-function endpointLabel({
-  indexes,
+function pointLabel({
   color,
   offset,
   formatter,
 }: {
-  indexes: Set<number>
   color: string
   offset: number
   formatter: (value: number) => string
 }) {
-  const first = Math.min(...indexes)
-  const last = Math.max(...indexes)
+  return function PointLabel({ x, y, value }: LabelProps) {
+    if (x == null || y == null || value == null) return null
 
-  return function EndpointLabel({ x, y, value, index }: LabelProps) {
-    if (index == null || !indexes.has(index) || x == null || y == null || value == null) return null
-
-    const anchor = first === last ? 'middle' : index === first ? 'start' : 'end'
     return (
       <text
         x={Number(x)}
         y={Number(y) + offset}
         fill={color}
         fontFamily="var(--font-ibm-plex-mono), monospace"
-        fontSize={10}
-        textAnchor={anchor}
+        fontSize={10.5}
+        textAnchor="middle"
       >
         {formatter(Number(value))}
       </text>
@@ -169,13 +156,13 @@ function ChartTooltip({
 const axisTick = {
   fill: 'var(--muted)',
   fontFamily: 'var(--font-ibm-plex-mono), monospace',
-  fontSize: 10,
+  fontSize: 11,
 }
 
 const legendStyle = {
   color: 'var(--ink)',
   fontFamily: 'var(--font-nunito-sans), sans-serif',
-  fontSize: 12,
+  fontSize: 12.5,
   paddingBottom: 8,
 }
 
@@ -223,8 +210,8 @@ function RollingChart({
 
   return (
     <div className={styles.longTermChart}>
-      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <LineChart data={data} margin={{ top: 6, right: 10, bottom: 0, left: 8 }} accessibilityLayer>
+      <ResponsiveContainer width="100%" height={360} minWidth={0}>
+        <LineChart data={data} margin={{ top: 30, right: 24, bottom: 20, left: 12 }} accessibilityLayer>
           <CartesianGrid vertical={false} stroke="var(--line)" strokeWidth={1} />
           <XAxis
             dataKey="label"
@@ -265,13 +252,14 @@ function RollingChart({
             dot={false}
             activeDot={{ r: 3, strokeWidth: 0 }}
             isAnimationActive={false}
-            label={showValues ? endpointLabel({
-              indexes: endpointIndexes(data, point => point.sales12),
-              color: 'var(--blue)',
-              offset: -8,
-              formatter: money,
-            }) : false}
-          />
+          >
+            {showValues && (
+              <LabelList
+                dataKey="sales12"
+                content={pointLabel({ color: 'var(--blue)', offset: -10, formatter: value => formatAxisMoney(value, market.currency) })}
+              />
+            )}
+          </Line>
           <Line
             dataKey="spend12"
             name="Rolling-12 Spend"
@@ -280,13 +268,14 @@ function RollingChart({
             dot={false}
             activeDot={{ r: 3, strokeWidth: 0 }}
             isAnimationActive={false}
-            label={showValues ? endpointLabel({
-              indexes: endpointIndexes(data, point => point.spend12),
-              color: 'var(--neg)',
-              offset: 14,
-              formatter: money,
-            }) : false}
-          />
+          >
+            {showValues && (
+              <LabelList
+                dataKey="spend12"
+                content={pointLabel({ color: 'var(--neg)', offset: -10, formatter: value => formatAxisMoney(value, market.currency) })}
+              />
+            )}
+          </Line>
           <Line
             dataKey="gp12"
             name={gpLabel}
@@ -295,13 +284,14 @@ function RollingChart({
             dot={false}
             activeDot={{ r: 3, strokeWidth: 0 }}
             isAnimationActive={false}
-            label={showValues ? endpointLabel({
-              indexes: endpointIndexes(data, point => point.gp12),
-              color: 'var(--pos)',
-              offset: 14,
-              formatter: money,
-            }) : false}
-          />
+          >
+            {showValues && (
+              <LabelList
+                dataKey="gp12"
+                content={pointLabel({ color: 'var(--pos)', offset: 16, formatter: value => formatAxisMoney(value, market.currency) })}
+              />
+            )}
+          </Line>
           {hasVendorRevenue && (
             <Line
               dataKey="vendorRevenue12"
@@ -313,13 +303,14 @@ function RollingChart({
               dot={false}
               activeDot={{ r: 3, strokeWidth: 0 }}
               isAnimationActive={false}
-              label={showValues ? endpointLabel({
-                indexes: endpointIndexes(data, point => point.vendorRevenue12),
-                color: '#8A5BB8',
-                offset: -8,
-                formatter: money,
-              }) : false}
-            />
+            >
+              {showValues && (
+                <LabelList
+                  dataKey="vendorRevenue12"
+                  content={pointLabel({ color: '#8A5BB8', offset: 16, formatter: value => formatAxisMoney(value, market.currency) })}
+                />
+              )}
+            </Line>
           )}
         </LineChart>
       </ResponsiveContainer>
@@ -368,8 +359,8 @@ function UnitsPanel({
 
   return (
     <div className={styles.unitsChart}>
-      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <LineChart data={data} margin={{ top: 6, right: 10, bottom: 0, left: 8 }} accessibilityLayer>
+      <ResponsiveContainer width="100%" height={260} minWidth={0}>
+        <LineChart data={data} margin={{ top: 30, right: 24, bottom: 20, left: 12 }} accessibilityLayer>
           <CartesianGrid vertical={false} stroke="var(--line)" strokeWidth={1} />
           <XAxis
             dataKey="label"
@@ -423,13 +414,14 @@ function UnitsPanel({
             dot={false}
             activeDot={{ r: 3, strokeWidth: 0 }}
             isAnimationActive={false}
-            label={showValues ? endpointLabel({
-              indexes: endpointIndexes(data, point => point.vendorUnits),
-              color: '#8A5BB8',
-              offset: -8,
-              formatter: formatUnits,
-            }) : false}
-          />
+          >
+            {showValues && (
+              <LabelList
+                dataKey="vendorUnits"
+                content={pointLabel({ color: '#8A5BB8', offset: 16, formatter: formatUnits })}
+              />
+            )}
+          </Line>
           <Line
             dataKey="attributedUnits"
             name="Attributed orders"
@@ -438,13 +430,14 @@ function UnitsPanel({
             dot={false}
             activeDot={{ r: 3, strokeWidth: 0 }}
             isAnimationActive={false}
-            label={showValues ? endpointLabel({
-              indexes: endpointIndexes(data, point => point.attributedUnits),
-              color: 'var(--blue)',
-              offset: 14,
-              formatter: formatUnits,
-            }) : false}
-          />
+          >
+            {showValues && (
+              <LabelList
+                dataKey="attributedUnits"
+                content={pointLabel({ color: 'var(--blue)', offset: -10, formatter: formatUnits })}
+              />
+            )}
+          </Line>
         </LineChart>
       </ResponsiveContainer>
     </div>
@@ -463,7 +456,7 @@ export default function LongTermSection({
     .filter((market): market is LongTermMarket => !!market && market.points.length > 0)
 
   const [tab, setTab] = useState(active[0]?.country ?? 'ES')
-  const [showValues, setShowValues] = useState(false)
+  const [showValues, setShowValues] = useState(true)
   const current = active.find(market => market.country === tab) ?? active[0]
   const currentVendor = vendorMarkets.find(market => market.country === current?.country)
 
