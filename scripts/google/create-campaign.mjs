@@ -141,9 +141,14 @@ function assetTexts(assets) {
 }
 
 function resultResourceName(result) {
-  const resourceName = result?.results?.[0]?.resource_name;
-  if (!resourceName) throw new Error('Google Ads mutate returned no resource_name');
-  return resourceName;
+  const r = result?.mutate_operation_responses?.[0]
+    ?? result?.results?.[0];
+  if (!r) throw new Error('mutate returned no response entry: ' + JSON.stringify(result));
+  if (r.resource_name) return r.resource_name;
+  const key = Object.keys(r).find(k => k.endsWith('_result'));
+  const rn = key ? r[key]?.resource_name : null;
+  if (!rn) throw new Error('mutate returned no resource_name: ' + JSON.stringify(r));
+  return rn;
 }
 
 function buildApiCustomer() {
