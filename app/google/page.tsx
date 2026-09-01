@@ -172,6 +172,22 @@ export default async function GooglePage() {
             </span>
           )}
         </Link>
+        <Link
+          href="/google/build"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '0.5rem 1.25rem',
+            background: 'var(--cdl-sky)',
+            color: 'var(--cdl-ink)',
+            border: '1px solid #c8dfe9',
+            borderRadius: '6px',
+            fontWeight: 700,
+            fontSize: '0.9rem',
+          }}
+        >
+          Build
+        </Link>
       </div>
 
       <p

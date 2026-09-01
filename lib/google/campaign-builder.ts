@@ -953,6 +953,13 @@ export async function buildCampaign({
       fail('HARD INVARIANT FAILED: born_paused must be exactly true')
     }
 
+    const country = campaignSpec.geo?.country
+    if (country !== 'US') {
+      fail(
+        `UNSUPPORTED COUNTRY ${country} — add an explicit geo mapping before building`,
+      )
+    }
+
     requireEnvironment()
     await guardCustomerInDatabase()
 

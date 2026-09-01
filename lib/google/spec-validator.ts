@@ -242,8 +242,8 @@ export function validateSpec(input: unknown): SpecValidationResult {
     if (!Array.isArray(spec.campaigns)) {
       addError("campaigns", "must be an array");
     } else {
-      if (spec.campaigns.length !== 2) {
-        addError("campaigns", "must contain exactly 2 campaigns");
+      if (spec.campaigns.length < 1) {
+        addError("campaigns", "must contain at least 1 campaign");
       }
 
       const campaignNames = new Set();
