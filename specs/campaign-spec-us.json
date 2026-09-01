@@ -116,6 +116,25 @@
           "text": "Impact Projects",
           "final_url": "https://www.cuentodeluz.com/en/impact-projects"
         }
+      ],
+      "callouts": [
+        "Award-Winning Books",
+        "Stone Paper Editions",
+        "Values-Based Stories",
+        "Ages 3-8",
+        "Ships from Amazon US"
+      ],
+      "structured_snippets": [
+        {
+          "header": "Types",
+          "values": [
+            "Values",
+            "Emotions",
+            "Nature",
+            "Family",
+            "Diversity"
+          ]
+        }
       ]
     },
     {

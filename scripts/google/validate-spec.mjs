@@ -106,10 +106,90 @@ function validateRsa(rsa, path) {
   requireString(rsa.final_url, `${path}.final_url`, { allowEmpty: true });
 }
 
+const structuredSnippetHeaders = new Set([
+  "Amenities",
+  "Brands",
+  "Courses",
+  "Degree programs",
+  "Destinations",
+  "Featured hotels",
+  "Insurance coverage",
+  "Models",
+  "Neighborhoods",
+  "Service catalog",
+  "Shows",
+  "Styles",
+  "Types",
+]);
+
+function validateCallouts(callouts, path) {
+  if (!Array.isArray(callouts)) {
+    addError(path, "must be an array");
+    return;
+  }
+
+  calloutCount += callouts.length;
+  if (callouts.length < 2 || callouts.length > 10) {
+    addError(path, "must contain 2..10 items");
+  }
+  callouts.forEach((callout, index) => {
+    const calloutPath = `${path}[${index}]`;
+    if (
+      requireString(callout, calloutPath) &&
+      charCount(callout) > 25
+    ) {
+      addError(
+        calloutPath,
+        `must be <= 25 characters (received ${charCount(callout)})`,
+      );
+    }
+  });
+}
+
+function validateStructuredSnippets(snippets, path) {
+  if (!Array.isArray(snippets)) {
+    addError(path, "must be an array");
+    return;
+  }
+
+  structuredSnippetCount += snippets.length;
+  snippets.forEach((snippet, snippetIndex) => {
+    const snippetPath = `${path}[${snippetIndex}]`;
+    if (!requireObject(snippet, snippetPath)) return;
+
+    if (
+      requireString(snippet.header, `${snippetPath}.header`) &&
+      !structuredSnippetHeaders.has(snippet.header)
+    ) {
+      addError(
+        `${snippetPath}.header`,
+        "must be one of Google's fixed structured snippet headers",
+      );
+    }
+
+    const valuesPath = `${snippetPath}.values`;
+    if (requireStringArray(snippet.values, valuesPath, { minimum: 3 })) {
+      if (snippet.values.length > 10) {
+        addError(valuesPath, "must contain at most 10 items");
+      }
+      snippet.values.forEach((value, valueIndex) => {
+        if (typeof value === "string" && charCount(value) > 25) {
+          addError(
+            `${valuesPath}[${valueIndex}]`,
+            `must be <= 25 characters (received ${charCount(value)})`,
+          );
+        }
+      });
+    }
+  });
+}
+
 const matchTypes = new Set(["exact", "phrase", "broad"]);
 let adGroupCount = 0;
 let keywordCount = 0;
 let rsaCount = 0;
+let calloutCount = 0;
+let structuredSnippetCount = 0;
 
 function validateKeywords(keywords, path) {
   if (!requireObject(keywords, path)) return;
@@ -268,6 +348,16 @@ if (!requireObject(spec, "spec")) {
           });
         });
       }
+
+      if (campaign.callouts !== undefined) {
+        validateCallouts(campaign.callouts, `${campaignPath}.callouts`);
+      }
+      if (campaign.structured_snippets !== undefined) {
+        validateStructuredSnippets(
+          campaign.structured_snippets,
+          `${campaignPath}.structured_snippets`,
+        );
+      }
     });
   }
 }
@@ -279,5 +369,5 @@ if (errors.length > 0) {
 }
 
 console.log(
-  `SPEC VALID: ${spec.campaigns.length} campaigns, ${adGroupCount} ad groups, ${keywordCount} keywords, ${rsaCount} RSAs`,
+  `SPEC VALID: ${spec.campaigns.length} campaigns, ${adGroupCount} ad groups, ${keywordCount} keywords, ${rsaCount} RSAs, ${calloutCount} callouts, ${structuredSnippetCount} structured snippets`,
 );

@@ -335,6 +335,80 @@ async function findCampaignSitelink(
   );
 }
 
+async function findCalloutAsset(customer, calloutText) {
+  const rows = await customer.query(`
+    SELECT asset.resource_name, asset.callout_asset.callout_text
+    FROM asset
+    WHERE asset.type = CALLOUT
+      AND asset.callout_asset.callout_text = '${gaqlString(calloutText)}'
+    LIMIT 1
+  `);
+
+  return rows[0]?.asset?.resource_name ?? null;
+}
+
+async function findCampaignCallout(
+  customer,
+  campaignResourceName,
+  calloutText,
+) {
+  const rows = await customer.query(`
+    SELECT
+      campaign_asset.resource_name,
+      campaign_asset.asset,
+      asset.callout_asset.callout_text
+    FROM campaign_asset
+    WHERE campaign_asset.campaign = '${gaqlString(campaignResourceName)}'
+      AND campaign_asset.field_type = CALLOUT
+      AND asset.callout_asset.callout_text = '${gaqlString(calloutText)}'
+    LIMIT 1
+  `);
+
+  return rows[0]?.campaign_asset ?? null;
+}
+
+async function findStructuredSnippetAsset(customer, snippet) {
+  const rows = await customer.query(`
+    SELECT
+      asset.resource_name,
+      asset.structured_snippet_asset.header,
+      asset.structured_snippet_asset.values
+    FROM asset
+    WHERE asset.type = STRUCTURED_SNIPPET
+      AND asset.structured_snippet_asset.header = '${gaqlString(snippet.header)}'
+  `);
+
+  return (
+    rows.find((row) =>
+      sameStrings(row.asset?.structured_snippet_asset?.values, snippet.values),
+    )?.asset?.resource_name ?? null
+  );
+}
+
+async function findCampaignStructuredSnippet(
+  customer,
+  campaignResourceName,
+  snippet,
+) {
+  const rows = await customer.query(`
+    SELECT
+      campaign_asset.resource_name,
+      campaign_asset.asset,
+      asset.structured_snippet_asset.header,
+      asset.structured_snippet_asset.values
+    FROM campaign_asset
+    WHERE campaign_asset.campaign = '${gaqlString(campaignResourceName)}'
+      AND campaign_asset.field_type = STRUCTURED_SNIPPET
+      AND asset.structured_snippet_asset.header = '${gaqlString(snippet.header)}'
+  `);
+
+  return (
+    rows.find((row) =>
+      sameStrings(row.asset?.structured_snippet_asset?.values, snippet.values),
+    )?.campaign_asset ?? null
+  );
+}
+
 function createMutator(customer, execute, validationChain) {
   return async function createResource({
     entity,
@@ -376,6 +450,8 @@ async function buildCampaign({ customer, campaignSpec, execute }) {
     rsas: 0,
     negatives: 0,
     sitelinks: 0,
+    callouts: 0,
+    snippets: 0,
   };
   let temporaryId = -1;
   const nextTemporaryId = () => String(temporaryId--);
@@ -701,6 +777,111 @@ async function buildCampaign({ customer, campaignSpec, execute }) {
     }
   }
 
+  for (const calloutText of campaignSpec.callouts ?? []) {
+    const existingLink = campaignExists
+      ? await findCampaignCallout(
+          customer,
+          campaignResourceName,
+          calloutText,
+        )
+      : null;
+    if (existingLink) {
+      console.log(`EXISTS, skipping callout ${calloutText}`);
+      counts.callouts += 1;
+      continue;
+    }
+
+    const existingAsset = await findCalloutAsset(customer, calloutText);
+    let assetResourceName;
+    if (existingAsset) {
+      assetResourceName = existingAsset;
+      console.log(`EXISTS, skipping asset ${calloutText}`);
+    } else {
+      const temporaryAsset = ResourceNames.asset(
+        CUSTOMER_ID,
+        nextTemporaryId(),
+      );
+      assetResourceName = await createResource({
+        entity: 'asset',
+        resourceType: 'asset',
+        name: calloutText,
+        fallbackResourceName: temporaryAsset,
+        resource: {
+          resource_name: execute ? undefined : temporaryAsset,
+          name: `${campaignSpec.name} | ${calloutText}`,
+          callout_asset: {
+            callout_text: calloutText,
+          },
+        },
+      });
+    }
+
+    await createResource({
+      entity: 'campaign_asset',
+      resourceType: 'campaign_asset',
+      name: calloutText,
+      resource: {
+        campaign: campaignResourceName,
+        asset: assetResourceName,
+        field_type: enums.AssetFieldType.CALLOUT,
+      },
+    });
+    counts.callouts += 1;
+  }
+
+  for (const snippet of campaignSpec.structured_snippets ?? []) {
+    const existingLink = campaignExists
+      ? await findCampaignStructuredSnippet(
+          customer,
+          campaignResourceName,
+          snippet,
+        )
+      : null;
+    if (existingLink) {
+      console.log(`EXISTS, skipping structured_snippet ${snippet.header}`);
+      counts.snippets += 1;
+      continue;
+    }
+
+    const existingAsset = await findStructuredSnippetAsset(customer, snippet);
+    let assetResourceName;
+    if (existingAsset) {
+      assetResourceName = existingAsset;
+      console.log(`EXISTS, skipping asset ${snippet.header}`);
+    } else {
+      const temporaryAsset = ResourceNames.asset(
+        CUSTOMER_ID,
+        nextTemporaryId(),
+      );
+      assetResourceName = await createResource({
+        entity: 'asset',
+        resourceType: 'asset',
+        name: snippet.header,
+        fallbackResourceName: temporaryAsset,
+        resource: {
+          resource_name: execute ? undefined : temporaryAsset,
+          name: `${campaignSpec.name} | ${snippet.header}`,
+          structured_snippet_asset: {
+            header: snippet.header,
+            values: snippet.values,
+          },
+        },
+      });
+    }
+
+    await createResource({
+      entity: 'campaign_asset',
+      resourceType: 'campaign_asset',
+      name: snippet.header,
+      resource: {
+        campaign: campaignResourceName,
+        asset: assetResourceName,
+        field_type: enums.AssetFieldType.STRUCTURED_SNIPPET,
+      },
+    });
+    counts.snippets += 1;
+  }
+
   if (!execute) {
     await customer.mutateResources(validationChain, { validate_only: true });
     console.log(`VALIDATE OK: ${validationChain.length} operations in one request`);
@@ -713,6 +894,8 @@ async function buildCampaign({ customer, campaignSpec, execute }) {
       ` rsas=${counts.rsas}` +
       ` negatives=${counts.negatives}` +
       ` sitelinks=${counts.sitelinks}` +
+      ` callouts=${counts.callouts}` +
+      ` snippets=${counts.snippets}` +
       ` skipped=${skipped.length > 0 ? skipped.join(',') : 'none'}`,
   );
 }
