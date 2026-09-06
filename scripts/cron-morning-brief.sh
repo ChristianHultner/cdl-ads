@@ -1,6 +1,7 @@
 #!/bin/sh
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 cd /Users/christianhultner/cdl-ads || exit 1
+mkdir -p /Users/christianhultner/cdl-ads/logs
 set -a
 . ./.env.local
 . /Users/christianhultner/secrets/cdl-ads-lwa.env

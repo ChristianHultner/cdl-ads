@@ -77,6 +77,43 @@ let   verdict = 'OK';
 }
 
 // ---------------------------------------------------------------------------
+// DAILY_ROLLUP_FRESHNESS (DB-based, cause-agnostic nightly health check)
+// ---------------------------------------------------------------------------
+{
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const { rows } = await pool.query(`
+      SELECT max(date)::text AS latest_date,
+             COALESCE(max(date) < CURRENT_DATE - 2, true) AS is_stale
+      FROM daily_rollup
+    `);
+    const latestDate = rows[0]?.latest_date ?? null;
+    const isStale = rows[0]?.is_stale ?? true;
+
+    if (isStale) {
+      const staleSince = latestDate ?? 'no data';
+      checks.daily_rollup_freshness = {
+        status: 'ALERT',
+        latest_date: latestDate,
+        message: `nightly data stale since ${staleSince}`,
+      };
+      verdict = 'ALERT';
+      details.push(`nightly data stale since ${staleSince}`);
+    } else {
+      checks.daily_rollup_freshness = {
+        status: 'OK',
+        latest_date: latestDate,
+        message: `nightly data current through ${latestDate}`,
+      };
+    }
+  } catch (e) {
+    checks.daily_rollup_freshness = { status: 'ERROR', message: `DB query failed: ${e.message}` };
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
 // LIVENESS
 // ---------------------------------------------------------------------------
 {

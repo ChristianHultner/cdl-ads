@@ -1,5 +1,6 @@
 #!/bin/sh
 cd /Users/christianhultner/cdl-ads || exit 1
+mkdir -p /Users/christianhultner/cdl-ads/logs
 set -a
 . ./.env.local
 . /Users/christianhultner/secrets/cdl-ads-lwa.env

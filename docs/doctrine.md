@@ -11,6 +11,12 @@ Sources: `scripts/generate-recommendations.mjs` · `scripts/reject-stale-recomme
 
 ---
 
+## Cron resilience
+
+Every `scripts/cron-*.sh` creates `/Users/christianhultner/cdl-ads/logs` immediately after entering the repository; `logs/.gitkeep` preserves the directory in every checkout while log contents remain untracked. The watchdog independently alarms through its existing notify path with `nightly data stale since <date>` when `MAX(daily_rollup.date)` is older than two days. Never run `sh -x` on scripts that source environment files because tracing exposes secret values.
+
+---
+
 ## GP Basis
 
 **Ruling (migration 028, 2026-08-27):** Engine GP is computed as `purchases_14d × gp_per_order − spend`, per profile, in native currency. No FX conversion is ever applied.
