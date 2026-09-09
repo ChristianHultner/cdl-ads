@@ -268,6 +268,13 @@
   font-weight: 700;
 }
 
+.channelFreshness {
+  margin-top: -4px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
 .channelMetrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

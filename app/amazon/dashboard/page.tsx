@@ -360,7 +360,7 @@ export default async function DashboardPage() {
     }
 
     if (pts.length === 0) continue  // < 12 consecutive months (e.g. CA) — silently omit
-    ltMarkets.push({ country, currency, gpPerOrder, points: pts })
+    ltMarkets.push({ country, currency, gpPerOrder, points: pts, axisLabels: [] })
   }
 
   // vendor_history stays a separate display-only truth layer. Its rolling-12
@@ -402,7 +402,26 @@ export default async function DashboardPage() {
     }
 
     if (points.length === 0) continue
-    vendorMarkets.push({ country, currency: rows[0]?.currency ?? '', points })
+    vendorMarkets.push({ country, currency: rows[0]?.currency ?? '', points, axisLabels: [] })
+  }
+
+  // Every long-term chart uses the union of valid rolling-12 endpoints from
+  // both display-only truth layers. A layer can therefore end earlier without
+  // suppressing the newer point from the other layer.
+  const longTermCountries = new Set([
+    ...ltMarkets.map(market => market.country),
+    ...vendorMarkets.map(market => market.country),
+  ])
+  for (const country of longTermCountries) {
+    const axisLabels = [...new Set([
+      ...(ltMarkets.find(market => market.country === country)?.points.map(point => point.label) ?? []),
+      ...(vendorMarkets.find(market => market.country === country)?.points.map(point => point.label) ?? []),
+    ])].sort()
+
+    const consoleMarket = ltMarkets.find(market => market.country === country)
+    const vendorMarket = vendorMarkets.find(market => market.country === country)
+    if (consoleMarket) consoleMarket.axisLabels = axisLabels
+    if (vendorMarket) vendorMarket.axisLabels = axisLabels
   }
 
   // ── Shape machine footer ─────────────────────────────────────────────────

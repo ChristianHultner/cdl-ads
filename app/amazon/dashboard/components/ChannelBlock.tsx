@@ -33,29 +33,35 @@ export default function ChannelBlock({
 }: ChannelBlockProps) {
   if (gpPerOrder == null) return null
 
-  const window = latestConsecutiveQuarter(vendorRows.filter(row => row.market === market))
+  const marketVendorRows = vendorRows.filter(row => row.market === market)
+  const marketConsoleRows = consoleRows.filter(row => row.market === market)
+  const consoleByMonth = new Map(
+    marketConsoleRows.map(row => [monthKey(row), row]),
+  )
+  const window = latestConsecutiveQuarter(
+    marketVendorRows.filter(row => consoleByMonth.has(monthKey(row))),
+  )
   if (!window) return null
 
-  const consoleByMonth = new Map(
-    consoleRows
-      .filter(row => row.market === market)
-      .map(row => [monthKey(row), row]),
-  )
   const matchingConsole = window.map(row => consoleByMonth.get(monthKey(row)))
-  if (matchingConsole.some(row => row == null)) return null
-
   const consoleWindow = matchingConsole as ChannelConsoleRow[]
   const vendorUnits = window.reduce((sum, row) => sum + row.units, 0)
   const consoleSpend = consoleWindow.reduce((sum, row) => sum + row.spend, 0)
   const consoleOrders = consoleWindow.reduce((sum, row) => sum + row.orders, 0)
   const channelGp = vendorUnits * gpPerOrder - consoleSpend
   const attributionShare = vendorUnits > 0 ? consoleOrders / vendorUnits * 100 : null
+  const latestVendor = latestMonth(marketVendorRows)
+  const latestConsole = latestMonth(marketConsoleRows)
+  const freshness = latestVendor && latestConsole && monthKey(latestVendor) !== monthKey(latestConsole)
+    ? `vendor through ${formatMonth(latestVendor)}, console through ${formatMonth(latestConsole)}`
+    : null
 
   return (
     <div className={styles.channelBlock}>
       <div className={styles.channelTitle}>
         Whole Amazon channel · {formatWindow(window)} (sell-in)
       </div>
+      {freshness && <div className={styles.channelFreshness}>{freshness}</div>}
       <div className={styles.channelMetrics}>
         <div>
           <span className={styles.channelLabel}>units/mo</span>
@@ -91,10 +97,13 @@ function latestConsecutiveQuarter(rows: ChannelVendorRow[]) {
 }
 
 function formatWindow(rows: ChannelVendorRow[]) {
-  return `${formatMonth(rows[0])}–${formatMonth(rows[2])}`
+  if (rows[0].year === rows[2].year) {
+    return `${formatMonth(rows[0])}–${formatMonth(rows[2])} ${rows[2].year}`
+  }
+  return `${formatMonth(rows[0])} ${rows[0].year}–${formatMonth(rows[2])} ${rows[2].year}`
 }
 
-function formatMonth(row: ChannelVendorRow) {
+function formatMonth(row: { year: number; month: number }) {
   return new Intl.DateTimeFormat('en-GB', { month: 'short', timeZone: 'UTC' })
     .format(new Date(Date.UTC(row.year, row.month - 1, 1)))
 }
@@ -105,4 +114,10 @@ function monthKey(row: { year: number; month: number }) {
 
 function monthNumber(row: { year: number; month: number }) {
   return row.year * 12 + row.month
+}
+
+function latestMonth<T extends { year: number; month: number }>(rows: T[]) {
+  return rows.reduce<T | null>((latest, row) => (
+    latest == null || monthNumber(row) > monthNumber(latest) ? row : latest
+  ), null)
 }

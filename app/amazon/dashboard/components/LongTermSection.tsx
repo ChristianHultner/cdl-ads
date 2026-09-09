@@ -34,6 +34,7 @@ export interface LongTermMarket {
   currency:   string
   gpPerOrder: number | null
   points:     LongTermPoint[]
+  axisLabels: string[]
 }
 
 export interface VendorLongTermPoint {
@@ -43,9 +44,10 @@ export interface VendorLongTermPoint {
 }
 
 export interface VendorLongTermMarket {
-  country:  string
-  currency: string
-  points:   VendorLongTermPoint[]
+  country:    string
+  currency:   string
+  points:     VendorLongTermPoint[]
+  axisLabels: string[]
 }
 
 const TAB_ORDER = ['ES', 'US', 'MX', 'UK', 'CA', 'DE', 'FR', 'IT']
@@ -169,44 +171,58 @@ const legendStyle = {
 function RollingChart({
   market,
   vendor,
+  axisLabels,
   showValues,
 }: {
-  market: LongTermMarket
+  market?: LongTermMarket
   vendor?: VendorLongTermMarket
+  axisLabels: string[]
   showValues: boolean
 }) {
-  if (market.points.length === 0) {
+  if (axisLabels.length === 0) {
     return <div className={styles.chartEmpty}>No rolling-12 data (need 12 consecutive months)</div>
   }
 
-  const vendorRevenue = vendor?.currency === market.currency
+  const currency = market?.currency ?? vendor?.currency ?? ''
+  const consolePoints = new Map(market?.points.map(point => [point.label, point]) ?? [])
+  const vendorRevenue = vendor?.currency === currency
     ? new Map(vendor.points.map(point => [point.label, point.revenue12]))
     : new Map<string, number>()
-  const gpLabel = market.gpPerOrder != null ? 'Rolling-12 GP' : 'Rolling-12 GP (rev)'
-  const data = market.points.map(point => ({
-    label: point.label,
-    sales12: point.sales12,
-    spend12: point.spend12,
-    gp12: profileGP(market.gpPerOrder, point.orders12, point.sales12, point.spend12),
-    vendorRevenue12: vendorRevenue.get(point.label),
-  }))
+  const gpLabel = market?.gpPerOrder != null ? 'Rolling-12 GP' : 'Rolling-12 GP (rev)'
+  const data = axisLabels.map(label => {
+    const point = consolePoints.get(label)
+    return {
+      label,
+      sales12: point?.sales12,
+      spend12: point?.spend12,
+      gp12: point
+        ? profileGP(market?.gpPerOrder ?? null, point.orders12, point.sales12, point.spend12)
+        : undefined,
+      vendorRevenue12: vendorRevenue.get(label),
+    }
+  })
+  const hasConsole = data.some(point => typeof point.sales12 === 'number')
   const hasVendorRevenue = data.some(point => typeof point.vendorRevenue12 === 'number')
   const series: TooltipSeries[] = [
-    { key: 'sales12', name: 'Rolling-12 Sales', color: 'var(--blue)' },
-    { key: 'spend12', name: 'Rolling-12 Spend', color: 'var(--neg)' },
-    { key: 'gp12', name: gpLabel, color: 'var(--pos)' },
+    ...(hasConsole
+      ? [
+          { key: 'sales12', name: 'Rolling-12 Sales', color: 'var(--blue)' },
+          { key: 'spend12', name: 'Rolling-12 Spend', color: 'var(--neg)' },
+          { key: 'gp12', name: gpLabel, color: 'var(--pos)' },
+        ]
+      : []),
     ...(hasVendorRevenue
       ? [{ key: 'vendorRevenue12', name: 'Rolling-12 Vendor Revenue (sell-in)', color: '#8A5BB8' }]
       : []),
   ]
-  const plottedValues = data.flatMap(point => [
-    point.sales12,
-    point.spend12,
-    point.gp12,
-    ...(typeof point.vendorRevenue12 === 'number' ? [point.vendorRevenue12] : []),
-  ])
+  const plottedValues: number[] = []
+  for (const point of data) {
+    for (const value of [point.sales12, point.spend12, point.gp12, point.vendorRevenue12]) {
+      if (typeof value === 'number') plottedValues.push(value)
+    }
+  }
   const crossesZero = Math.min(...plottedValues) < 0 && Math.max(...plottedValues) > 0
-  const money = (value: number) => formatMoney(value, market.currency)
+  const money = (value: number) => formatMoney(value, currency)
 
   return (
     <div className={styles.longTermChart}>
@@ -227,7 +243,7 @@ function RollingChart({
             axisLine={false}
             tickLine={false}
             tick={axisTick}
-            tickFormatter={value => formatAxisMoney(Number(value), market.currency)}
+            tickFormatter={value => formatAxisMoney(Number(value), currency)}
             width={76}
           />
           <Tooltip
@@ -244,7 +260,7 @@ function RollingChart({
             labelStyle={{ color: 'var(--ink)' }}
           />
           {crossesZero && <ReferenceLine y={0} stroke="var(--ink)" strokeWidth={1.5} />}
-          <Line
+          {hasConsole && <Line
             dataKey="sales12"
             name="Rolling-12 Sales"
             stroke="var(--blue)"
@@ -256,11 +272,11 @@ function RollingChart({
             {showValues && (
               <LabelList
                 dataKey="sales12"
-                content={pointLabel({ color: 'var(--blue)', offset: -10, formatter: value => formatAxisMoney(value, market.currency) })}
+                content={pointLabel({ color: 'var(--blue)', offset: -10, formatter: value => formatAxisMoney(value, currency) })}
               />
             )}
-          </Line>
-          <Line
+          </Line>}
+          {hasConsole && <Line
             dataKey="spend12"
             name="Rolling-12 Spend"
             stroke="var(--neg)"
@@ -272,11 +288,11 @@ function RollingChart({
             {showValues && (
               <LabelList
                 dataKey="spend12"
-                content={pointLabel({ color: 'var(--neg)', offset: -10, formatter: value => formatAxisMoney(value, market.currency) })}
+                content={pointLabel({ color: 'var(--neg)', offset: -10, formatter: value => formatAxisMoney(value, currency) })}
               />
             )}
-          </Line>
-          <Line
+          </Line>}
+          {hasConsole && <Line
             dataKey="gp12"
             name={gpLabel}
             stroke="var(--pos)"
@@ -288,10 +304,10 @@ function RollingChart({
             {showValues && (
               <LabelList
                 dataKey="gp12"
-                content={pointLabel({ color: 'var(--pos)', offset: 16, formatter: value => formatAxisMoney(value, market.currency) })}
+                content={pointLabel({ color: 'var(--pos)', offset: 16, formatter: value => formatAxisMoney(value, currency) })}
               />
             )}
-          </Line>
+          </Line>}
           {hasVendorRevenue && (
             <Line
               dataKey="vendorRevenue12"
@@ -299,7 +315,6 @@ function RollingChart({
               stroke="#8A5BB8"
               strokeWidth={1.75}
               strokeDasharray="6 4"
-              connectNulls
               dot={false}
               activeDot={{ r: 3, strokeWidth: 0 }}
               isAnimationActive={false}
@@ -307,7 +322,7 @@ function RollingChart({
               {showValues && (
                 <LabelList
                   dataKey="vendorRevenue12"
-                  content={pointLabel({ color: '#8A5BB8', offset: 16, formatter: value => formatAxisMoney(value, market.currency) })}
+                  content={pointLabel({ color: '#8A5BB8', offset: 16, formatter: value => formatAxisMoney(value, currency) })}
                 />
               )}
             </Line>
@@ -321,40 +336,45 @@ function RollingChart({
 function UnitsPanel({
   market,
   vendor,
+  axisLabels,
   showValues,
 }: {
-  market: LongTermMarket
+  market?: LongTermMarket
   vendor: VendorLongTermMarket
+  axisLabels: string[]
   showValues: boolean
 }) {
   const vendorPoints = new Map(vendor.points.map(point => [point.label, point]))
-  const data = market.points.map(point => {
-    const vendorPoint = vendorPoints.get(point.label)
-    if (!vendorPoint) {
-      return {
-        label: point.label,
-        vendorUnits: undefined,
-        attributedUnits: undefined,
-        gapBand: undefined,
-      }
-    }
-    const gapBand: [number, number] = [
-      Math.min(vendorPoint.units12, point.orders12),
-      Math.max(vendorPoint.units12, point.orders12),
-    ]
+  const consolePoints = new Map(market?.points.map(point => [point.label, point]) ?? [])
+  const data = axisLabels.map(label => {
+    const vendorPoint = vendorPoints.get(label)
+    const consolePoint = consolePoints.get(label)
+    const gapBand: [number, number] | undefined = vendorPoint && consolePoint
+      ? [
+          Math.min(vendorPoint.units12, consolePoint.orders12),
+          Math.max(vendorPoint.units12, consolePoint.orders12),
+        ]
+      : undefined
     return {
-      label: point.label,
-      vendorUnits: vendorPoint.units12,
-      attributedUnits: point.orders12,
+      label,
+      vendorUnits: vendorPoint?.units12,
+      attributedUnits: consolePoint?.orders12,
       gapBand,
     }
   })
 
-  if (!data.some(point => typeof point.vendorUnits === 'number')) return null
+  const hasVendorUnits = data.some(point => typeof point.vendorUnits === 'number')
+  const hasAttributedUnits = data.some(point => typeof point.attributedUnits === 'number')
+  const hasGap = data.some(point => point.gapBand != null)
+  if (!hasVendorUnits && !hasAttributedUnits) return null
 
   const series: TooltipSeries[] = [
-    { key: 'vendorUnits', name: 'Vendor units (sell-in)', color: '#8A5BB8' },
-    { key: 'attributedUnits', name: 'Attributed orders', color: 'var(--blue)' },
+    ...(hasVendorUnits
+      ? [{ key: 'vendorUnits', name: 'Vendor units (sell-in)', color: '#8A5BB8' }]
+      : []),
+    ...(hasAttributedUnits
+      ? [{ key: 'attributedUnits', name: 'Attributed orders', color: 'var(--blue)' }]
+      : []),
   ]
 
   return (
@@ -393,7 +413,7 @@ function UnitsPanel({
             wrapperStyle={legendStyle}
             labelStyle={{ color: 'var(--ink)' }}
           />
-          <Area
+          {hasGap && <Area
             dataKey="gapBand"
             name="Gap"
             fill="#8A5BB8"
@@ -404,8 +424,8 @@ function UnitsPanel({
             legendType="none"
             tooltipType="none"
             isAnimationActive={false}
-          />
-          <Line
+          />}
+          {hasVendorUnits && <Line
             dataKey="vendorUnits"
             name="Vendor units (sell-in)"
             stroke="#8A5BB8"
@@ -421,8 +441,8 @@ function UnitsPanel({
                 content={pointLabel({ color: '#8A5BB8', offset: 16, formatter: formatUnits })}
               />
             )}
-          </Line>
-          <Line
+          </Line>}
+          {hasAttributedUnits && <Line
             dataKey="attributedUnits"
             name="Attributed orders"
             stroke="var(--blue)"
@@ -437,7 +457,7 @@ function UnitsPanel({
                 content={pointLabel({ color: 'var(--blue)', offset: -10, formatter: formatUnits })}
               />
             )}
-          </Line>
+          </Line>}
         </LineChart>
       </ResponsiveContainer>
     </div>
@@ -451,19 +471,27 @@ export default function LongTermSection({
   markets: LongTermMarket[]
   vendorMarkets: VendorLongTermMarket[]
 }) {
-  const active = TAB_ORDER
-    .map(country => markets.find(market => market.country === country))
-    .filter((market): market is LongTermMarket => !!market && market.points.length > 0)
+  const availableCountries = new Set([
+    ...markets.filter(market => market.points.length > 0).map(market => market.country),
+    ...vendorMarkets.filter(market => market.points.length > 0).map(market => market.country),
+  ])
+  const active = [
+    ...TAB_ORDER.filter(country => availableCountries.has(country)),
+    ...[...availableCountries].filter(country => !TAB_ORDER.includes(country)).sort(),
+  ]
 
-  const [tab, setTab] = useState(active[0]?.country ?? 'ES')
+  const [tab, setTab] = useState(active[0] ?? 'ES')
   const [showValues, setShowValues] = useState(true)
-  const current = active.find(market => market.country === tab) ?? active[0]
-  const currentVendor = vendorMarkets.find(market => market.country === current?.country)
+  const currentCountry = active.includes(tab) ? tab : active[0]
+  const current = markets.find(market => market.country === currentCountry)
+  const currentVendor = vendorMarkets.find(market => market.country === currentCountry)
 
-  if (!current) return null
+  if (!currentCountry) return null
+
+  const axisLabels = current?.axisLabels ?? currentVendor?.axisLabels ?? []
 
   const latestVendorPoint = currentVendor?.points.at(-1)
-  const latestConsolePoint = latestVendorPoint
+  const latestConsolePoint = latestVendorPoint && current
     ? current.points.find(point => point.label === latestVendorPoint.label)
     : undefined
   const unitsCaption = latestVendorPoint && latestConsolePoint
@@ -473,15 +501,15 @@ export default function LongTermSection({
   return (
     <div className={styles.chartSection}>
       <div className={styles.chartTabs}>
-        {active.map(market => {
-          const isActive = market.country === tab
+        {active.map(country => {
+          const isActive = country === currentCountry
           return (
             <button
-              key={market.country}
-              onClick={() => setTab(market.country)}
+              key={country}
+              onClick={() => setTab(country)}
               className={`${styles.chartTab} ${isActive ? styles.chartTabActive : ''}`}
             >
-              {market.country}
+              {country}
             </button>
           )
         })}
@@ -497,16 +525,16 @@ export default function LongTermSection({
       </div>
 
       <div className={styles.chartPanel}>
-        <h3 className={styles.panelTitle}>{COUNTRY_NAMES[current.country] ?? current.country}, rolling 12 months</h3>
+        <h3 className={styles.panelTitle}>{COUNTRY_NAMES[currentCountry] ?? currentCountry}, rolling 12 months</h3>
         <div className={styles.panelCaption}>Each point is a full year ending that month — seasonality removed.</div>
-        <RollingChart market={current} vendor={currentVendor} showValues={showValues} />
-        <div className={styles.panelSource}>sources: console exports (all ad types){currentVendor ? ' · vendor invoices (sell-in)' : ''}</div>
+        <RollingChart market={current} vendor={currentVendor} axisLabels={axisLabels} showValues={showValues} />
+        <div className={styles.panelSource}>sources: {current ? 'console exports (all ad types)' : ''}{current && currentVendor ? ' · ' : ''}{currentVendor ? 'vendor invoices (sell-in)' : ''}</div>
       </div>
       {currentVendor && (
         <div className={styles.chartPanel}>
-          <h3 className={styles.panelTitle}>What ads can&apos;t see · {COUNTRY_NAMES[current.country] ?? current.country}</h3>
+          <h3 className={styles.panelTitle}>What ads can&apos;t see · {COUNTRY_NAMES[currentCountry] ?? currentCountry}</h3>
           <div className={styles.panelCaption}>{unitsCaption}</div>
-          <UnitsPanel market={current} vendor={currentVendor} showValues={showValues} />
+          <UnitsPanel market={current} vendor={currentVendor} axisLabels={axisLabels} showValues={showValues} />
           <div className={styles.panelSource}>sources: vendor invoices (sell-in) · console exports (all ad types) · read quarterly</div>
         </div>
       )}
