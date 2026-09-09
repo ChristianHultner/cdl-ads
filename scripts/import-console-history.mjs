@@ -5,7 +5,7 @@
 //
 // display-only truth layer — writes ONLY to console_history.
 // All-or-nothing per file: any unknown currency aborts before any DB write.
-// Skips year=2026 month=8 (partial month).
+// Skips the current and future months in Europe/Madrid.
 
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -15,8 +15,16 @@ import { Pool, neonConfig } from '@neondatabase/serverless';
 neonConfig.webSocketConstructor = WebSocket;
 
 const CURRENCY_MAP = { USD: 'US', MXN: 'MX', CAD: 'CA', EUR: 'ES' };
-const SKIP_YEAR = 2026;
-const SKIP_MONTH = 8;
+
+const madridDateParts = Object.fromEntries(
+  new Intl.DateTimeFormat('en', {
+    timeZone: 'Europe/Madrid',
+    year: 'numeric',
+    month: 'numeric',
+  }).formatToParts().map(({ type, value }) => [type, value])
+);
+const currentYear = Number(madridDateParts.year);
+const currentMonth = Number(madridDateParts.month);
 
 // ---------- CSV helpers ----------
 
@@ -98,6 +106,7 @@ if (unknown.size > 0) {
 // Aggregate by (currency, year, month)
 const agg = new Map();
 let skippedPartial = 0;
+const skippedMonths = new Set();
 
 for (const row of rows) {
   const currency = (row['Budget currency'] || '').trim();
@@ -106,7 +115,11 @@ for (const row of rows) {
 
   if (!currency || !year || !month) continue;
 
-  if (year === SKIP_YEAR && month === SKIP_MONTH) { skippedPartial++; continue; }
+  if (year > currentYear || (year === currentYear && month >= currentMonth)) {
+    skippedPartial++;
+    skippedMonths.add(`${year}-${String(month).padStart(2, '0')}`);
+    continue;
+  }
 
   const market = CURRENCY_MAP[currency];
   const key    = `${market}|${currency}|${year}|${month}`;
@@ -120,7 +133,7 @@ for (const row of rows) {
   agg.set(key, bucket);
 }
 
-console.log(`Skipped ${skippedPartial} rows (partial ${SKIP_YEAR}-${String(SKIP_MONTH).padStart(2, '0')})`);
+console.log(`Skipped ${skippedPartial} rows (months: ${[...skippedMonths].sort().join(', ') || 'none'})`);
 console.log(`Aggregated into ${agg.size} (market, year, month) buckets`);
 
 const { DATABASE_URL } = process.env;
