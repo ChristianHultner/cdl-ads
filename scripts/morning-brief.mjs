@@ -219,6 +219,7 @@ const syncLine = await safe('Sync', async () => {
         FROM amazon_profiles p
         LEFT JOIN amazon_campaign_daily d ON d.profile_id = p.profile_id
        WHERE p.profile_id::text <> '1068790837798301'
+         AND p.is_active
        GROUP BY p.profile_id, p.country_code
        ORDER BY p.country_code`,
     );

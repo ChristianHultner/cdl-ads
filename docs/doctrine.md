@@ -15,6 +15,14 @@ Sources: `scripts/generate-recommendations.mjs` · `scripts/reject-stale-recomme
 
 Every `scripts/cron-*.sh` creates `/Users/christianhultner/cdl-ads/logs` immediately after entering the repository; `logs/.gitkeep` preserves the directory in every checkout while log contents remain untracked. The watchdog independently alarms through its existing notify path with `nightly data stale since <date>` when `MAX(daily_rollup.date)` is older than two days. Never run `sh -x` on scripts that source environment files because tracing exposes secret values.
 
+## Parked markets
+
+**Christian's ruling (2026-09-13):** FR, IT and DE are parked until Amazon access is fixed. Profile IDs were resolved by `country_code`: FR `3035560362970447`, IT `2286455750996728`, DE `2213278747143677`.
+
+**Effects:** `amazon_profiles.is_active = false` for these three countries. Their IDs are removed from all three `for P in` loops in `scripts/cron-nightly.sh` and both loops in `scripts/cron-weekly.sh`, so launchd no longer runs those per-profile jobs for them. Watchdog completion/freshness reporting and the morning brief's `Sync STALE` query require `p.is_active`; the existing CA2 exclusion remains unchanged. CA2 (the retired second CA account) is outside this ruling.
+
+**Reversal, never deletion:** No profiles or historical rows are deleted. After access is fixed, resolve the IDs again by `country_code`, then run one `UPDATE amazon_profiles SET is_active = true WHERE country_code IN ('FR','IT','DE');` (expect `UPDATE 3`) and verify with a SELECT. Restore those resolved IDs to all five cron loops (original suffix order: DE, FR, IT). Keep the `is_active` freshness filters and CA2 exclusion in place; reactivated profiles automatically re-enter those checks. This restores the launchd jobs only; the separate Vercel allowlist is unchanged by this ruling.
+
 ## Amazon sync on Vercel cron
 
 **Parallel-run skeleton (2026-09-13, migration 031).** `/api/amazon/sync/[step]` and `lib/amazon/sync-runner.ts` copy-adapt the Google lane's shape without importing or editing any Google implementation. Bearer `CRON_SECRET` authentication precedes step validation and the `DATABASE_URL` host guard for `ep-lucky-thunder-afwxriyy` (including its pooler). Runtime is Node.js, `maxDuration=300`, and the handler is explicitly dynamic. Module initialization never opens a Pool, mints credentials, or runs a sync; no Amazon calls occur during builds.
