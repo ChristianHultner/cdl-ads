@@ -41,6 +41,76 @@ Both steps check the 240-second soft wall cap between reports/requests and recor
 
 ---
 
+## Margin objective (engine)
+
+**Ruling (2026-09-13; supersedes the legacy band/bid/budget/pause descriptions below):**
+For `BID_ADJUST`, `BUDGET_ADJUST` and standard `PAUSE_CAMPAIGN`, non-null
+`amazon_profiles.gp_per_order` selects the margin objective: ES 5.00, US 4.40,
+UK 4.00 in native currency per order. `target_acos` is retired as a decision
+input on these unit-basis paths; it remains display context and the unchanged
+decision input for revenue-basis profiles (including MX and CA, where GP is
+null). Other recommendation types are outside this migration.
+
+- `cpo = cost / orders` over the rule's existing window; `gp = gp_per_order`.
+  Zero orders means undefined CPO (`null` in evidence), not zero CPO.
+- `V_margin = round(gp * orders / clicks, 2)` replaces revenue value per click
+  `(sales / clicks) * target_acos` wherever the bid rule uses that value,
+  including its comparison with the current bid. Zero clicks gives null.
+- Market bands use aggregate 30-day CPO: below when `cpo < 0.9 * gp`, in when
+  `0.9 * gp <= cpo <= 1.1 * gp`, above when `cpo > 1.1 * gp`; unknown stays in.
+  Revenue bands remain `target_acos +/- 0.05`.
+- **BID_ADJUST:** RAISE requires `cpo < 0.8 * gp`, orders >= 3 and
+  `V_margin > current_bid`; CUT requires `cpo > gp`, `V_margin < current_bid`
+  and clicks >= `2 * v6_min_clicks`. The existing base sample gate (clicks OR
+  orders, half click floor below-band), steps, caps, rounding and minimum
+  absolute delta 0.02 remain. Margin cuts do not use the old ACoS band ceiling,
+  and margin raises do not use the old above-band 30% ACoS test. DEFUSE's
+  action and bid formula remain unchanged: sales <= 0 enters the DEFUSE path
+  (TARGET with spend > 0 only), even when orders > 0; no margin branch there.
+- **BID cooldown (all profiles):** DRAFT/APPROVED block without expiry; PUSHED
+  blocks the same entity for 14 days from `pushed_at` (strictly newer than
+  now minus 14 days). A missing `pushed_at` means no cooldown.
+  Legacy entity IDs are resolved from evidence too. REVIVE is campaign-wide:
+  its open/recently pushed recommendation protects the campaign's entities;
+  any open/recent entity recommendation blocks a new REVIVE for that campaign.
+  REVIVE's median/suggestion mechanics remain; unit-basis with no median uses
+  the ruled fixed 0.30 fallback, not `target_acos`; revenue fallback is unchanged.
+- **BUDGET_ADJUST, reconciled:** retain `avg_daily_spend >= 0.85 * budget`,
+  rounded orders >= 5 and the raise formula
+  `min(round(budget * 1.5, 2), round(budget + 20, 2))`, strictly above budget.
+  Only the profitability gate changes to `cpo_30d <= gp` on unit-basis.
+  Add a unit-only lower path: `cpo_30d > 1.2 * gp` AND orders_30d >= 10;
+  propose `round(max(1.2 * avg_daily_spend, 1.00), 2)`, strictly below budget.
+  The superseded +25% / 15 capped-days proposal is not implemented.
+- **Standard PAUSE_CAMPAIGN, unit-basis:** ENABLED AND spend_30d >= 30 AND
+  (orders_30d = 0 OR cpo_30d >= 2 * gp). Revenue-basis keeps the original
+  zero-sales / ACoS >= 1.0 test. Existing budget/pause DRAFT/APPROVED/PUSHED
+  one-open-rec guards retain no expiry; enabled destination checks remain.
+- **DORMANT_90, all profiles:** ENABLED AND orders_90d = 0 AND campaign
+  start_date <= today minus 30 days AND name does not match
+  `/D[IÍ]A DEL PADRE|D[IÍ]A DE LA MADRE|NAVIDAD/i`. Emit PAUSE_CAMPAIGN with
+  evidence kind `dormant_90d`. The window is the 90 complete days through
+  yesterday. ISO and YYYYMMDD start dates are accepted; missing/invalid dates
+  do not qualify. The old DORMANT criteria are unchanged. Re-read pause guards
+  after earlier pause paths so a campaign cannot receive two pause drafts.
+- **Experiment exemption, all profiles and all paths of these three types:**
+  read every LIVE experiment's `structure_ref.campaign_id` and
+  `structure_ref.selection[].campaign_id`, with exact campaign-name fallback
+  from the corresponding `campaign_name` fields. Do not read `not_selected`.
+  Skip protected campaigns before existing-rec guards and again at the shared
+  insert boundary. `skipped_experiment: N` counts distinct skipped type/target
+  pairs encountered in the candidate loops, not distinct experiments.
+- **Evidence and execution:** stamp `gp_basis: unit|revenue` and
+  `objective: margin|acos` on all three types, including REVIVE and dormant.
+  Unit evidence carries `cpo`, `gp`, `V_margin`; CPO is null when undefined or
+  not available for an unchanged legacy path; V_margin is null for campaign
+  budget/pause/REVIVE cards without per-click bid arithmetic. Existing ACoS
+  evidence is retained for display/revenue basis; Cut GP-at-risk remains
+  `round(orders * gp - spend, 2)`. The shared writer explicitly inserts DRAFT;
+  other generation paths retain their DRAFT default. Generation never approves
+  or pushes. The frame's only DB-writing generator run is ES; Christian checks
+  card arithmetic before any later approval. No push is authorized here.
+
 ## GP Basis
 
 **Ruling (migration 028, 2026-08-27):** Engine GP is computed as `purchases_14d × gp_per_order − spend`, per profile, in native currency. No FX conversion is ever applied.

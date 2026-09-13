@@ -6,6 +6,41 @@ import { fileURLToPath }    from 'node:url';
 import { join, dirname }    from 'node:path';
 import { Pool, neonConfig } from '@neondatabase/serverless';
 import { isbn13ToIsbn10 }   from './lib/isbn.mjs';
+import assert from 'node:assert/strict';
+
+// Pure margin arithmetic; --self-test exits before argument resolution or DB access.
+function marginValue(gp, orders, clicks) {
+  return clicks > 0 ? Math.round(gp * orders / clicks * 100) / 100 : null;
+}
+function costPerOrder(cost, orders) {
+  return orders > 0 ? cost / orders : null;
+}
+function marginZone(cpo, gp) {
+  return cpo == null ? 'in' : cpo < 0.9 * gp ? 'below' : cpo <= 1.1 * gp ? 'in' : 'above';
+}
+function campaignStartDate(value) {
+  const raw = String(value ?? '');
+  const iso = /^\d{8}$/.test(raw) ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6)}` : raw;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const ms = Date.parse(iso + 'T00:00:00Z');
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === iso ? iso : null;
+}
+if (process.argv.includes('--self-test')) {
+  assert.equal(marginValue(5, 12, 400), 0.15);
+  console.log('V_margin(gp=5, orders=12, clicks=400): 0.15');
+  for (const [cpo, expected] of [[4.4, 'below'], [5.0, 'in'], [5.6, 'above']]) {
+    assert.equal(marginZone(cpo, 5), expected);
+    console.log(`band(cpo=${cpo.toFixed(1)}, gp=5): ${expected}`);
+  }
+  assert.equal(marginZone(4.5, 5), 'in');
+  assert.equal(marginZone(5.5, 5), 'in');
+  assert.equal(costPerOrder(30, 0), null);
+  assert.equal(marginValue(5, 0, 0), null);
+  assert.equal(campaignStartDate('20260814'), '2026-08-14');
+  assert.equal(campaignStartDate('2026-02-30'), null);
+  console.log('Self-test: PASS (including boundaries, zero denominators and start dates)');
+  process.exit(0);
+}
 
 // Node 22+ native WebSocket
 neonConfig.webSocketConstructor = WebSocket;
@@ -90,12 +125,15 @@ params.target_acos = Number(profileRows[0].target_acos);
 // L3.2: gp_per_order basis for generator gates.
 const gpPerOrder = profileRows[0].gp_per_order != null ? Number(profileRows[0].gp_per_order) : null;
 const gpBasis    = gpPerOrder != null ? 'unit' : 'revenue';
+const unitBasis  = gpPerOrder != null;
+const objective  = unitBasis ? 'margin' : 'acos';
 const CURRENCY_SYMBOL = { EUR: '€', USD: '$', GBP: '£', CAD: 'CA$', MXN: 'MX$' };
 const currSym = CURRENCY_SYMBOL[currencyCode] ?? `${currencyCode}\u202f`;
 
 // ── L3.2: Market rolling ACoS + band computation ────────────────────────────
 const { rows: mktAcosRows } = await pool.query(
-  `SELECT (SUM(cost) / NULLIF(SUM(sales_14d), 0))::float AS rolling_acos
+  `SELECT (SUM(cost) / NULLIF(SUM(sales_14d), 0))::float AS rolling_acos,
+          (SUM(cost) / NULLIF(SUM(purchases_14d), 0))::float AS rolling_cpo
      FROM amazon_campaign_daily
     WHERE profile_id = $1
       AND date >= CURRENT_DATE - INTERVAL '30 days'`,
@@ -103,16 +141,52 @@ const { rows: mktAcosRows } = await pool.query(
 );
 const marketRollingAcos = mktAcosRows[0]?.rolling_acos != null
   ? Number(mktAcosRows[0].rolling_acos) : null;
-const bandLow  = params.target_acos - 0.05;
-const bandHigh = params.target_acos + 0.05;
-const marketZone = marketRollingAcos == null ? 'in'
+const marketRollingCpo = mktAcosRows[0]?.rolling_cpo != null ? Number(mktAcosRows[0].rolling_cpo) : null;
+const bandLow  = unitBasis ? gpPerOrder * 0.9 : params.target_acos - 0.05;
+const bandHigh = unitBasis ? gpPerOrder * 1.1 : params.target_acos + 0.05;
+const marketZone = unitBasis ? marginZone(marketRollingCpo, gpPerOrder)
+  : marketRollingAcos == null ? 'in'
   : marketRollingAcos < bandLow   ? 'below'
   : marketRollingAcos <= bandHigh ? 'in'
   : 'above';
 console.log(
+  unitBasis
+  ? `Market 30d CPO: ${marketRollingCpo ?? 'unknown'} — zone: ${marketZone} (GP/order ${gpPerOrder})`
+  :
   `Market 30d ACoS: ${marketRollingAcos != null ? (marketRollingAcos * 100).toFixed(1) + '%' : 'unknown'}` +
   ` — zone: ${marketZone} (band ${(bandLow*100).toFixed(0)}–${(bandHigh*100).toFixed(0)}%)`,
 );
+
+// LIVE experiments protect these three rec types, including REVIVE and dormant paths.
+const { rows: liveExperiments } = await pool.query(
+  `SELECT structure_ref FROM experiments WHERE status = 'LIVE'`,
+);
+const experimentIds = new Set();
+const experimentNames = new Set();
+for (const { structure_ref: ref } of liveExperiments) {
+  for (const entry of [ref, ...(Array.isArray(ref?.selection) ? ref.selection : [])]) {
+    if (entry?.campaign_id != null) experimentIds.add(String(entry.campaign_id));
+    if (entry?.campaign_name) experimentNames.add(entry.campaign_name);
+  }
+}
+const { rows: experimentCampaigns } = await pool.query(
+  `SELECT campaign_id::text AS campaign_id FROM amazon_campaigns
+    WHERE profile_id = $1 AND (campaign_id::text = ANY($2::text[]) OR name = ANY($3::text[]))`,
+  [profileId, [...experimentIds], [...experimentNames]],
+);
+const experimentCampaignSet = new Set(experimentCampaigns.map(r => r.campaign_id));
+const experimentSkipKeys = new Set();
+let skippedExperiment = 0;
+function skipExperiment(recType, campaignId, targetText) {
+  if (!['BID_ADJUST', 'BUDGET_ADJUST', 'PAUSE_CAMPAIGN'].includes(recType) ||
+      !experimentCampaignSet.has(String(campaignId))) return false;
+  const key = `${recType}|${targetText}`;
+  if (!experimentSkipKeys.has(key)) {
+    experimentSkipKeys.add(key);
+    skippedExperiment++;
+  }
+  return true;
+}
 
 // ── L3.2: Track-record from most-recent scorecard artifact ───────────────────
 const __scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -466,10 +540,14 @@ function resolveDestination(campaignId, evidence) {
 // existing destination and is exempt from this guard.
 async function insertDestinationDraft(recType, campaignId, targetText, proposal, evidence) {
   const destination = resolveDestination(campaignId, evidence);
+  if (skipExperiment(recType, destination.campaignId, targetText)) return false;
+  if (['BID_ADJUST', 'BUDGET_ADJUST', 'PAUSE_CAMPAIGN'].includes(recType)) {
+    evidence = { ...evidence, gp_basis: gpBasis, objective };
+  }
   const result = await pool.query(
     `INSERT INTO recommendations
-       (rec_type, profile_id, campaign_id, target_text, proposal, evidence)
-     SELECT $1, $2, $3, $4, $5, $6::jsonb
+       (rec_type, profile_id, campaign_id, target_text, proposal, evidence, status)
+     SELECT $1, $2, $3, $4, $5, $6::jsonb, 'DRAFT'
       WHERE EXISTS (
               SELECT 1
                 FROM amazon_campaigns c
@@ -977,16 +1055,25 @@ if (bidAgIds.length > 0) {
   for (const r of bidAgRows) bidAgNameMap.set(r.ad_group_id, r.name);
 }
 
-// Idempotency: open BID_ADJUST recs keyed on target_text = entity_id.
+// Open drafts/approvals block; PUSHED blocks for 14 days, not indefinitely.
 const { rows: openBidRows } = await pool.query(
-  `SELECT target_text
+  `SELECT target_text, evidence
      FROM recommendations
     WHERE profile_id = $1
       AND rec_type   = 'BID_ADJUST'
-      AND status     = ANY($2)`,
-  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+      AND (status = ANY($2) OR
+           (status = 'PUSHED' AND pushed_at > now() - INTERVAL '14 days'))`,
+  [profileId, ['DRAFT', 'APPROVED']],
 );
 const openBidSet = new Set(openBidRows.map((r) => r.target_text));
+const openBidCampaignSet = new Set();
+for (const row of openBidRows) {
+  const ev = row.evidence;
+  const id = ev?.entity_id ?? ev?.chosen_target?.target_id;
+  if (id != null) openBidSet.add(String(id));
+  // REVIVE pushes all enabled bids in a campaign, so protect its entities too.
+  if (ev?.kind === 'REVIVE') openBidCampaignSet.add(String(ev.campaign_id ?? row.target_text));
+}
 
 // Volume filter: entity must meet v6_min_clicks OR v6_min_orders, and have a bid.
 // L3.2: below-band markets use half the click floor for RAISE candidates.
@@ -1028,12 +1115,13 @@ if (bidRecEligibleIds.length > 0) {
 }
 
 for (const entity of bidEligible) {
+  if (skipExperiment('BID_ADJUST', entity.campaign_id, entity.entity_id)) continue;
   const currentBid = entity.current_bid;
   const agName     = bidAgNameMap.get(entity.ad_group_id);
   const kindPhrase = bidKindPhrase(entity, agName);
 
   // Idempotency — skip when open BID_ADJUST for this entity_id already exists.
-  if (openBidSet.has(entity.entity_id)) {
+  if (openBidSet.has(entity.entity_id) || openBidCampaignSet.has(entity.campaign_id)) {
     console.log(`  skipped (open rec exists): [BID_ADJUST] ${entity.entity_kind} ${entity.entity_id}`);
     skippedExisting++;
     continue;
@@ -1044,15 +1132,18 @@ for (const entity of bidEligible) {
   let vpc         = null;
   let boundBy     = 'none';
   let isDefuse    = false;
+  const cpo = costPerOrder(entity.spend, entity.orders);
+  const vMargin = unitBasis ? marginValue(gpPerOrder, entity.orders, entity.clicks) : null;
 
   if (entity.sales > 0) {
-    // vpc = value per click at target ACoS; sales > 0 and clicks > 0 required.
+    // Unit-basis uses order margin; revenue-basis retains the original value.
     if (entity.clicks === 0) continue;
-    vpc = Math.round((entity.sales / entity.clicks) * params.target_acos * 100) / 100;
+    vpc = unitBasis ? vMargin : Math.round((entity.sales / entity.clicks) * params.target_acos * 100) / 100;
 
-    if (entity.acos < params.target_acos && vpc > currentBid) {
+    if ((unitBasis ? cpo != null && cpo < 0.8 * gpPerOrder && entity.orders >= 3
+                   : entity.acos < params.target_acos) && vpc > currentBid) {
       // RAISE — L3.2 band-aware gates
-      if (marketZone === 'above') {
+      if (!unitBasis && marketZone === 'above') {
         // Repair market: proven winners only — ACoS ≤ 30% AND orders ≥ 3
         if (entity.acos > 0.30 || entity.orders < 3) continue;
       }
@@ -1067,7 +1158,8 @@ for (const entity of bidEligible) {
       direction     = 'Raise';
       if      (proposedBid === capBid  && capBid  <= vpc && capBid  <= stepBid) boundBy = 'cap';
       else if (proposedBid === stepBid && stepBid <= vpc)                        boundBy = 'step';
-    } else if (entity.acos > params.target_acos && vpc < currentBid) {
+    } else if ((unitBasis ? cpo != null && cpo > gpPerOrder
+                          : entity.acos > params.target_acos) && vpc < currentBid) {
       // CUT — L3.2 band-aware gate
       // Gate 1: entity ACoS must exceed band ceiling (market-zone adjusted)
       //   in/below-band markets: only extraordinary waste (ACoS > 2× ceiling = 70%)
@@ -1075,7 +1167,7 @@ for (const entity of bidEligible) {
       const cutMinAcos = (marketZone === 'in' || marketZone === 'below')
         ? bandHigh * 2   // 70% extraordinary waste
         : bandHigh;      // 35% standard repair-zone cut
-      if (entity.acos <= cutMinAcos) continue;
+      if (!unitBasis && entity.acos <= cutMinAcos) continue;
       // Gate 2: clicks >= 2× v6 click floor (high confidence required)
       if (entity.clicks < bidMinClicks * 2) continue;
       const step    = entity.entity_kind === 'AUTO_STRATEGY'
@@ -1132,6 +1224,11 @@ for (const entity of bidEligible) {
       `Defuse dormant target ${kindPhrase}: ` +
       `${currSym}${entity.spend.toFixed(2)} spend, ${entity.clicks} clicks, 0 sales in ` +
       `${windowStart} – ${windowEnd} — cut bid from ${curFmt} to ${propFmt}.${amzSuffix}`;
+  } else if (unitBasis) {
+    proposal = `${direction} bid on ${kindPhrase} from ${curFmt} to ${propFmt}: ` +
+      `CPO ${currSym}${cpo.toFixed(2)} vs GP/order ${currSym}${gpPerOrder.toFixed(2)}, ` +
+      `${entity.orders} orders / ${entity.clicks} clicks (${windowStart} – ${windowEnd}); ` +
+      `margin value/click ${currSym}${vMargin.toFixed(2)}.${boundSuffix}${amzSuffix}`;
   } else {
     const acosPct = (entity.acos * 100).toFixed(1);
     const cpcFmt  = entity.clicks > 0
@@ -1174,6 +1271,7 @@ for (const entity of bidEligible) {
     bound_by:          boundBy,
     market_zone:       marketZone,
     market_rolling_acos: marketRollingAcos,
+    ...(unitBasis ? { cpo, gp: gpPerOrder, V_margin: vMargin, market_rolling_cpo: marketRollingCpo } : {}),
     ...(direction === 'Cut' ? {
       est_saved_spend:    _estSavedSpend,
       est_at_risk_sales:  entity.sales,
@@ -1583,25 +1681,29 @@ const { rows: openBudgetRows } = await pool.query(
 const openBudgetSet = new Set(openBudgetRows.map(r => r.target_text));
 
 for (const row of budgetCampRows) {
+  if (skipExperiment('BUDGET_ADJUST', row.campaign_id, row.campaign_id)) continue;
   const budgetAmount  = row.budget_amount;
   const avgDailySpend = row.spend_30d / 30.0;
   const pctOfBudget   = budgetAmount > 0 ? (avgDailySpend / budgetAmount) * 100 : 0;
   const acos30d       = row.sales_30d > 0 ? row.spend_30d / row.sales_30d : null;
   const orders30d     = Math.round(row.orders_30d);
+  const cpo30d        = costPerOrder(row.spend_30d, row.orders_30d);
 
-  // BUDGET_ADJUST: state=ENABLED (filtered), avg_daily_spend >= budget*0.85,
-  // acos_30d < target_acos, orders_30d >= 5.
-  if (
-    avgDailySpend   < budgetAmount * 0.85 ||
-    acos30d === null                       ||
-    acos30d         >= params.target_acos  ||
-    orders30d       < 5
-  ) continue;
-
-  // proposed_budget = round(budget * 1.5, 2) capped at budget + 20.
-  const proposed150    = Math.round(budgetAmount * 1.5 * 100) / 100;
-  const proposedBudget = Math.min(proposed150, Math.round((budgetAmount + 20) * 100) / 100);
-  if (proposedBudget <= budgetAmount) continue; // no meaningful raise
+  let budgetDirection = 'Raise';
+  let proposedBudget;
+  if (unitBasis && cpo30d != null && cpo30d > 1.2 * gpPerOrder && row.orders_30d >= 10) {
+    budgetDirection = 'Lower';
+    proposedBudget = Math.round(Math.max(1.2 * avgDailySpend, 1.00) * 100) / 100;
+    if (proposedBudget >= budgetAmount) continue;
+  } else {
+    // Reconciled ruling: retain the 85% cap test, five-order gate and +50% formula.
+    if (avgDailySpend < budgetAmount * 0.85 || orders30d < 5 ||
+        (unitBasis ? cpo30d == null || cpo30d > gpPerOrder
+                   : acos30d === null || acos30d >= params.target_acos)) continue;
+    const proposed150 = Math.round(budgetAmount * 1.5 * 100) / 100;
+    proposedBudget = Math.min(proposed150, Math.round((budgetAmount + 20) * 100) / 100);
+    if (proposedBudget <= budgetAmount) continue;
+  }
 
   // Idempotency.
   if (openBudgetSet.has(row.campaign_id)) {
@@ -1610,12 +1712,16 @@ for (const row of budgetCampRows) {
     continue;
   }
 
-  const acosPct = (acos30d * 100).toFixed(1);
+  const acosPct = acos30d == null ? 'unknown' : (acos30d * 100).toFixed(1);
   const pctFmt  = pctOfBudget.toFixed(0);
   const curFmt  = `${currSym}${budgetAmount.toFixed(2)}`;
   const propFmt = `${currSym}${proposedBudget.toFixed(2)}`;
 
-  const proposal =
+  const proposal = unitBasis
+    ? `${budgetDirection} daily budget for '${row.name}' from ${curFmt} to ${propFmt}: ` +
+      `CPO ${currSym}${cpo30d.toFixed(2)} vs GP/order ${currSym}${gpPerOrder.toFixed(2)} ` +
+      `(${orders30d} orders/30d; average daily spend ${currSym}${avgDailySpend.toFixed(2)}, ${pctFmt}% of cap).`
+    :
     `Raise daily budget for '${row.name}' from ${curFmt} to ${propFmt}: ` +
     `spending ${pctFmt}% of its cap at ${acosPct}% ACoS (${orders30d} orders/30d) ` +
     `\u2014 the cap is starving a profitable campaign.`;
@@ -1630,6 +1736,10 @@ for (const row of budgetCampRows) {
     orders_30d:      orders30d,
     sales_30d:       row.sales_30d,
     target_acos:     params.target_acos,
+    ...(unitBasis ? {
+      direction: budgetDirection.toUpperCase(), cpo: cpo30d, gp: gpPerOrder,
+      V_margin: null, spend_30d: row.spend_30d,
+    } : {}),
   };
 
   if (!await insertDestinationDraft('BUDGET_ADJUST', row.campaign_id, row.campaign_id, proposal, evidence)) continue;
@@ -1677,13 +1787,17 @@ const { rows: openPauseRows } = await pool.query(
 const openPauseSet = new Set(openPauseRows.map(r => r.target_text));
 
 for (const row of pauseCandRows) {
+  if (skipExperiment('PAUSE_CAMPAIGN', row.campaign_id, row.campaign_id)) continue;
   const spend30d   = row.spend_30d;
   const sales30d   = row.sales_30d;
+  const orders30d  = row.orders_30d;
+  const cpo30d     = costPerOrder(spend30d, orders30d);
 
   // Criteria: (acos_30d >= 1.0) OR (sales_30d = 0). spend_30d >= 30 enforced by query HAVING.
   const isZeroSales = sales30d === 0;
   const acos30d     = sales30d > 0 ? spend30d / sales30d : null;
-  if (!isZeroSales && (acos30d === null || acos30d < 1.0)) continue;
+  if (unitBasis ? orders30d !== 0 && (cpo30d == null || cpo30d < 2 * gpPerOrder)
+                : !isZeroSales && (acos30d === null || acos30d < 1.0)) continue;
 
   // Idempotency.
   if (openPauseSet.has(row.campaign_id)) {
@@ -1695,7 +1809,11 @@ for (const row of pauseCandRows) {
   const spendFmt = `${currSym}${spend30d.toFixed(2)}`;
 
   let proposal;
-  if (isZeroSales) {
+  if (unitBasis) {
+    proposal = `Pause '${row.name}': ${spendFmt} spend, ${orders30d} orders in 30d; ` +
+      (orders30d === 0 ? 'zero orders.'
+        : `CPO ${currSym}${cpo30d.toFixed(2)} ≥ 2 × GP/order ${currSym}${gpPerOrder.toFixed(2)}.`);
+  } else if (isZeroSales) {
     proposal = `Pause '${row.name}': ${spendFmt} spend bought ZERO sales in 30d.`;
   } else {
     const acosPct  = (acos30d * 100).toFixed(1);
@@ -1712,6 +1830,7 @@ for (const row of pauseCandRows) {
     acos_30d:      acos30d,
     budget_amount: row.budget_amount,
     target_acos:   params.target_acos,
+    ...(unitBasis ? { orders_30d: orders30d, cpo: cpo30d, gp: gpPerOrder, V_margin: null } : {}),
   };
 
   if (!await insertDestinationDraft('PAUSE_CAMPAIGN', row.campaign_id, row.campaign_id, proposal, evidence)) continue;
@@ -1730,7 +1849,7 @@ console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
 // Criteria: state='ENABLED', spend_30d < 2, lifetime sales > 0 OR orders > 0,
 //   >= 1 ENABLED target/keyword, max enabled bid < viability_floor.
 // viability_floor = median bid of ENABLED targets+keywords belonging to
-//   campaigns with spend_30d >= 10; fallback = params.target_acos.
+//   campaigns with spend_30d >= 10; unit fallback = 0.30; revenue fallback = target_acos.
 // rec_type = 'BID_ADJUST', evidence.kind = 'REVIVE', target_text = campaign_id.
 console.log('\n\u2500\u2500 Phase 7c: REVIVE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
 
@@ -1768,7 +1887,7 @@ const { rows: floorRows } = await pool.query(
 const _floorRow      = floorRows[0];
 const viabilityFloor = (_floorRow && Number(_floorRow.n_bids) > 0 && _floorRow.median_bid != null)
   ? Math.round(Number(_floorRow.median_bid) * 100) / 100
-  : params.target_acos;
+  : unitBasis ? 0.30 : params.target_acos;
 console.log(`  viability_floor: ${currSym}${viabilityFloor.toFixed(2)} (from ${_floorRow?.n_bids ?? 0} ENABLED bid(s) in active campaigns)`);
 
 // Step 2: candidate campaigns.
@@ -1834,8 +1953,9 @@ const { rows: openReviveRows } = await pool.query(
      FROM recommendations
     WHERE profile_id = $1
       AND rec_type   = 'BID_ADJUST'
-      AND status     = ANY($2)`,
-  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+      AND (status = ANY($2) OR
+           (status = 'PUSHED' AND pushed_at > now() - INTERVAL '14 days'))`,
+  [profileId, ['DRAFT', 'APPROVED']],
 );
 const openReviveCampSet = new Set();
 for (const r of openReviveRows) {
@@ -1845,6 +1965,7 @@ for (const r of openReviveRows) {
 
 // Step 4: emit recs.
 for (const row of reviveCandRows) {
+  if (skipExperiment('BID_ADJUST', row.campaign_id, row.campaign_id)) continue;
   const campId     = row.campaign_id;
   const spend30d   = row.spend_30d;
   const lifeSales  = row.lifetime_sales;
@@ -1938,6 +2059,7 @@ for (const row of reviveCandRows) {
     lifetime_orders: lifeOrders,
     spend_30d:       spend30d,
     source:          bidSource,
+    ...(unitBasis ? { cpo: null, gp: gpPerOrder, V_margin: null } : {}),
     ...(perEntity ? { per_entity: perEntity } : {}),
   };
 
@@ -2010,6 +2132,7 @@ const openDormantSet = new Set(openDormantRows.map((r) => r.target_text));
 
 // Step 3: emit recs.
 for (const row of dormantCandRows) {
+  if (skipExperiment('PAUSE_CAMPAIGN', row.campaign_id, row.campaign_id)) continue;
   const campId  = row.campaign_id;
   const impr    = Number(row.lifetime_impressions);
   const spend3d = row.spend_30d;
@@ -2032,6 +2155,7 @@ for (const row of dormantCandRows) {
     lifetime_spend:       row.lifetime_spend,
     lifetime_sales:       row.lifetime_sales,
     budget_amount:        row.budget_amount,
+    ...(unitBasis ? { cpo: null, gp: gpPerOrder, V_margin: null } : {}),
   };
 
   if (!await insertDestinationDraft('PAUSE_CAMPAIGN', campId, campId, proposal, evidence)) continue;
@@ -2040,6 +2164,57 @@ for (const row of dormantCandRows) {
   console.log(`  [DORMANT-PAUSE] '${row.name}': ${impr.toLocaleString('en')} impr, ${currSym}${row.lifetime_spend.toFixed(2)} lifetime spend`);
 }
 console.log('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
+// ── 7e. DORMANT_90 — zero orders, established, non-seasonal campaigns ────────
+const { rows: dormant90Rows } = await pool.query(
+  `SELECT c.campaign_id::text AS campaign_id, c.name, c.start_date,
+          c.budget_amount::float AS budget_amount,
+          COALESCE(SUM(d.purchases_14d), 0)::float AS orders_90d,
+          COALESCE(SUM(d.cost), 0)::float AS spend_90d,
+          COALESCE(SUM(d.sales_14d), 0)::float AS sales_90d,
+          (CURRENT_DATE - 30)::text AS latest_start_date,
+          (CURRENT_DATE - 90)::text AS window_start,
+          (CURRENT_DATE - 1)::text AS window_end
+     FROM amazon_campaigns c
+     LEFT JOIN amazon_campaign_daily d
+       ON d.profile_id = c.profile_id AND d.campaign_id = c.campaign_id
+      AND d.date >= CURRENT_DATE - 90 AND d.date < CURRENT_DATE
+    WHERE c.profile_id = $1 AND c.state = 'ENABLED'
+    GROUP BY c.campaign_id, c.name, c.start_date, c.budget_amount
+   HAVING COALESCE(SUM(d.purchases_14d), 0) = 0`,
+  [profileId],
+);
+// Re-read after both earlier pause paths to avoid two pause drafts in this run.
+const { rows: openDormant90Rows } = await pool.query(
+  `SELECT target_text FROM recommendations
+    WHERE profile_id = $1 AND rec_type = 'PAUSE_CAMPAIGN' AND status = ANY($2)`,
+  [profileId, ['DRAFT', 'APPROVED', 'PUSHED']],
+);
+const openDormant90Set = new Set(openDormant90Rows.map(r => r.target_text));
+for (const row of dormant90Rows) {
+  if (skipExperiment('PAUSE_CAMPAIGN', row.campaign_id, row.campaign_id)) continue;
+  const startDate = campaignStartDate(row.start_date);
+  if (startDate == null || startDate > row.latest_start_date ||
+      /D[IÍ]A DEL PADRE|D[IÍ]A DE LA MADRE|NAVIDAD/i.test(row.name)) continue;
+  if (openDormant90Set.has(row.campaign_id)) {
+    skippedExisting++;
+    continue;
+  }
+  const proposal = `Pause '${row.name}': zero orders in 90 days; started ${startDate} (at least 30 days ago).`;
+  const evidence = {
+    kind: 'dormant_90d', campaign_id: row.campaign_id, start_date: startDate,
+    orders_90d: row.orders_90d, spend_90d: row.spend_90d, sales_90d: row.sales_90d,
+    window_start: row.window_start, window_end: row.window_end,
+    budget_amount: row.budget_amount,
+    ...(unitBasis ? { cpo: null, gp: gpPerOrder, V_margin: null }
+      : { acos_90d: row.sales_90d > 0 ? row.spend_90d / row.sales_90d : null, target_acos: params.target_acos }),
+  };
+  if (!await insertDestinationDraft('PAUSE_CAMPAIGN', row.campaign_id, row.campaign_id, proposal, evidence)) continue;
+  openDormant90Set.add(row.campaign_id);
+  countsByType['PAUSE_CAMPAIGN']++;
+  written++;
+  console.log(`  [DORMANT_90] '${row.name}': zero orders, start ${startDate}`);
+}
 
 // ── 8. REPLACE_PRODUCT_AD PHASE ─────────────────────────────────────────────
 // For each ENABLED amazon_product_ads row whose asin has a CONFIRMED
@@ -2642,6 +2817,7 @@ console.log(`  Written:            ${written}`);
 console.log(`  Skipped (exists):   ${skippedExisting}`);
 console.log(`  Skipped (rejected): ${skippedRejected}`);
 console.log(`  skipped_destination_not_enabled: ${skippedDestinationNotEnabled}`);
+console.log(`  skipped_experiment: ${skippedExperiment}`);
 console.log('─────────────────────────────────────────────────────────────────');
 
 process.exit(0);
