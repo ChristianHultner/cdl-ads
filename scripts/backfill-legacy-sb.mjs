@@ -1,11 +1,12 @@
 // September qualification backfill, sharing the Vercel runner's exact v2 path.
-// --phase request|ingest; safe reruns; never publishes console_history.
+// --phase request|ingest [--replay]; --replay re-downloads INGESTED v2 reports with the corrected filter; never publishes console_history.
 import { parseArgs } from 'node:util';
 import { Pool, neonConfig } from '@neondatabase/serverless';
-import { createApi, requestCampaignReport, listCurrentSbCampaigns, downloadLegacyReport, ingestTransaction, isAmazonDatabase } from '../lib/amazon/sync-runner.ts';
+import { createApi, requestCampaignReport, downloadLegacyReport, ingestTransaction, isAmazonDatabase } from '../lib/amazon/sync-runner.ts';
 
-const { values } = parseArgs({ options: { phase: { type: 'string' } } });
+const { values } = parseArgs({ options: { phase: { type: 'string' }, replay: { type: 'boolean', default: false } } });
 if (!['request','ingest'].includes(values.phase)) throw new Error('--phase request|ingest required');
+if (values.replay && values.phase !== 'ingest') throw new Error('--replay requires --phase ingest');
 if (!isAmazonDatabase(process.env.DATABASE_URL)) throw new Error('WRONG DATABASE');
 neonConfig.webSocketConstructor = WebSocket;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -21,7 +22,6 @@ try {
   for (const profile of profiles) {
     const deadline = Date.now() + 270_000;
     const api = await createApi(profile, deadline);
-    const currentIds = values.phase === 'ingest' ? await listCurrentSbCampaigns(api) : undefined;
     let requested = 0, landed = 0, pending = 0, skipped = 0;
     for (let day = 1; day <= 30; day++) {
       const date = `2026-09-${String(day).padStart(2,'0')}`;
@@ -39,14 +39,14 @@ try {
       } else {
         const request = existing[0];
         if (!request) { errors++; continue; }
-        if (request.status === 'INGESTED') { skipped++; continue; }
+        if (request.status === 'INGESTED' && !values.replay) { skipped++; continue; }
         const { body } = await api(`/v2/reports/${encodeURIComponent(request.report_id)}`);
         if (body.status !== 'SUCCESS') { pending++; if (body.status === 'FAILURE') errors++; continue; }
         const rows = await downloadLegacyReport(api,request.report_id);
-        landed += await ingestTransaction(client,request,rows,deadline,currentIds);
+        landed += await ingestTransaction(client,request,rows,deadline,{ replayLegacy: values.replay });
       }
     }
-    console.log(`${profile.market}|${values.phase}|requested=${requested}|landed=${landed}|pending=${pending}|skipped=${skipped}${currentIds ? `|v4_campaigns=${currentIds.size}` : ''}`);
+    console.log(`${profile.market}|${values.phase}|requested=${requested}|landed=${landed}|pending=${pending}|skipped=${skipped}`);
   }
 } catch (error) {
   errors++;

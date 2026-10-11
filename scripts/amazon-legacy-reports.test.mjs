@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseExactJson, legacyRows, reportJobs, requestCampaignReport, listCurrentSbCampaigns, ingestTransaction, createApi, downloadLegacyReport } from '../lib/amazon/sync-runner.ts';
+import { parseExactJson, legacyRows, reportJobs, requestCampaignReport, v3SbPresence, ingestTransaction, createApi, downloadLegacyReport } from '../lib/amazon/sync-runner.ts';
 
 test('18-digit IDs survive parsing; text and metrics are not rewritten', () => {
   const rows = parseExactJson('[{"campaignId":144287439827929866,"campaignName":"text 144287439827929866","cost":2.63}]');
   assert.equal(rows[0].campaignId,'144287439827929866');
   assert.equal(rows[0].cost,2.63);
   assert.equal(rows[0].campaignName,'text 144287439827929866');
-  assert.throws(() => legacyRows([{campaignId:144287439827929866}],new Set(),'2026-09-01'),/imprecise/);
+  assert.throws(() => legacyRows([{campaignId:144287439827929866,campaignName:'legacy'}],{ids:new Set(),names:new Set()},'2026-09-01'),/imprecise/);
 });
 
 test('seven daily v2 requests coexist with five unchanged v3 windows', async () => {
@@ -21,29 +21,61 @@ test('seven daily v2 requests coexist with five unchanged v3 windows', async () 
   assert.ok(calls.every(x=>x[0]==='/v2/hsa/campaigns/report'&&x[1].creativeType==='all'));
 });
 
-test('legacy exclusion uses all pages and all v4 campaign states; malformed lists fail closed', async () => {
-  let calls=0;
-  const ids=await listCurrentSbCampaigns(async(path,opts)=>{
-    const body=JSON.parse(opts.body);
-    assert.deepEqual(body.stateFilter.include,['ENABLED','PAUSED','ARCHIVED']);
-    calls++;
-    return {body:calls===1?{campaigns:[{campaignId:'123'}],nextToken:'next'}:{campaigns:[{campaignId:'456'}]}};
-  });
-  assert.equal(calls,2);
-  assert.deepEqual(legacyRows([{campaignId:'123'},{campaignId:'456'},{campaignId:'144287439827929866'}],ids,'2026-09-01').map(r=>r.campaignId),['144287439827929866']);
-  await assert.rejects(listCurrentSbCampaigns(async()=>({body:{}})),/blocked/);
+test('a campaign listed in v4 but absent from same-day v3 lands; either exact ID or name skips', () => {
+  const present={ids:new Set(['123']),names:new Set(['Modern'])};
+  const listedInV4ButAbsentFromV3={campaignId:'144287439827929866',campaignName:'Legacy'};
+  const rows=[listedInV4ButAbsentFromV3,{campaignId:'123',campaignName:'Renamed'},
+    {campaignId:'456',campaignName:'Modern'},{campaignId:'789',campaignName:'modern'}];
+  assert.deepEqual(legacyRows(rows,present,'2026-09-01').map(r=>r.campaignId),['144287439827929866','789']);
 });
 
-test('legacy landing requires a complete filter, maps metrics and preserves unknown counters', async () => {
+test('v3 presence is profile/day scoped; completed empty reports differ from missing coverage', async () => {
+  for(const covered of [false,true]) {
+    let calls=0;
+    const client={async query(sql,values){
+      calls++; assert.deepEqual(values,['1','2026-09-01']);
+      if(sql.includes('amazon_report_requests')) {assert.match(sql,/status='INGESTED'/);return {rows:covered?[{report_id:'v3'}]:[]};}
+      assert.match(sql,/ad_product='SB' AND date=\$2::date/);return {rows:[]};
+    }};
+    if(covered) assert.deepEqual(await v3SbPresence(client,'1','2026-09-01'),{ids:new Set(),names:new Set()});
+    else {await assert.rejects(v3SbPresence(client,'1','2026-09-01'),/awaits ingested v3/);assert.equal(calls,1);}
+  }
+});
+
+test('legacy replay replaces one day atomically, maps metrics, and leaves missing coverage untouched', async () => {
   const request={report_id:'x',profile_id:'1',report_type:'sbLegacyCampaigns',start_date:'2026-09-01',end_date:'2026-09-01'};
-  const rows=[{campaignId:'144287439827929866',cost:2,attributedConversions14d:1,attributedSales14d:10},{campaignId:'123',cost:99}];
+  const rows=[{campaignId:'144287439827929866',campaignName:'Legacy',cost:2,attributedConversions14d:1,attributedSales14d:10},
+    {campaignId:'123',campaignName:'Modern',cost:99}];
+  for(const covered of [false,true]) {
+    const queries=[];
+    const client={async query(sql,values){
+      queries.push([sql,values]);
+      if(sql.includes('FOR UPDATE')) return {rows:[{status:'INGESTED'}]};
+      if(sql.includes('SELECT report_id')) return {rows:covered?[{report_id:'v3'}]:[]};
+      if(sql.includes('SELECT campaign_id')) return {rows:[{id:'123',name:'Modern'}]};
+      return {rows:[]};
+    }};
+    const work=ingestTransaction(client,request,rows,Date.now()+30000,{replayLegacy:true});
+    if(!covered) {
+      await assert.rejects(work,/awaits ingested v3/);assert.equal(queries.at(-1)[0],'ROLLBACK');
+      assert.ok(!queries.some(([sql])=>sql.startsWith('DELETE')));continue;
+    }
+    assert.equal(await work,1);
+    assert.deepEqual(queries.find(([sql])=>sql.startsWith('DELETE'))[1],['1','2026-09-01']);
+    const values=queries.find(x=>x[0].includes('INSERT INTO amazon_campaign_daily_other'))[1];
+    assert.deepEqual(values.slice(0,9),['1','SB_LEGACY','144287439827929866','2026-09-01',null,null,2,1,10]);
+    assert.equal(queries.at(-1)[0],'COMMIT');
+  }
+});
+
+test('a later v3 SB arrival removes overlapping legacy rows by ID or exact name', async () => {
   const queries=[];
   const client={async query(sql,values){queries.push([sql,values]);return {rows:[{status:'PENDING'}]};}};
-  await assert.rejects(ingestTransaction(client,request,rows,Date.now()+30000),/complete SB v4 list/);
-  assert.equal(queries.length,0);
-  assert.equal(await ingestTransaction(client,request,rows,Date.now()+30000,new Set(['123'])),1);
-  const values=queries.find(x=>x[0].includes('INSERT INTO amazon_campaign_daily_other'))[1];
-  assert.deepEqual(values.slice(0,9),['1','SB_LEGACY','144287439827929866','2026-09-01',null,null,2,1,10]);
+  await ingestTransaction(client,{report_id:'v3',profile_id:'1',report_type:'sbCampaigns'},
+    [{campaignId:'123',campaignName:'Modern',date:'2026-09-02',impressions:1,clicks:1,cost:1,purchases:0,sales:0}],Date.now()+30000);
+  const cleanup=queries.find(([sql])=>sql.includes('DELETE FROM amazon_campaign_daily_other l'));
+  assert.deepEqual(cleanup[1],['1',['2026-09-02']]);
+  assert.match(cleanup[0],/s.campaign_id=l.campaign_id OR s.raw->>'campaignName'=l.raw->>'campaignName'/);
   assert.equal(queries.at(-1)[0],'COMMIT');
 });
 

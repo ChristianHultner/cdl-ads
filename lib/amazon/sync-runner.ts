@@ -228,21 +228,18 @@ export function requestCampaignReport(api: Api, type: ReportType, startDate: str
   })
 }
 
-export async function listCurrentSbCampaigns(api: Api): Promise<Set<string>> {
-  const ids = new Set<string>(), tokens = new Set<string>()
-  let nextToken: string | undefined
-  do {
-    const { body } = await api('/sb/v4/campaigns/list', {
-      method: 'POST', headers: { 'Content-Type': 'application/vnd.sbcampaignresource.v4+json', Accept: 'application/vnd.sbcampaignresource.v4+json' },
-      body: JSON.stringify({ maxResults: 100, stateFilter: { include: ['ENABLED','PAUSED','ARCHIVED'] }, ...(nextToken ? { nextToken } : {}) }),
-    })
-    if (!Array.isArray(body.campaigns)) throw new SyncError('Invalid SB v4 list; legacy ingestion blocked')
-    for (const row of body.campaigns) ids.add(exactCampaignId(row.campaignId))
-    nextToken = body.nextToken
-    if (nextToken && tokens.has(nextToken)) throw new SyncError('Repeated SB v4 pagination token')
-    if (nextToken) tokens.add(nextToken)
-  } while (nextToken)
-  return ids
+export async function v3SbPresence(client: PoolClient, profile: string, date: string) {
+  const coverage = await client.query(
+    `SELECT report_id FROM amazon_report_requests WHERE profile_id=$1 AND report_type='sbCampaigns'
+      AND status='INGESTED' AND start_date <= $2::date AND end_date >= $2::date LIMIT 1`, [profile, date],
+  )
+  if (!coverage.rows.length) throw new SyncError('Legacy ingestion awaits ingested v3 SB report coverage for this day')
+  const { rows } = await client.query(
+    `SELECT campaign_id::text AS id, raw->>'campaignName' AS name FROM amazon_campaign_daily_other
+      WHERE profile_id=$1 AND ad_product='SB' AND date=$2::date`, [profile, date],
+  )
+  if (rows.some(row => typeof row.name !== 'string')) throw new SyncError('Missing v3 SB campaign name')
+  return { ids: new Set<string>(rows.map(row => exactCampaignId(row.id))), names: new Set<string>(rows.map(row => row.name)) }
 }
 
 export async function downloadLegacyReport(api: Api, reportId: string): Promise<ReportRow[]> {
@@ -252,9 +249,10 @@ export async function downloadLegacyReport(api: Api, reportId: string): Promise<
   return rows as ReportRow[]
 }
 
-export function legacyRows(rows: ReportRow[], currentIds: Set<string>, date: string): ReportRow[] {
-  return rows.map(row => ({ ...row, campaignId: exactCampaignId(row.campaignId), date }))
-    .filter(row => !currentIds.has(row.campaignId))
+export function legacyRows(rows: ReportRow[], present: { ids: Set<string>; names: Set<string> }, date: string): ReportRow[] {
+  if (rows.some(row => typeof row.campaignName !== 'string')) throw new SyncError('Missing v2 SB campaign name')
+  return rows.map(row => ({ ...row, campaignId: exactCampaignId(row.campaignId), campaignName: String(row.campaignName), date }))
+    .filter(row => !present.ids.has(row.campaignId) && !present.names.has(String(row.campaignName)))
 }
 
 export async function downloadReport(api: Api, reportId: string, deadline: number): Promise<ReportRow[]> {
@@ -341,11 +339,10 @@ async function ingestReports(client: PoolClient, started: number): Promise<StepR
             requested_at < now() - interval '3 days' AS expired
      FROM amazon_report_requests
      WHERE status IN ('PENDING', 'COMPLETED') AND profile_id = ANY($1::bigint[])
-       AND report_type = ANY($2::text[]) ORDER BY requested_at, report_id`,
+       AND report_type = ANY($2::text[]) ORDER BY (report_type='sbLegacyCampaigns'), requested_at, report_id`,
     [[...profiles.keys()], REPORT_TYPES],
   )
   const apis = new Map<string, Api>()
-  const currentCampaigns = new Map<string, Promise<Set<string>>>()
   const deadline = started + CLEANUP_DEADLINE_MS
   let done = 0, landed = 0, failures = 0
   for (const request of requests) {
@@ -377,15 +374,10 @@ async function ingestReports(client: PoolClient, started: number): Promise<StepR
             `UPDATE amazon_report_requests SET status = 'COMPLETED', error = NULL
              WHERE report_id = $1 AND status IN ('PENDING', 'COMPLETED')`, [request.report_id],
           )
-          let current: Set<string> | undefined
-          if (legacy) {
-            if (!currentCampaigns.has(request.profile_id)) currentCampaigns.set(request.profile_id, listCurrentSbCampaigns(api))
-            current = await currentCampaigns.get(request.profile_id)!
-          }
           const rows = legacy
             ? await downloadLegacyReport(api, request.report_id)
             : await downloadReport(api, request.report_id, deadline)
-          landed += await ingestTransaction(client, request, rows, deadline, current)
+          landed += await ingestTransaction(client, request, rows, deadline)
         } else if (!['PENDING', 'PROCESSING', 'IN_PROGRESS'].includes(meta.status ?? '')) {
           throw new SyncError('Unknown Amazon report status')
         }
@@ -407,12 +399,10 @@ async function ingestReports(client: PoolClient, started: number): Promise<StepR
 }
 
 export async function ingestTransaction(
-  client: PoolClient, request: ReportRequest, rows: ReportRow[], deadline: number, currentSbIds?: Set<string>,
+  client: PoolClient, request: ReportRequest, rows: ReportRow[], deadline: number, options: { replayLegacy?: boolean } = {},
 ): Promise<number> {
   if (request.report_type === 'sbLegacyCampaigns') {
-    if (!currentSbIds) throw new SyncError('Legacy ingestion requires a complete SB v4 list')
     if (!request.start_date || request.start_date !== request.end_date) throw new SyncError('Legacy report must cover exactly one day')
-    rows = legacyRows(rows, currentSbIds, request.start_date)
   }
   remaining(deadline)
   await client.query('BEGIN')
@@ -421,9 +411,17 @@ export async function ingestTransaction(
     const locked = await client.query(
       `SELECT status FROM amazon_report_requests WHERE report_id = $1 FOR UPDATE`, [request.report_id],
     )
-    if (!['PENDING', 'COMPLETED'].includes(locked.rows[0]?.status)) {
+    const replay = options.replayLegacy && request.report_type === 'sbLegacyCampaigns' && locked.rows[0]?.status === 'INGESTED'
+    if (!replay && !['PENDING', 'COMPLETED'].includes(locked.rows[0]?.status)) {
       await client.query('ROLLBACK')
       return 0
+    }
+    if (request.report_type === 'sbLegacyCampaigns') {
+      const present = await v3SbPresence(client, request.profile_id, request.start_date!)
+      rows = legacyRows(rows, present, request.start_date!)
+      // Replay/refresh replaces this day's filtered slice, removing any newly overlapping rows.
+      await client.query(`DELETE FROM amazon_campaign_daily_other
+        WHERE profile_id=$1 AND ad_product='SB_LEGACY' AND date=$2::date`, [request.profile_id, request.start_date])
     }
     const spec = request.report_type === 'sbLegacyCampaigns' ? LEGACY_REPORT : REPORTS[request.report_type]
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
@@ -436,6 +434,14 @@ export async function ingestTransaction(
         return `(${data.map((_, j) => `$${base + j + 1}`).join(',')})`
       }).join(',')
       await client.query(`${spec.insert} VALUES ${placeholders} ${spec.conflict}`, values)
+    }
+    if (request.report_type === 'sbCampaigns' && rows.length) {
+      // A later v3 arrival must also remove overlaps left by an earlier legacy ingestion.
+      await client.query(`DELETE FROM amazon_campaign_daily_other l USING amazon_campaign_daily_other s
+        WHERE l.profile_id=$1 AND l.ad_product='SB_LEGACY' AND s.profile_id=l.profile_id
+          AND s.ad_product='SB' AND s.date=l.date AND s.date=ANY($2::date[])
+          AND (s.campaign_id=l.campaign_id OR s.raw->>'campaignName'=l.raw->>'campaignName')`,
+        [request.profile_id, [...new Set(rows.map(row => row.date))]])
     }
     remaining(deadline)
     await client.query(
