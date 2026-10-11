@@ -30,13 +30,13 @@ const REGION_HOST: Record<string, string> = {
   EU: 'https://advertising-api-eu.amazon.com',
   FE: 'https://advertising-api-fe.amazon.com',
 }
-const REPORT_TYPES = ['spCampaigns', 'spSearchTerm', 'spAdvertisedProduct', 'sbCampaigns', 'sdCampaigns'] as const
+const REPORT_TYPES = ['spCampaigns', 'spSearchTerm', 'spAdvertisedProduct', 'sbCampaigns', 'sdCampaigns', 'sbLegacyCampaigns'] as const
 type ReportType = (typeof REPORT_TYPES)[number]
 type ReportRow = Record<string, unknown>
 interface Profile { profile_id: string; region: string; env_var_name: string }
 interface ReportRequest {
   report_id: string; profile_id: string; report_type: ReportType
-  status: string; expired: boolean
+  status: string; expired: boolean; start_date?: string; end_date?: string
 }
 interface Campaign {
   campaignId: string | number; name: string; state: string; campaignType?: string
@@ -122,7 +122,7 @@ export async function createApi(profile: Profile, deadline: number) {
   )
   let accessToken = await mintToken()
   // Copied 401 re-mint + single retry; never print Authorization or response bodies.
-  return async (path: string, opts: RequestInit = {}): Promise<ApiResult> => {
+  const request = async (path: string, opts: RequestInit = {}): Promise<ApiResult> => {
     const send = () => fetchWithTimeout(
       `${host}${path}`, {
         ...opts,
@@ -134,7 +134,7 @@ export async function createApi(profile: Profile, deadline: number) {
       }, 'Amazon Ads request', deadline,
       async res => ({
         status: res.status,
-        body: res.ok || res.status === 425 || (res.status === 400 && path === '/reporting/reports') ? await res.json() as Metadata : {},
+        body: res.ok || res.status === 425 || (res.status === 400 && path === '/reporting/reports') ? parseExactJson(await res.text()) as Metadata : {},
       }),
     )
     let result = await send()
@@ -159,8 +159,103 @@ export async function createApi(profile: Profile, deadline: number) {
     }
     return result
   }
+  return Object.assign(request, {
+    // Follow the authenticated API redirect manually; never send credentials to S3.
+    downloadLegacy: async (reportId: string): Promise<Buffer> => {
+      const download = () => fetchWithTimeout(`${host}/v2/reports/${encodeURIComponent(reportId)}/download`, {
+        redirect: 'manual', headers: {
+          Authorization: `Bearer ${accessToken}`, 'Amazon-Advertising-API-ClientId': LWA_CLIENT_ID,
+          'Amazon-Advertising-API-Scope': profile.profile_id,
+        },
+      }, 'Legacy report download', deadline, async res => {
+        if ([301,302,303,307,308].includes(res.status)) {
+          const location = res.headers.get('location')
+          if (!location || new URL(location).protocol !== 'https:') throw new SyncError('Invalid report download redirect')
+          return fetchWithTimeout(location, {}, 'Legacy S3 download', deadline, async file => {
+            if (!file.ok) throw new SyncError(`Report download HTTP ${file.status}`)
+            return Buffer.from(await file.arrayBuffer())
+          })
+        }
+        if (!res.ok) throw new SyncError(`Report download HTTP ${res.status}`)
+        return Buffer.from(await res.arrayBuffer())
+      })
+      try { return await download() } catch (err) {
+        if (!(err instanceof SyncError) || err.message !== 'Report download HTTP 401') throw err
+        accessToken = await mintToken()
+        return download()
+      }
+    },
+  })
 }
 type Api = Awaited<ReturnType<typeof createApi>>
+
+// Tokenize strings first so digit-like campaign names/escaped JSON remain intact.
+// JSON.parse alone rounds the 18-digit legacy IDs before a reviver can save them.
+export function parseExactJson(text: string): unknown {
+  return JSON.parse(text.replace(/"(?:\\.|[^"\\])*"|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g, (token, number) => {
+    if (number && /^-?\d+$/.test(number) && !Number.isSafeInteger(Number(number))) return `"${number}"`
+    return token
+  }))
+}
+
+function exactCampaignId(value: unknown): string {
+  if (typeof value === 'string' && /^\d+$/.test(value)) return value
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value)
+  throw new SyncError('Missing or imprecise campaign ID')
+}
+
+export function reportJobs(startDate: string, endDate: string) {
+  const jobs = REPORT_TYPES.filter(type => type !== 'sbLegacyCampaigns')
+    .map(type => ({ type: type as ReportType, startDate, endDate }))
+  for (let date = startDate; date <= endDate; date = new Date(Date.parse(`${date}T00:00:00Z`) + 86_400_000).toISOString().slice(0,10)) {
+    jobs.push({ type: 'sbLegacyCampaigns', startDate: date, endDate: date })
+  }
+  return jobs
+}
+
+export function requestCampaignReport(api: Api, type: ReportType, startDate: string, endDate: string) {
+  if (type === 'sbLegacyCampaigns') {
+    if (startDate !== endDate) throw new SyncError('Legacy report must cover exactly one day')
+    return api('/v2/hsa/campaigns/report', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reportDate: startDate.replaceAll('-', ''), creativeType: 'all',
+        metrics: 'campaignId,campaignName,cost,attributedConversions14d,attributedSales14d' }),
+    })
+  }
+  return api('/reporting/reports', {
+    method: 'POST', headers: { 'Content-Type': 'application/vnd.createasyncreportrequest.v3+json' },
+    body: JSON.stringify({ name: `cdl-ads ${type} ${startDate}_${endDate}`, startDate, endDate, configuration: REPORTS[type].configuration }),
+  })
+}
+
+export async function listCurrentSbCampaigns(api: Api): Promise<Set<string>> {
+  const ids = new Set<string>(), tokens = new Set<string>()
+  let nextToken: string | undefined
+  do {
+    const { body } = await api('/sb/v4/campaigns/list', {
+      method: 'POST', headers: { 'Content-Type': 'application/vnd.sbcampaignresource.v4+json', Accept: 'application/vnd.sbcampaignresource.v4+json' },
+      body: JSON.stringify({ maxResults: 100, stateFilter: { include: ['ENABLED','PAUSED','ARCHIVED'] }, ...(nextToken ? { nextToken } : {}) }),
+    })
+    if (!Array.isArray(body.campaigns)) throw new SyncError('Invalid SB v4 list; legacy ingestion blocked')
+    for (const row of body.campaigns) ids.add(exactCampaignId(row.campaignId))
+    nextToken = body.nextToken
+    if (nextToken && tokens.has(nextToken)) throw new SyncError('Repeated SB v4 pagination token')
+    if (nextToken) tokens.add(nextToken)
+  } while (nextToken)
+  return ids
+}
+
+export async function downloadLegacyReport(api: Api, reportId: string): Promise<ReportRow[]> {
+  const buffer = await api.downloadLegacy(reportId)
+  const rows = parseExactJson((buffer[0] === 31 && buffer[1] === 139 ? gunzipSync(buffer) : buffer).toString('utf8'))
+  if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || Array.isArray(row))) throw new SyncError('Invalid legacy report payload')
+  return rows as ReportRow[]
+}
+
+export function legacyRows(rows: ReportRow[], currentIds: Set<string>, date: string): ReportRow[] {
+  return rows.map(row => ({ ...row, campaignId: exactCampaignId(row.campaignId), date }))
+    .filter(row => !currentIds.has(row.campaignId))
+}
 
 export async function downloadReport(api: Api, reportId: string, deadline: number): Promise<ReportRow[]> {
   // Fresh signed URL, never stored. No auth headers on the signed S3 download.
@@ -176,7 +271,7 @@ export async function downloadReport(api: Api, reportId: string, deadline: numbe
   remaining(deadline)
   let decompressed: Buffer | null = gunzipSync(gzBuf)
   gzBuf = null
-  const rows: unknown = JSON.parse(decompressed.toString('utf8'))
+  const rows: unknown = parseExactJson(decompressed.toString('utf8'))
   decompressed = null
   remaining(deadline)
   if (!Array.isArray(rows) || rows.some(row => !row || typeof row !== 'object' || Array.isArray(row))) {
@@ -198,34 +293,31 @@ async function activeProfiles(client: PoolClient): Promise<Profile[]> {
 async function requestReports(client: PoolClient, started: number): Promise<StepResult> {
   const profiles = await activeProfiles(client)
   const { startDate, endDate } = reportWindow()
-  const total = profiles.length * REPORT_TYPES.length
+  const jobs = reportJobs(startDate, endDate)
+  const total = profiles.length * jobs.length
   let done = 0, requested = 0, failures = 0
   const findings: string[] = []
   const deadline = started + CLEANUP_DEADLINE_MS
   for (const profile of profiles) {
     let api: Api | undefined
-    for (const type of REPORT_TYPES) {
+    for (const { type, startDate, endDate } of jobs) {
       if (Date.now() - started >= WALL_CAP_MS) {
         return { ok: failures === 0, rows: requested, detail: `PARTIAL ${done}/${total}, continues next run` }
       }
       try {
-        // With the step advisory lock, dashboard retries do not re-request known windows.
+        // Retries skip known windows; legacy days refresh each Madrid day for attribution updates.
         const existing = await client.query(
           `SELECT report_id FROM amazon_report_requests
            WHERE profile_id = $1 AND report_type = $2 AND start_date = $3 AND end_date = $4
-             AND status IN ('PENDING', 'COMPLETED', 'INGESTED') LIMIT 1`,
+             AND status IN ('PENDING', 'COMPLETED', 'INGESTED')
+             AND ($2 <> 'sbLegacyCampaigns' OR status <> 'INGESTED'
+               OR requested_at >= (date_trunc('day', now() AT TIME ZONE 'Europe/Madrid') AT TIME ZONE 'Europe/Madrid'))
+           LIMIT 1`,
           [profile.profile_id, type, startDate, endDate],
         )
         if (!existing.rowCount) {
           api ??= await createApi(profile, deadline)
-          const { body } = await api('/reporting/reports', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/vnd.createasyncreportrequest.v3+json' },
-            body: JSON.stringify({
-              name: `cdl-ads ${type} ${startDate}_${endDate}`,
-              startDate, endDate, configuration: REPORTS[type].configuration,
-            }),
-          })
+          const { body } = await requestCampaignReport(api, type, startDate, endDate)
           if (typeof body.reportId !== 'string' || !body.reportId) throw new SyncError('Missing reportId')
           await client.query(
             `INSERT INTO amazon_report_requests
@@ -245,7 +337,7 @@ async function requestReports(client: PoolClient, started: number): Promise<Step
 async function ingestReports(client: PoolClient, started: number): Promise<StepResult> {
   const profiles = new Map((await activeProfiles(client)).map(p => [p.profile_id, p]))
   const { rows: requests } = await client.query<ReportRequest>(
-    `SELECT report_id, profile_id::text, report_type, status,
+    `SELECT report_id, profile_id::text, report_type, status, start_date::text, end_date::text,
             requested_at < now() - interval '3 days' AS expired
      FROM amazon_report_requests
      WHERE status IN ('PENDING', 'COMPLETED') AND profile_id = ANY($1::bigint[])
@@ -253,6 +345,7 @@ async function ingestReports(client: PoolClient, started: number): Promise<StepR
     [[...profiles.keys()], REPORT_TYPES],
   )
   const apis = new Map<string, Api>()
+  const currentCampaigns = new Map<string, Promise<Set<string>>>()
   const deadline = started + CLEANUP_DEADLINE_MS
   let done = 0, landed = 0, failures = 0
   for (const request of requests) {
@@ -271,20 +364,28 @@ async function ingestReports(client: PoolClient, started: number): Promise<StepR
           api = await createApi(profiles.get(request.profile_id)!, deadline)
           apis.set(request.profile_id, api)
         }
-        const { body: meta } = await api(`/reporting/reports/${encodeURIComponent(request.report_id)}`)
-        if (meta.status === 'FAILED') {
+        const legacy = request.report_type === 'sbLegacyCampaigns'
+        const { body: meta } = await api(`${legacy ? '/v2/reports/' : '/reporting/reports/'}${encodeURIComponent(request.report_id)}`)
+        if (['FAILED', 'FAILURE'].includes(meta.status ?? '')) {
           await client.query(
             `UPDATE amazon_report_requests SET status = 'FAILED', error = 'Amazon report FAILED'
              WHERE report_id = $1 AND status IN ('PENDING', 'COMPLETED')`, [request.report_id],
           )
           failures++
-        } else if (meta.status === 'COMPLETED') {
+        } else if (meta.status === 'COMPLETED' || (legacy && meta.status === 'SUCCESS')) {
           await client.query(
             `UPDATE amazon_report_requests SET status = 'COMPLETED', error = NULL
              WHERE report_id = $1 AND status IN ('PENDING', 'COMPLETED')`, [request.report_id],
           )
-          const rows = await downloadReport(api, request.report_id, deadline)
-          landed += await ingestTransaction(client, request, rows, deadline)
+          let current: Set<string> | undefined
+          if (legacy) {
+            if (!currentCampaigns.has(request.profile_id)) currentCampaigns.set(request.profile_id, listCurrentSbCampaigns(api))
+            current = await currentCampaigns.get(request.profile_id)!
+          }
+          const rows = legacy
+            ? await downloadLegacyReport(api, request.report_id)
+            : await downloadReport(api, request.report_id, deadline)
+          landed += await ingestTransaction(client, request, rows, deadline, current)
         } else if (!['PENDING', 'PROCESSING', 'IN_PROGRESS'].includes(meta.status ?? '')) {
           throw new SyncError('Unknown Amazon report status')
         }
@@ -306,8 +407,13 @@ async function ingestReports(client: PoolClient, started: number): Promise<StepR
 }
 
 export async function ingestTransaction(
-  client: PoolClient, request: ReportRequest, rows: ReportRow[], deadline: number,
+  client: PoolClient, request: ReportRequest, rows: ReportRow[], deadline: number, currentSbIds?: Set<string>,
 ): Promise<number> {
+  if (request.report_type === 'sbLegacyCampaigns') {
+    if (!currentSbIds) throw new SyncError('Legacy ingestion requires a complete SB v4 list')
+    if (!request.start_date || request.start_date !== request.end_date) throw new SyncError('Legacy report must cover exactly one day')
+    rows = legacyRows(rows, currentSbIds, request.start_date)
+  }
   remaining(deadline)
   await client.query('BEGIN')
   try {
@@ -319,7 +425,7 @@ export async function ingestTransaction(
       await client.query('ROLLBACK')
       return 0
     }
-    const spec = REPORTS[request.report_type]
+    const spec = request.report_type === 'sbLegacyCampaigns' ? LEGACY_REPORT : REPORTS[request.report_type]
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       await client.query("SELECT set_config('statement_timeout', $1, true)", [String(remaining(deadline))])
       const values: unknown[] = []
@@ -1006,6 +1112,21 @@ interface ReportSpec {
   values: (profileIdStr: string, row: ReportRow) => unknown[]
 }
 
+const LEGACY_REPORT: Omit<ReportSpec, 'configuration'> = {
+  insert: `INSERT INTO amazon_campaign_daily_other
+    (profile_id, ad_product, campaign_id, date, impressions, clicks, cost, purchases, sales, raw)`,
+  conflict: `ON CONFLICT (profile_id, ad_product, campaign_id, date) DO UPDATE SET
+    impressions=EXCLUDED.impressions, clicks=EXCLUDED.clicks, cost=EXCLUDED.cost,
+    purchases=EXCLUDED.purchases, sales=EXCLUDED.sales, raw=EXCLUDED.raw, landed_at=now()`,
+  values: (profile, row) => {
+    if (['cost','attributedConversions14d','attributedSales14d'].some(key => row[key] == null || !Number.isFinite(Number(row[key])))) {
+      throw new SyncError('Legacy report required metrics missing')
+    }
+    return [profile, 'SB_LEGACY', exactCampaignId(row.campaignId), row.date, null, null,
+      row.cost, row.attributedConversions14d, row.attributedSales14d, row]
+  },
+}
+
 function otherCampaignReport(product: 'SB' | 'SD'): ReportSpec {
   return {
     configuration: {
@@ -1032,7 +1153,7 @@ function otherCampaignReport(product: 'SB' | 'SD'): ReportSpec {
 
 // Exact configuration bodies, column mapping and ON CONFLICT clauses from the
 // three nightly phases. Only campaign-daily's row-by-row INSERT becomes batches.
-export const REPORTS: Record<ReportType, ReportSpec> = {
+export const REPORTS: Record<Exclude<ReportType, 'sbLegacyCampaigns'>, ReportSpec> = {
   sbCampaigns: otherCampaignReport('SB'),
   sdCampaigns: otherCampaignReport('SD'),
   spCampaigns: {
