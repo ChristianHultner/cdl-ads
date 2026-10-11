@@ -14,7 +14,6 @@ export const KNOWN_STEPS = [
   'request-reports', 'ingest-reports', 'structure', 'rollup', 'sweep', 'stamp',
 ] as const
 export type KnownStep = (typeof KNOWN_STEPS)[number]
-export const NOT_YET_IMPLEMENTED: readonly KnownStep[] = ['structure', 'rollup', 'sweep', 'stamp']
 export const ACTIVE_PROFILE_IDS = [
   '2263723137827296', // ES
   '139446882235960',  // US
@@ -39,7 +38,12 @@ interface ReportRequest {
   report_id: string; profile_id: string; report_type: ReportType
   status: string; expired: boolean
 }
-interface Metadata { reportId?: string; status?: string; url?: string; detail?: string }
+interface Campaign {
+  campaignId: string | number; name: string; state: string; campaignType?: string
+  targetingType?: string; startDate?: string; endDate?: string
+  budget?: { budget?: number; budgetType?: string }
+}
+interface Metadata { campaigns?: Campaign[]; nextToken?: string; reportId?: string; status?: string; url?: string; detail?: string }
 interface ApiResult { status: number; body: Metadata }
 export interface StepResult { ok: boolean; rows: number | null; detail: string | null }
 
@@ -334,6 +338,613 @@ async function ingestTransaction(
   }
 }
 
+// These four steps copy the mini's SQL/mappings; no script is imported/executed.
+// Every unit is bounded, with a soft stop before the next page/row/horizon/profile.
+async function stepQuery(client: PoolClient, deadline: number, sql: string, values: unknown[] = []) {
+  await client.query("SELECT set_config('statement_timeout', $1, false)", [String(remaining(deadline))])
+  return client.query(sql, values)
+}
+
+type MaintenanceStep = Exclude<KnownStep, 'request-reports' | 'ingest-reports'>
+async function maintenanceStep(client: PoolClient, step: MaintenanceStep, started: number): Promise<StepResult> {
+  const deadline = started + CLEANUP_DEADLINE_MS
+  const profiles = await activeProfiles(client)
+  let done = 0, rows = 0, failures = 0
+  const partial = (): StepResult => ({
+    ok: failures === 0, rows, detail: `PARTIAL ${done}/${profiles.length}, continues next run`,
+  })
+  for (const profile of profiles) {
+    if (Date.now() - started >= WALL_CAP_MS) return partial()
+    try {
+      if (step === 'structure' || step === 'stamp') {
+        const result = step === 'structure'
+          ? await syncStructure(client, profile, started)
+          : await stampProfile(client, profile, started)
+        rows += result.rows ?? 0
+        if (!result.ok) failures++
+        if (result.detail?.startsWith('PARTIAL')) return partial()
+      } else {
+        const result = await stepQuery(client, deadline,
+          step === 'sweep' ? SWEEP_SQL : ROLLUP_SQL,
+          step === 'sweep' ? [profile.profile_id] : [3, profile.profile_id],
+        )
+        rows += result.rowCount ?? 0
+      }
+    } catch (err) {
+      failures++
+      if (err instanceof DeadlineError) return partial()
+    }
+    done++
+  }
+  return { ok: failures === 0, rows, detail: `${step.toUpperCase()} rows=${rows}; checked ${done}/${profiles.length}; errors=${failures}` }
+}
+
+async function syncStructure(client: PoolClient, profile: Profile, started: number): Promise<StepResult> {
+  const deadline = started + CLEANUP_DEADLINE_MS
+  const media = 'application/vnd.spCampaign.v3+json'
+  let nextToken: string | undefined, pages = 0, rows = 0
+  const partial = (): StepResult => ({ ok: true, rows, detail: 'PARTIAL campaign list, continues next run' })
+  try {
+    const api = await createApi(profile, deadline)
+    do {
+      if (Date.now() - started >= WALL_CAP_MS) return partial()
+      if (pages >= 50) throw new SyncError('Campaign list page cap reached')
+      const { body } = await api('/sp/campaigns/list', {
+        method: 'POST', headers: { 'Content-Type': media, Accept: media },
+        body: JSON.stringify({ maxResults: 100, ...(nextToken ? { nextToken } : {}) }),
+      })
+      const campaigns = body.campaigns ?? []
+      if (!Array.isArray(campaigns)) throw new SyncError('Invalid campaign list')
+      for (const c of campaigns) {
+        if (Date.now() - started >= WALL_CAP_MS) return partial()
+        await stepQuery(client, deadline,
+          `INSERT INTO amazon_campaigns
+             (campaign_id, profile_id, name, state, campaign_type,
+              targeting_type, start_date, end_date, budget_amount, budget_type,
+              raw, synced_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+           ON CONFLICT (campaign_id, profile_id) DO UPDATE SET
+             name            = EXCLUDED.name,
+             state           = EXCLUDED.state,
+             campaign_type   = EXCLUDED.campaign_type,
+             targeting_type  = EXCLUDED.targeting_type,
+             start_date      = EXCLUDED.start_date,
+             end_date        = EXCLUDED.end_date,
+             budget_amount   = EXCLUDED.budget_amount,
+             budget_type     = EXCLUDED.budget_type,
+             raw             = EXCLUDED.raw,
+             synced_at       = EXCLUDED.synced_at`,
+          [
+            c.campaignId,
+            profile.profile_id,
+            c.name,
+            c.state,
+            c.campaignType ?? 'sponsoredProducts',
+            c.targetingType ?? null,
+            c.startDate ?? null,
+            c.endDate ?? null,
+            c.budget?.budget ?? null,
+            c.budget?.budgetType ?? null,
+            JSON.stringify(c),
+          ],
+        );
+        rows++
+      }
+      pages++
+      nextToken = body.nextToken ?? undefined
+    } while (nextToken)
+    return { ok: true, rows, detail: null }
+  } catch (err) {
+    return { ok: false, rows, detail: err instanceof DeadlineError ? 'PARTIAL campaign list, continues next run' : errorDetail(err) }
+  }
+}
+
+const SWEEP_SQL = `
+  WITH destinations AS (
+    SELECT
+      r.id,
+      r.rec_type,
+      r.target_text,
+      r.profile_id,
+      COALESCE(
+        r.campaign_id,
+        r.evidence #>> '{resolved_destination,campaign_id}',
+        r.evidence ->> 'campaign_id',
+        r.evidence #>> '{primary_placement,campaign_id}'
+      ) AS destination_campaign_id,
+      COALESCE(
+        r.evidence #>> '{resolved_destination,ad_group_id}',
+        r.evidence ->> 'ad_group_id',
+        r.evidence #>> '{primary_placement,ad_group_id}'
+      ) AS destination_ad_group_id
+    FROM recommendations r
+    WHERE r.status IN ('DRAFT', 'APPROVED')
+      AND r.rec_type <> 'CREATE_STRUCTURE'
+      AND r.profile_id = $1
+  ),
+  stale AS (
+    SELECT
+      d.id,
+      d.rec_type,
+      d.target_text,
+      c.name AS campaign_name,
+      COALESCE(c.state, 'MISSING') AS campaign_state,
+      CASE
+        WHEN d.destination_ad_group_id IS NULL THEN NULL
+        ELSE COALESCE(ag.state, 'MISSING')
+      END AS ad_group_state
+    FROM destinations d
+    LEFT JOIN amazon_campaigns c
+      ON c.profile_id = d.profile_id
+     AND c.campaign_id = d.destination_campaign_id
+    LEFT JOIN amazon_ad_groups ag
+      ON ag.profile_id = d.profile_id
+     AND ag.ad_group_id = d.destination_ad_group_id
+     AND ag.campaign_id = d.destination_campaign_id
+    WHERE c.state IS DISTINCT FROM 'ENABLED'
+       OR (d.destination_ad_group_id IS NOT NULL AND ag.state IS DISTINCT FROM 'ENABLED')
+  ),
+     rejected AS (
+       UPDATE recommendations r
+          SET status   = 'REJECTED',
+              ruled_at = now(),
+              evidence = r.evidence || jsonb_build_object(
+                'reject_reason', 'destination_not_enabled'
+              )
+         FROM stale s
+        WHERE r.id = s.id
+          AND r.status IN ('DRAFT', 'APPROVED')
+       RETURNING r.id, r.ruled_at
+     )
+     SELECT
+       s.id,
+       s.rec_type,
+       s.target_text,
+       s.campaign_name,
+       s.campaign_state,
+       s.ad_group_state,
+       rejected.ruled_at
+     FROM stale s
+     JOIN rejected USING (id)
+     ORDER BY s.id`
+
+const ROLLUP_SQL = `INSERT INTO daily_rollup
+       (profile_id, date, currency, spend, sales, orders, clicks, impressions, acos, computed_at)
+     SELECT
+       d.profile_id,
+       d.date,
+       p.currency_code                       AS currency,
+       SUM(d.cost)                           AS spend,
+       SUM(d.sales_14d)                      AS sales,
+       SUM(d.purchases_14d)::int             AS orders,
+       SUM(d.clicks)::int                    AS clicks,
+       SUM(d.impressions)                    AS impressions,
+       CASE WHEN SUM(d.sales_14d) > 0
+            THEN ROUND(SUM(d.cost) / SUM(d.sales_14d), 4)
+            ELSE NULL
+       END                                   AS acos,
+       now()                                 AS computed_at
+     FROM amazon_campaign_daily d
+     JOIN amazon_profiles p ON p.profile_id = d.profile_id
+     WHERE d.date >= CURRENT_DATE - ($1::int - 1)
+       AND d.date <= CURRENT_DATE
+       AND p.is_active AND d.profile_id = $2
+     GROUP BY d.profile_id, d.date, p.currency_code
+     ON CONFLICT (profile_id, date) DO UPDATE SET
+       currency    = EXCLUDED.currency,
+       spend       = EXCLUDED.spend,
+       sales       = EXCLUDED.sales,
+       orders      = EXCLUDED.orders,
+       clicks      = EXCLUDED.clicks,
+       impressions = EXCLUDED.impressions,
+       acos        = EXCLUDED.acos,
+       computed_at = EXCLUDED.computed_at`
+
+interface StampRec {
+  id: string; rec_type: string; campaign_id: string | null; target_text: string
+  evidence: string | Record<string, string>; pushed_at_resolved: string
+}
+const HORIZONS = [{ key: 't7', days: 7 }, { key: 't14', days: 14 }, { key: 't30', days: 30 }] as const
+const MS_PER_DAY = 86_400_000
+
+async function stampProfile(client: PoolClient, profile: Profile, started: number): Promise<StepResult> {
+  const deadline = started + CLEANUP_DEADLINE_MS
+  let rows = 0, failures = 0
+  const partial = (): StepResult => ({ ok: failures === 0, rows, detail: 'PARTIAL due horizons, continues next run' })
+  try {
+    const { rows: profRows } = await stepQuery(client, deadline,
+      `SELECT gp_per_order::float AS gp_per_order FROM amazon_profiles WHERE profile_id = $1`,
+      [profile.profile_id],
+    )
+    const gpPerOrder = profRows[0]?.gp_per_order != null ? Number(profRows[0].gp_per_order) : null
+    const { rows: recs } = await stepQuery(client, deadline,
+      `SELECT id, rec_type, profile_id, campaign_id, target_text, evidence,
+              COALESCE(pushed_at, (evidence->>'pushed_at')::timestamptz) AS pushed_at_resolved
+       FROM recommendations WHERE status = 'PUSHED' AND profile_id = $1
+         AND COALESCE(pushed_at, (evidence->>'pushed_at')::timestamptz) IS NOT NULL
+       ORDER BY id`, [profile.profile_id],
+    )
+    const stampedSet = new Set<string>()
+    if (recs.length) {
+      const { rows: existing } = await stepQuery(client, deadline,
+        `SELECT rec_id::text, horizon FROM rec_outcomes WHERE rec_id = ANY($1::bigint[])`,
+        [recs.map(r => r.id)],
+      )
+      for (const row of existing) stampedSet.add(`${row.rec_id}:${row.horizon}`)
+    }
+    const now = Date.now()
+    for (const rec of recs as StampRec[]) {
+      if (Date.now() - started >= WALL_CAP_MS) return partial()
+      const pushedMs = new Date(rec.pushed_at_resolved).getTime()
+      for (const horizon of HORIZONS) {
+        if (Date.now() - started >= WALL_CAP_MS) return partial()
+        if (pushedMs + horizon.days * MS_PER_DAY > now || stampedSet.has(`${rec.id}:${horizon.key}`)) continue
+        const metrics = await captureOutcome(client, deadline, profile.profile_id, rec, horizon.days, gpPerOrder)
+        if (metrics.capture_error) failures++
+        // Unique primary key shared with the mini: the pre-read alone is NOT a lock.
+        const written = await stepQuery(client, deadline,
+          `INSERT INTO rec_outcomes (rec_id, horizon, metrics)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (rec_id, horizon) DO NOTHING`,
+          [rec.id, horizon.key, JSON.stringify(metrics)],
+        )
+        rows += written.rowCount ?? 0
+        stampedSet.add(`${rec.id}:${horizon.key}`)
+      }
+    }
+    return { ok: failures === 0, rows, detail: null }
+  } catch (err) {
+    return { ok: false, rows, detail: err instanceof DeadlineError ? 'PARTIAL due horizons, continues next run' : errorDetail(err) }
+  }
+}
+
+// All handler queries, metric fields and before/after windows from stamp-outcomes.mjs.
+async function captureOutcome(
+  client: PoolClient, deadline: number, profileIdStr: string,
+  rec: StampRec, days: number, gpPerOrder: number | null,
+): Promise<Record<string, unknown>> {
+  const gpBasis = gpPerOrder != null ? 'unit' : 'revenue'
+  const ev = typeof rec.evidence === 'string' ? JSON.parse(rec.evidence) : rec.evidence
+  const pushedAt = new Date(rec.pushed_at_resolved ?? ev.pushed_at)
+  const pushedMs = pushedAt.getTime()
+  const windowStart = pushedAt.toISOString().slice(0, 10)
+  const windowEnd = new Date(pushedMs + days * MS_PER_DAY).toISOString().slice(0, 10)
+  const beforeEnd = windowStart
+  const beforeStart = new Date(pushedMs - days * MS_PER_DAY).toISOString().slice(0, 10)
+  let metrics: Record<string, unknown> = { window_days: days, rows_found: 0 }
+  try {
+    // ── NEGATE_TERM ──────────────────────────────────────────────────────
+    // Layer 3.1: sales_14d (after); before-window (cost, sales_14d,
+    //   clicks, rows_found).
+    // Layer 3.2: + purchases_14d (after); + before_purchases_14d;
+    //             + gp_basis, gp_per_order
+    if (rec.rec_type === 'NEGATE_TERM') {
+      const { rows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                COALESCE(SUM(cost),          0)         AS cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS sales_14d,
+                COUNT(*)::int                           AS rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id  = $1 AND search_term = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, rec.target_text, windowStart, windowEnd],
+      );
+      const { rows: bRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                COALESCE(SUM(cost),          0)         AS before_cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS before_sales_14d,
+                COUNT(*)::int                           AS before_rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id  = $1 AND search_term = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, rec.target_text, beforeStart, beforeEnd],
+      );
+      const r = rows[0]; const b = bRows[0];
+      metrics = {
+        ...metrics,
+        clicks:               Number(r.clicks),
+        cost:                 Number(r.cost),
+        purchases_14d:        Number(r.purchases_14d),
+        sales_14d:            Number(r.sales_14d),
+        rows_found:           Number(r.rows_found),
+        before_clicks:        Number(b.before_clicks),
+        before_cost:          Number(b.before_cost),
+        before_purchases_14d: Number(b.before_purchases_14d),
+        before_sales_14d:     Number(b.before_sales_14d),
+        before_rows_found:    Number(b.before_rows_found),
+        gp_basis: gpBasis,
+        gp_per_order:         gpPerOrder,
+      };
+
+    // ── NEGATE_TARGET ────────────────────────────────────────────────────
+    // Layer 3.1: sales_14d (after); before-window (cost, sales_14d,
+    //   clicks, rows_found).
+    // Layer 3.2: + purchases_14d (after); + before_purchases_14d;
+    //             + gp_basis, gp_per_order
+    } else if (rec.rec_type === 'NEGATE_TARGET') {
+      const targetAsin = (rec.target_text || '').toLowerCase();
+      const { rows: ntRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                COALESCE(SUM(cost),          0)         AS cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS sales_14d,
+                COUNT(*)::int                           AS rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id = $1 AND LOWER(search_term) = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, targetAsin, windowStart, windowEnd],
+      );
+      const { rows: nbRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                COALESCE(SUM(cost),          0)         AS before_cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS before_sales_14d,
+                COUNT(*)::int                           AS before_rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id = $1 AND LOWER(search_term) = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, targetAsin, beforeStart, beforeEnd],
+      );
+      const ntr = ntRows[0]; const nb = nbRows[0];
+      metrics = {
+        ...metrics,
+        clicks:               Number(ntr.clicks),
+        cost:                 Number(ntr.cost),
+        purchases_14d:        Number(ntr.purchases_14d),
+        sales_14d:            Number(ntr.sales_14d),
+        rows_found:           Number(ntr.rows_found),
+        before_clicks:        Number(nb.before_clicks),
+        before_cost:          Number(nb.before_cost),
+        before_purchases_14d: Number(nb.before_purchases_14d),
+        before_sales_14d:     Number(nb.before_sales_14d),
+        before_rows_found:    Number(nb.before_rows_found),
+        gp_basis: gpBasis,
+        gp_per_order:         gpPerOrder,
+      };
+
+    // ── PROMOTE_TERM / CREATIVE_KEYWORD ──────────────────────────────────
+    // Layer 3.1: before-window (cost, sales_14d, clicks,
+    //   purchases_14d, rows_found).
+    // Layer 3.2: + gp_basis, gp_per_order (purchases already present)
+    } else if (rec.rec_type === 'PROMOTE_TERM' || rec.rec_type === 'CREATIVE_KEYWORD') {
+      const { rows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                COALESCE(SUM(cost),          0)         AS cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS sales_14d,
+                COUNT(*)::int                           AS rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id  = $1 AND search_term = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, rec.target_text, windowStart, windowEnd],
+      );
+      const { rows: bRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                COALESCE(SUM(cost),          0)         AS before_cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS before_sales_14d,
+                COUNT(*)::int                           AS before_rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id  = $1 AND search_term = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, rec.target_text, beforeStart, beforeEnd],
+      );
+      const r = rows[0]; const b = bRows[0];
+      metrics = {
+        ...metrics,
+        clicks:               Number(r.clicks),
+        cost:                 Number(r.cost),
+        purchases_14d:        Number(r.purchases_14d),
+        sales_14d:            Number(r.sales_14d),
+        rows_found:           Number(r.rows_found),
+        before_clicks:        Number(b.before_clicks),
+        before_cost:          Number(b.before_cost),
+        before_purchases_14d: Number(b.before_purchases_14d),
+        before_sales_14d:     Number(b.before_sales_14d),
+        before_rows_found:    Number(b.before_rows_found),
+        gp_basis: gpBasis,
+        gp_per_order:         gpPerOrder,
+      };
+
+    // ── PROMOTE_ASIN / CREATIVE_TARGET ───────────────────────────────────
+    // Layer 3.1: before-window (cost, sales (sales_14d), clicks,
+    //   purchases, rows_found).
+    // Layer 3.2: + gp_basis, gp_per_order (purchases already present)
+    } else if (rec.rec_type === 'PROMOTE_ASIN' || rec.rec_type === 'CREATIVE_TARGET') {
+      const asin = rec.target_text.toLowerCase();
+      const { rows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                COALESCE(SUM(cost),          0)         AS cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS purchases,
+                COALESCE(SUM(sales_14d),     0)         AS sales,
+                COUNT(*)::int                           AS rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id = $1 AND LOWER(search_term) = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, asin, windowStart, windowEnd],
+      );
+      const { rows: bRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                COALESCE(SUM(cost),          0)         AS before_cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases,
+                COALESCE(SUM(sales_14d),     0)         AS before_sales,
+                COUNT(*)::int                           AS before_rows_found
+           FROM amazon_search_term_daily
+          WHERE profile_id = $1 AND LOWER(search_term) = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, asin, beforeStart, beforeEnd],
+      );
+      const r = rows[0]; const b = bRows[0];
+      metrics = {
+        ...metrics,
+        clicks:            Number(r.clicks),
+        cost:              Number(r.cost),
+        purchases:         Number(r.purchases),
+        sales:             Number(r.sales),
+        rows_found:        Number(r.rows_found),
+        before_clicks:     Number(b.before_clicks),
+        before_cost:       Number(b.before_cost),
+        before_purchases:  Number(b.before_purchases),
+        before_sales:      Number(b.before_sales),
+        before_rows_found: Number(b.before_rows_found),
+        gp_basis: gpBasis,
+        gp_per_order:      gpPerOrder,
+      };
+
+    // ── REPLACE_PRODUCT_AD ───────────────────────────────────────────────
+    // Layer 3.1: b0_sales, hc_sales (after-window); before-window for
+    //   both B0 and HC.
+    // Layer 3.2: + b0_orders (after); + before_b0_orders, before_hc_orders;
+    //             + gp_basis, gp_per_order
+    } else if (rec.rec_type === 'REPLACE_PRODUCT_AD') {
+      const b0Asin = (ev.b0_asin   || '').toLowerCase();
+      const hcAsin = (ev.hc_isbn10 || '').toLowerCase();
+      const campId = String(ev.campaign_id ?? rec.campaign_id ?? '');
+
+      // B0 after
+      const { rows: b0Rows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(cost),          0)         AS b0_spend,
+                COALESCE(SUM(clicks),        0)::bigint AS b0_clicks,
+                COALESCE(SUM(impressions),   0)::bigint AS b0_impressions,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS b0_orders,
+                COALESCE(SUM(sales_14d),     0)         AS b0_sales,
+                COUNT(*)::int                           AS b0_rows_found
+           FROM amazon_advertised_product_daily
+          WHERE profile_id = $1 AND LOWER(asin) = $2 AND campaign_id = $3
+            AND date >= $4::date AND date < $5::date`,
+        [profileIdStr, b0Asin, campId, windowStart, windowEnd],
+      );
+      // HC after
+      const { rows: hcRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(cost),          0)         AS hc_spend,
+                COALESCE(SUM(clicks),        0)::bigint AS hc_clicks,
+                COALESCE(SUM(impressions),   0)::bigint AS hc_impressions,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS hc_orders,
+                COALESCE(SUM(sales_14d),     0)         AS hc_sales,
+                COUNT(*)::int                           AS hc_rows_found
+           FROM amazon_advertised_product_daily
+          WHERE profile_id = $1 AND LOWER(asin) = $2 AND campaign_id = $3
+            AND date >= $4::date AND date < $5::date`,
+        [profileIdStr, hcAsin, campId, windowStart, windowEnd],
+      );
+      // B0 before
+      const { rows: b0bRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(cost),          0)         AS before_b0_spend,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS before_b0_orders,
+                COALESCE(SUM(sales_14d),     0)         AS before_b0_sales,
+                COUNT(*)::int                           AS before_b0_rows_found
+           FROM amazon_advertised_product_daily
+          WHERE profile_id = $1 AND LOWER(asin) = $2 AND campaign_id = $3
+            AND date >= $4::date AND date < $5::date`,
+        [profileIdStr, b0Asin, campId, beforeStart, beforeEnd],
+      );
+      // HC before
+      const { rows: hcbRows } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(cost),          0)         AS before_hc_spend,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS before_hc_orders,
+                COALESCE(SUM(sales_14d),     0)         AS before_hc_sales,
+                COUNT(*)::int                           AS before_hc_rows_found
+           FROM amazon_advertised_product_daily
+          WHERE profile_id = $1 AND LOWER(asin) = $2 AND campaign_id = $3
+            AND date >= $4::date AND date < $5::date`,
+        [profileIdStr, hcAsin, campId, beforeStart, beforeEnd],
+      );
+
+      const b0 = b0Rows[0]; const hc = hcRows[0];
+      const b0b = b0bRows[0]; const hcb = hcbRows[0];
+      metrics = {
+        ...metrics,
+        grain:                'asin+campaign_id',
+        b0_asin:              ev.b0_asin,
+        hc_asin:              ev.hc_isbn10,
+        b0_spend:             Number(b0.b0_spend),
+        b0_clicks:            Number(b0.b0_clicks),
+        b0_impressions:       Number(b0.b0_impressions),
+        b0_orders:            Number(b0.b0_orders),
+        b0_sales:             Number(b0.b0_sales),
+        hc_spend:             Number(hc.hc_spend),
+        hc_clicks:            Number(hc.hc_clicks),
+        hc_impressions:       Number(hc.hc_impressions),
+        hc_orders:            Number(hc.hc_orders),
+        hc_sales:             Number(hc.hc_sales),
+        before_b0_spend:      Number(b0b.before_b0_spend),
+        before_b0_orders:     Number(b0b.before_b0_orders),
+        before_b0_sales:      Number(b0b.before_b0_sales),
+        before_b0_rows_found: Number(b0b.before_b0_rows_found),
+        before_hc_spend:      Number(hcb.before_hc_spend),
+        before_hc_orders:     Number(hcb.before_hc_orders),
+        before_hc_sales:      Number(hcb.before_hc_sales),
+        before_hc_rows_found: Number(hcb.before_hc_rows_found),
+        rows_found:           Number(b0.b0_rows_found) + Number(hc.hc_rows_found),
+        b0_rows_found:        Number(b0.b0_rows_found),
+        hc_rows_found:        Number(hc.hc_rows_found),
+        gp_basis: gpBasis,
+        gp_per_order:         gpPerOrder,
+      };
+
+    // ── BID_ADJUST (incl. REVIVE) / BUDGET_ADJUST / PAUSE_CAMPAIGN / CREATE_STRUCTURE
+    // Layer 3.1: before/after cost + sales already present.
+    // Layer 3.2: + purchases_14d (after); + before_purchases_14d;
+    //             + gp_basis, gp_per_order
+    } else if (
+      rec.rec_type === 'BID_ADJUST'       ||
+      rec.rec_type === 'BUDGET_ADJUST'    ||
+      rec.rec_type === 'PAUSE_CAMPAIGN'   ||
+      rec.rec_type === 'CREATE_STRUCTURE'
+    ) {
+      const campId = String(ev.campaign_id ?? rec.campaign_id ?? rec.target_text);
+      const { rows: curr } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(cost),          0)         AS cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS sales_14d,
+                COALESCE(SUM(clicks),        0)::bigint AS clicks,
+                COALESCE(SUM(impressions),   0)::bigint AS impressions,
+                COUNT(*)::int                           AS rows_found
+           FROM amazon_campaign_daily
+          WHERE profile_id = $1 AND campaign_id = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, campId, windowStart, windowEnd],
+      );
+      const { rows: before } = await stepQuery(client, deadline,
+        `SELECT COALESCE(SUM(cost),          0)         AS before_cost,
+                COALESCE(SUM(purchases_14d), 0)::bigint AS before_purchases_14d,
+                COALESCE(SUM(sales_14d),     0)         AS before_sales_14d,
+                COALESCE(SUM(clicks),        0)::bigint AS before_clicks,
+                COALESCE(SUM(impressions),   0)::bigint AS before_impressions,
+                COUNT(*)::int                           AS before_rows_found
+           FROM amazon_campaign_daily
+          WHERE profile_id = $1 AND campaign_id = $2
+            AND date >= $3::date AND date < $4::date`,
+        [profileIdStr, campId, beforeStart, beforeEnd],
+      );
+      const c = curr[0]; const b = before[0];
+      metrics = {
+        ...metrics,
+        cost:                 Number(c.cost),
+        purchases_14d:        Number(c.purchases_14d),
+        sales_14d:            Number(c.sales_14d),
+        clicks:               Number(c.clicks),
+        impressions:          Number(c.impressions),
+        rows_found:           Number(c.rows_found),
+        before_cost:          Number(b.before_cost),
+        before_purchases_14d: Number(b.before_purchases_14d),
+        before_sales_14d:     Number(b.before_sales_14d),
+        before_clicks:        Number(b.before_clicks),
+        before_impressions:   Number(b.before_impressions),
+        before_rows_found:    Number(b.before_rows_found),
+        gp_basis: gpBasis,
+        gp_per_order:         gpPerOrder,
+      };
+    }
+  } catch (err) {
+    if (err instanceof DeadlineError) throw err;
+    metrics = { ...metrics, rows_found: 0, capture_error: errorDetail(err) };
+  }
+  return metrics
+}
+
 // Entire lifecycle guarded, including log INSERT/UPDATE and cleanup: never throws.
 export async function runStep(step: KnownStep): Promise<StepResult> {
   let pool: Pool | undefined, client: PoolClient | undefined, logId: string | undefined
@@ -351,17 +962,14 @@ export async function runStep(step: KnownStep): Promise<StepResult> {
       'INSERT INTO amazon_sync_log (run_started_at, step, ok) VALUES (now(), $1, null) RETURNING id', [step],
     )
     logId = start.rows[0].id
-    if (NOT_YET_IMPLEMENTED.includes(step)) {
-      result = { ok: false, rows: null, detail: 'not implemented' }
-    } else {
-      const lock = await client.query(
-        "SELECT pg_try_advisory_lock(hashtext('amazon-vercel-sync'), hashtext($1)) AS locked", [step],
-      )
-      locked = lock.rows[0].locked
-      result = !locked ? { ok: true, rows: 0, detail: 'Already running' }
-        : step === 'request-reports' ? await requestReports(client, started)
-        : await ingestReports(client, started)
-    }
+    const lock = await client.query(
+      "SELECT pg_try_advisory_lock(hashtext('amazon-vercel-sync'), hashtext($1)) AS locked", [step],
+    )
+    locked = lock.rows[0].locked
+    result = !locked ? { ok: true, rows: 0, detail: 'Already running' }
+      : step === 'request-reports' ? await requestReports(client, started)
+      : step === 'ingest-reports' ? await ingestReports(client, started)
+      : await maintenanceStep(client, step, started)
   } catch (err) {
     result = { ...result, ok: false, detail: errorDetail(err) }
   } finally {
