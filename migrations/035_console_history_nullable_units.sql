@@ -1,0 +1,1 @@
+ALTER TABLE console_history ALTER COLUMN units DROP NOT NULL;
