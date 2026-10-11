@@ -142,7 +142,14 @@ Mechanism: `push-seasonal-rules.mjs --profile ID [--execute]` selects only APPRO
 
 API contract: [Amazon schedule-based budget-rule examples](https://d3a0d0y2hgofx6.cloudfront.net/ja-jp/guides/budgets/rules/schedule-based.html). Read-only ES probes on 2026-10-11 returned HTTP 200 for `/sp/budgetRules?pageSize=30` (`budgetRulesForAdvertiserResponse`, `nextToken`) and `/sp/campaigns/264962814236016/budgetRules` (`associatedRules`), with application/json. Creation/association remain unverified against live Amazon until a separately authorised execute.
 
+## All ad types displayed
+
 Campaign display ruling (2026-10-11): structure sync and Campaigns list/header metrics cover SP, SB, SBV (only where Amazon exposes video format), and SD; combine SB+SB_LEGACY for SB metrics, with the same windows as SP. SB/SD details are header-only and have no recommendation controls. Engine rules remain SP-only by design: every generator query reading amazon_campaigns must explicitly require campaign_type='sponsoredProducts' before other campaign types are landed; only SP scoping predicates are added to generation, sweep and campaign-destination reads; thresholds, push behavior and grading are unchanged.
+
+SB/SD pauses are done manually in the console; the engine stays SP-only. Pause log:
+
+- 2026-10-11 ES B2MP | SB | CATCH ALL | GENERICA | CATEGORIAS (legacy)
+- 2026-10-11 ES B2MP | SD | HERMANOS | 8418302445 | ATAQUE | ASINs COMPETENCIA
 
 ## Monthly all-ad-types reporting (2026-10-11)
 
