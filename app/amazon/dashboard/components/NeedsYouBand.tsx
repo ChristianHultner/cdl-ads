@@ -9,7 +9,7 @@ interface NeedsYouBandProps {
 
 export default function NeedsYouBand({ approvalsWaiting, experiments }: NeedsYouBandProps) {
   const verdicts = experiments
-    .filter(experiment => experiment.verdictAt != null)
+    .filter(experiment => experiment.status === 'LIVE' && experiment.verdictAt != null)
     .sort((a, b) => new Date(a.verdictAt!).getTime() - new Date(b.verdictAt!).getTime())
     .slice(0, 2)
 

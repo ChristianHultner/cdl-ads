@@ -16,8 +16,8 @@ export default function ExperimentsZone({ rows }: { rows: ExperimentRow[] }) {
 
   return (
     <section className={styles.experimentsSection}>
-      <div className={styles.zoneLabel}>Running experiments</div>
-      <div className={styles.zoneCaption}>Every live bet, its bar, and its clock. Nothing spends without a row here.</div>
+      <div className={styles.zoneLabel}>Experiments ledger</div>
+      <div className={styles.zoneCaption}>Live bets, upcoming decisions, and experiments released to the margin engine.</div>
       <div className={styles.experiments}>
         {rows.map(row => {
           const elapsedDays = row.startedAt ? daysElapsed(row.startedAt, row.horizonDays) : 0
@@ -26,6 +26,7 @@ export default function ExperimentsZone({ rows }: { rows: ExperimentRow[] }) {
             : 0
           const live = row.status === 'LIVE'
           const proposed = row.status === 'PROPOSED'
+          const released = row.status === 'RELEASED'
 
           return (
             <article className={styles.experiment} key={row.id}>
@@ -34,19 +35,19 @@ export default function ExperimentsZone({ rows }: { rows: ExperimentRow[] }) {
                 <div className={styles.experimentHypothesis}>{row.hypothesis}</div>
               </div>
               <div>
-                <div className={styles.experimentBar}>
+                {!released && <div className={styles.experimentBar}>
                   <span className={styles.experimentFill} style={{ width: `${progress}%` }} />
                   {row.startedAt && <span className={styles.experimentVerdictLine} />}
-                </div>
+                </div>}
                 <div className={styles.experimentDays}>
-                  {row.startedAt
+                  {released ? 'Closed without a win · campaigns managed by the margin engine' : row.startedAt
                     ? `day ${elapsedDays} of ${row.horizonDays} · verdict ${formatVerdictDate(row.verdictAt)}`
                     : `not started · ${row.horizonDays}-day horizon`}
                 </div>
               </div>
               <div className={styles.experimentStatus}>
                 <span className={`${styles.experimentBadge} ${live ? styles.badgeLive : proposed ? styles.badgeWaiting : styles.badgeNeutral}`}>
-                  {live ? 'live' : proposed ? 'awaiting approval' : row.status.toLowerCase()}
+                  {live ? 'live' : proposed ? 'awaiting approval' : released ? 'released to engine' : row.status.toLowerCase()}
                 </span>
               </div>
             </article>

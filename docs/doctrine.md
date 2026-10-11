@@ -120,6 +120,10 @@ null). Other recommendation types are outside this migration.
   or pushes. The frame's only DB-writing generator run is ES; Christian checks
   card arithmetic before any later approval. No push is authorized here.
 
+## Experiments ledger
+
+**RELEASED:** An experiment closed without a win; its campaigns keep running under the margin engine, with no experiment exemption because only LIVE rows are exempt.
+
 ## GP Basis
 
 **Ruling (migration 028, 2026-08-27):** Engine GP is computed as `purchases_14d × gp_per_order − spend`, per profile, in native currency. No FX conversion is ever applied.
