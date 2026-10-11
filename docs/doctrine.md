@@ -126,6 +126,8 @@ null). Other recommendation types are outside this migration.
 
 ## Seasonal budget rules
 
+**Legacy budget-rule census (2026-10-11):** ES has three PAUSED performance rules (15%, 10%, 20%; budget increases +200%, +500%, +100%) on CATCH ALL DEFENSA 2, plus the EXPIRED Xmas 2022 schedule rule; US has four ACTIVE performance rules (+100–500%), each on a PAUSED campaign: CATCH ALL USA Comp (Acos -15%, +500%), CATCH ALL USA AUTO (ROAS >4, +100%), CQSPPA Mixed Authors (CQ Low Acos, +200%), and CATCH ALL ESP AUTO (US; ROAS >4, +100%). Re-enabling those US campaigns re-arms their ACTIVE rules; the ES PAUSED/EXPIRED rules remain inactive.
+
 **SEASONAL_STRUCTURE 2026 — Christian's ruling, 2026-10-11:** No November seasonal changes anywhere. The only season is **2026-12-01 through 2027-01-05 inclusive**, Christmas plus Reyes, as marketplace-local calendar dates (sent to Amazon as YYYYMMDD, never converted to UTC).
 
 Scope: ES `2263723137827296` and US `139446882235960` only; cached ENABLED campaigns with at least five `purchases_14d` orders over the 60 complete days through yesterday, and unrounded cost/order at or below profile `gp_per_order`. Exclude LIVE experiment campaigns by profile-scoped campaign IDs (including `selection` and `campaign_ids`), with exact campaign-name/cluster-name fallback; never read `not_selected`.
