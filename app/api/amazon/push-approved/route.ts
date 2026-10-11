@@ -22,6 +22,7 @@ const SCRIPTS = [
   'push-new-targets',
   'push-structure',
   'push-budget-adjustments',
+  'push-seasonal-rules',
   'push-replace-ads',
 ] as const
 

@@ -124,6 +124,22 @@ null). Other recommendation types are outside this migration.
 
 **RELEASED:** An experiment closed without a win; its campaigns keep running under the margin engine, with no experiment exemption because only LIVE rows are exempt.
 
+## Seasonal budget rules
+
+**SEASONAL_STRUCTURE 2026 — Christian's ruling, 2026-10-11:** No November seasonal changes anywhere. The only season is **2026-12-01 through 2027-01-05 inclusive**, Christmas plus Reyes, as marketplace-local calendar dates (sent to Amazon as YYYYMMDD, never converted to UTC).
+
+Scope: ES `2263723137827296` and US `139446882235960` only; cached ENABLED campaigns with at least five `purchases_14d` orders over the 60 complete days through yesterday, and unrounded cost/order at or below profile `gp_per_order`. Exclude LIVE experiment campaigns by profile-scoped campaign IDs (including `selection` and `campaign_ids`), with exact campaign-name/cluster-name fallback; never read `not_selected`.
+
+Formula: `avg_daily_spend_60d = spend_60d / 60`; `season_budget = max(current_budget, round(3 × avg_daily_spend_60d, 2))`; `increase_pct = round((season_budget / current_budget − 1) × 100)` to a whole percent. Zero-percent increases produce no card. Target budget is the formula value; Amazon applies the rounded percentage, so the effective budget can differ slightly. Preserve `pre_season_budget = current_budget` in evidence.
+
+`draft-seasonal-rules.mjs --profile ID --start 2026-12-01 --end 2027-01-05` writes only DRAFT `SEASONAL_BUDGET_RULE` cards, with `campaign_id = target_text = evidence.campaign_id`. A per-profile transactional advisory lock serializes drafting; DRAFT/APPROVED/HELD/PUSHED cards block another card for the same campaign and season. No approval is implied by drafting.
+
+Mechanism: `push-seasonal-rules.mjs --profile ID [--execute]` selects only APPROVED seasonal cards. Default dry-run does not mint tokens, call Amazon, or write to DB. Explicit execution creates a SCHEDULE rule (`DAILY`, date range, percent increase) using `POST /sp/budgetRules`, then associates it using `POST /sp/campaigns/{campaignId}/budgetRules`, both application/json. Persist the rule ID before association and stamp PUSHED only after explicit successful item receipts. Reuse a stored rule ID on association retry; an ambiguous creation attempt without a stored ID stops for reconciliation, never blind recreation. The push-approved route invokes it immediately after push-budget-adjustments. Other profiles are a no-op. Nothing changes a base campaign budget, and nothing is deleted; Amazon activates and expires the scheduled increase. **Reversal: disassociate the rule**, retaining the rule and pre-season budget record.
+
+**Owed before 2026-12-08, separate later frame:** weekly in-season guard that steps the seasonal increase back by half when season-to-date cost/order exceeds profile GP. This guard is not implemented here.
+
+API contract: [Amazon schedule-based budget-rule examples](https://d3a0d0y2hgofx6.cloudfront.net/ja-jp/guides/budgets/rules/schedule-based.html). Read-only ES probes on 2026-10-11 returned HTTP 200 for `/sp/budgetRules?pageSize=30` (`budgetRulesForAdvertiserResponse`, `nextToken`) and `/sp/campaigns/264962814236016/budgetRules` (`associatedRules`), with application/json. Creation/association remain unverified against live Amazon until a separately authorised execute.
+
 ## GP Basis
 
 **Ruling (migration 028, 2026-08-27):** Engine GP is computed as `purchases_14d × gp_per_order − spend`, per profile, in native currency. No FX conversion is ever applied.
