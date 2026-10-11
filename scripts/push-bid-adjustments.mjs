@@ -184,7 +184,7 @@ for (const rec of recs) {
     // Fetch campaign name.
     const { rows: campNameRows } = await pool.query(
       `SELECT name FROM amazon_campaigns
-        WHERE profile_id = $1 AND campaign_id::text = $2`,
+        WHERE campaign_type = 'sponsoredProducts' AND profile_id = $1 AND campaign_id::text = $2`,
       [profileId, reviveCampId],
     );
     const campName = campNameRows[0]?.name ?? reviveCampId;

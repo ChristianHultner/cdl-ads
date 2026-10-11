@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic'
 
+import { CAMPAIGN_METRICS_CTE, CAMPAIGN_LABEL_SQL } from '@/lib/amazon/campaign-display'
 import { neon } from '@neondatabase/serverless'
 import { notFound } from 'next/navigation'
 import { RecCard, type RecCardContext, type RecRow, type DestTargetRow } from '@/app/components/RecCard'
@@ -155,6 +156,30 @@ export default async function CampaignDetailPage({
 }) {
   const { profileId, campaignId } = await params
   const sql = neon(process.env.DATABASE_URL!)
+
+  // Non-SP pages stop here: header metrics only, with no recommendation/ad-group queries.
+  const [other] = await sql.query(CAMPAIGN_METRICS_CTE + `
+    SELECT c.name,c.state,c.campaign_type,${CAMPAIGN_LABEL_SQL} AS type_label,p.currency_code,
+      coalesce(m.spend,0)::text AS spend,coalesce(m.sales,0)::text AS sales,coalesce(m.orders,0)::text AS orders,
+      (m.spend/nullif(m.orders,0))::text AS cost_per_order
+    FROM amazon_campaigns c JOIN amazon_profiles p USING(profile_id)
+    LEFT JOIN campaign_metrics m ON m.profile_id=c.profile_id AND m.campaign_id=c.campaign_id AND m.campaign_type=c.campaign_type
+    WHERE c.profile_id=$1::bigint AND c.campaign_id=$2 AND c.campaign_type<>'sponsoredProducts'
+  `, [profileId,campaignId])
+  if (other) return (
+    <div>
+      <a href="/amazon/campaigns">← Campaigns</a>
+      <h1>{other.name}</h1>
+      <span className="badge badge-muted">{other.type_label}</span>{' '}
+      <span className={stateBadgeCls(other.state)}>{other.state}</span>
+      <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap', marginTop: '1.5rem' }}>
+        <div><StatLabel>Spend 30d</StatLabel>{fmt(other.spend)} {other.currency_code}</div>
+        <div><StatLabel>Sales 30d</StatLabel>{fmt(other.sales)} {other.currency_code}</div>
+        <div><StatLabel>Orders 30d</StatLabel>{other.orders}</div>
+        <div><StatLabel>Cost/order 30d</StatLabel>{fmt(other.cost_per_order)}{other.cost_per_order == null ? '' : ` ${other.currency_code}`}</div>
+      </div>
+    </div>
+  )
 
   const [
     profileRows,

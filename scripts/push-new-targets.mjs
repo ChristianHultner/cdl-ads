@@ -213,7 +213,7 @@ if (adGroupIds.length > 0) {
   const { rows: autoCampRows } = await pool.query(
     `SELECT ag.ad_group_id::text
        FROM amazon_ad_groups ag
-       JOIN amazon_campaigns  c ON c.campaign_id = ag.campaign_id
+       JOIN amazon_campaigns  c ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id = ag.campaign_id
                                 AND c.profile_id  = ag.profile_id
       WHERE ag.profile_id  = $1
         AND ag.ad_group_id = ANY($2)

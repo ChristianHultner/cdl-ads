@@ -17,6 +17,10 @@ export interface CampaignRow {
   profile_id: string
   campaign_id: string
   campaign_name: string
+  campaign_type: string
+  type_label: 'SP' | 'SB' | 'SBV' | 'SD'
+  orders_30d: string
+  cost_per_order: string | null
   state: string
   spend_30d: string
   sales_30d: string
@@ -50,12 +54,13 @@ function computeAcos(spend: string, sales: string): string | null {
   return ((parseFloat(spend) / sa) * 100).toFixed(1)
 }
 
-type FilterKey = 'all' | 'enabled' | 'paused'
+type FilterKey = 'all' | 'enabled' | 'paused' | 'archived'
 
 const FILTER_OPTIONS: { key: FilterKey; label: string }[] = [
   { key: 'all',     label: 'All'     },
   { key: 'enabled', label: 'Enabled' },
   { key: 'paused',  label: 'Paused'  },
+  { key: 'archived', label: 'Archived' },
 ]
 
 // ── Root client component ─────────────────────────────────────────────────────
@@ -66,11 +71,11 @@ export function CampaignsClient({
   recMap,
 }: CampaignsClientProps) {
   const [filter, setFilter] = useState<FilterKey>('all')
+  const [typeFilter, setTypeFilter] = useState<'all' | CampaignRow['type_label']>('all')
 
   function applyFilter(camps: CampaignRow[]): CampaignRow[] {
-    if (filter === 'enabled') return camps.filter(c => c.state.toUpperCase() === 'ENABLED')
-    if (filter === 'paused')  return camps.filter(c => c.state.toUpperCase() === 'PAUSED')
-    return camps
+    return camps.filter(c => (filter === 'all' || c.state.toLowerCase() === filter)
+      && (typeFilter === 'all' || c.type_label === typeFilter))
   }
 
   return (
@@ -87,6 +92,15 @@ export function CampaignsClient({
             style={{ cursor: 'pointer' }}
           >
             {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="filter-bar" aria-label="Campaign type">
+        {(['all','SP','SB','SBV','SD'] as const).map(type => (
+          <button key={type} onClick={() => setTypeFilter(type)} aria-pressed={typeFilter === type}
+            className={`filter-link${typeFilter === type ? ' active' : ''}`} style={{ cursor: 'pointer' }}>
+            {type === 'all' ? 'All types' : type}
           </button>
         ))}
       </div>
@@ -144,6 +158,9 @@ export function CampaignsClient({
                   <table className="data-table" style={{ tableLayout: 'fixed' }}>
                     <colgroup>
                       <col style={{ width: '400px' }} />
+                      <col style={{ width: '70px' }} />
+                      <col style={{ width: '90px' }} />
+                      <col style={{ width: '130px' }} />
                       <col style={{ width: '90px' }} />
                       <col style={{ width: '130px' }} />
                       <col style={{ width: '130px' }} />
@@ -154,10 +171,13 @@ export function CampaignsClient({
                     <thead>
                       <tr>
                         <th>Campaign</th>
+                        <th>Type</th>
                         <th>State</th>
                         <th className="num">Spend 30d</th>
                         <th className="num">Budget</th>
                         <th className="num">Sales 30d</th>
+                        <th className="num">Orders 30d</th>
+                        <th className="num">Cost/order 30d</th>
                         <th className="num">ACOS 30d</th>
                         <th style={{ textAlign: 'center' }}>Recs</th>
                       </tr>
@@ -169,7 +189,7 @@ export function CampaignsClient({
                         const acosBadge = acosNum != null
                           ? (acosNum <= target * 100 ? 'badge badge-ok' : 'badge badge-warn')
                           : ''
-                        const recCount = recMap[`${m.profile_id}:${c.campaign_id}`] ?? 0
+                        const recCount = c.type_label === 'SP' ? (recMap[`${m.profile_id}:${c.campaign_id}`] ?? 0) : 0
                         return (
                           <tr key={c.campaign_id}>
                             <td style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -181,6 +201,7 @@ export function CampaignsClient({
                                 {c.campaign_name}
                               </a>
                             </td>
+                            <td><span className="badge badge-muted">{c.type_label}</span></td>
                             <td>
                               <span className={stateBadgeCls(c.state)}>
                                 {c.state}
@@ -191,12 +212,14 @@ export function CampaignsClient({
                             </td>
                             <td className="num">
                               {c.budget_amount != null
-                                ? `${parseFloat(c.budget_amount).toFixed(2)} ${m.currency_code}/day`
+                                ? `${parseFloat(c.budget_amount).toFixed(2)} ${m.currency_code}${c.budget_type === 'LIFETIME' ? ' lifetime' : '/day'}`
                                 : '—'}
                             </td>
                             <td className="num">
                               {fmt(c.sales_30d)} {m.currency_code}
                             </td>
+                            <td className="num">{c.orders_30d}</td>
+                            <td className="num">{c.cost_per_order == null ? '—' : `${fmt(c.cost_per_order)} ${m.currency_code}`}</td>
                             <td className="num">
                               {acosStr != null
                                 ? <span className={acosBadge}>{acosStr}%</span>

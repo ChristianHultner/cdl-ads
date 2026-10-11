@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic'
 
+import { CAMPAIGN_METRICS_CTE, CAMPAIGN_LABEL_SQL } from '@/lib/amazon/campaign-display'
 import { neon } from '@neondatabase/serverless'
 import { CampaignsClient } from './CampaignsClient'
 import type { MarketRow, CampaignRow } from './CampaignsClient'
@@ -21,43 +22,25 @@ export default async function CampaignsPage() {
   const [markets, allCampaigns, campaignCounts, draftRecs] =
     (await Promise.all([
       // All profiles — LEFT JOIN so zero-spend markets still appear (spend shows 0.00)
-      sql`
-        SELECT
-          ap.profile_id::text,
-          ap.country_code,
-          ap.currency_code,
-          ap.target_acos::text,
-          coalesce(sum(acd.cost),      0)::text                                AS spend_30d,
-          coalesce(sum(acd.sales_14d), 0)::text                                AS sales_30d,
-          (sum(acd.cost) / nullif(sum(acd.sales_14d), 0))::text                AS acos
-        FROM amazon_profiles ap
-        LEFT JOIN amazon_campaign_daily acd
-          ON  acd.profile_id = ap.profile_id
-          AND acd.date >= CURRENT_DATE - INTERVAL '30 days'
-        GROUP BY ap.profile_id, ap.country_code, ap.currency_code, ap.target_acos
-        ORDER BY coalesce(sum(acd.cost), 0) DESC
-      `,
-      // All ENABLED+PAUSED campaigns — LEFT JOIN daily so newborns (zero spend) still appear
-      sql`
-        SELECT
-          c.profile_id::text,
-          c.campaign_id,
-          c.name                                              AS campaign_name,
-          c.state,
-          coalesce(sum(d.cost), 0)::text                      AS spend_30d,
-          coalesce(sum(d.sales_14d), 0)::text                 AS sales_30d,
-          (sum(d.cost) / nullif(sum(d.sales_14d), 0))::text  AS acos,
-          c.budget_amount::text,
-          c.budget_type
-        FROM amazon_campaigns c
-        LEFT JOIN amazon_campaign_daily d
-          ON  d.campaign_id = c.campaign_id
-          AND d.profile_id  = c.profile_id
-          AND d.date >= CURRENT_DATE - INTERVAL '30 days'
-        WHERE c.state IN ('ENABLED', 'PAUSED')
-        GROUP BY c.profile_id, c.campaign_id, c.name, c.state, c.budget_amount, c.budget_type
-        ORDER BY c.profile_id, sum(d.cost) DESC NULLS LAST
-      `,
+      sql.query(CAMPAIGN_METRICS_CTE + `
+        SELECT ap.profile_id::text,ap.country_code,ap.currency_code,ap.target_acos::text,
+          coalesce(sum(m.spend),0)::text AS spend_30d,coalesce(sum(m.sales),0)::text AS sales_30d,
+          (sum(m.spend)/nullif(sum(m.sales),0))::text AS acos
+        FROM amazon_profiles ap LEFT JOIN campaign_metrics m ON m.profile_id=ap.profile_id
+        GROUP BY ap.profile_id,ap.country_code,ap.currency_code,ap.target_acos
+        ORDER BY coalesce(sum(m.spend),0) DESC
+      `),
+      sql.query(CAMPAIGN_METRICS_CTE + `
+        SELECT c.profile_id::text,c.campaign_id,c.name AS campaign_name,c.state,c.campaign_type,
+          ${CAMPAIGN_LABEL_SQL} AS type_label,
+          coalesce(d.spend,0)::text AS spend_30d,coalesce(d.sales,0)::text AS sales_30d,
+          coalesce(d.orders,0)::text AS orders_30d,(d.spend/nullif(d.orders,0))::text AS cost_per_order,
+          (d.spend/nullif(d.sales,0))::text AS acos,c.budget_amount::text,c.budget_type
+        FROM amazon_campaigns c LEFT JOIN campaign_metrics d
+          ON d.profile_id=c.profile_id AND d.campaign_id=c.campaign_id AND d.campaign_type=c.campaign_type
+        WHERE c.state IN ('ENABLED','PAUSED','ARCHIVED')
+        ORDER BY c.profile_id,d.spend DESC NULLS LAST,c.name
+      `),
       // Total campaign count per profile (all states)
       sql`
         SELECT profile_id::text, count(*)::text AS total

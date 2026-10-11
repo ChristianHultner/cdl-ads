@@ -497,6 +497,66 @@ async function maintenanceStep(client: PoolClient, step: MaintenanceStep, starte
   return { ok: failures === 0, rows, detail: `${step.toUpperCase()} rows=${rows}; checked ${done}/${profiles.length}; errors=${failures}` }
 }
 
+// Display-only structure. These list calls never create/update Amazon entities.
+export async function otherCampaignStructure(api: Api) {
+  type Entity = Record<string, unknown>
+  async function sbList(path: string, media: string, key: string): Promise<Entity[]> {
+    const rows: Entity[] = [], tokens = new Set<string>()
+    let nextToken: string | undefined
+    do {
+      const { body } = await api(path, { method: 'POST', headers: { 'Content-Type': media, Accept: media },
+        body: JSON.stringify({ maxResults: 100, stateFilter: { include: ['ENABLED','PAUSED','ARCHIVED'] }, ...(nextToken ? { nextToken } : {}) }) })
+      const payload = body as unknown as Record<string, unknown>
+      if (!Array.isArray(payload[key])) throw new SyncError('Invalid SB structure list')
+      rows.push(...payload[key] as Entity[])
+      nextToken = typeof payload.nextToken === 'string' ? payload.nextToken : undefined
+      if (nextToken && (tokens.has(nextToken) || tokens.size >= 50)) throw new SyncError('SB structure pagination failed')
+      if (nextToken) tokens.add(nextToken)
+    } while (nextToken)
+    return rows
+  }
+  const sb = await sbList('/sb/v4/campaigns/list', 'application/vnd.sbcampaignresource.v4+json', 'campaigns')
+  const formats = new Map<string, Set<string>>()
+  // Campaign responses omit format; ads expose creative.type (e.g. BRAND_VIDEO).
+  for (const ad of await sbList('/sb/v4/ads/list', 'application/vnd.sbadresource.v4+json', 'ads')) {
+    const id = exactCampaignId(ad.campaignId)
+    const creative = ad.creative as Record<string, unknown> | undefined
+    const format = ad.adFormat ?? creative?.type
+    if (typeof format === 'string') {
+      if (!formats.has(id)) formats.set(id, new Set())
+      formats.get(id)!.add(format)
+    }
+  }
+  const sd: Entity[] = [], seen = new Set<string>()
+  for (let start = 0; ; start += 100) {
+    if (start >= 5000) throw new SyncError('SD structure page cap reached')
+    const { body } = await api(`/sd/campaigns?startIndex=${start}&count=100&stateFilter=enabled,paused,archived`)
+    if (!Array.isArray(body)) throw new SyncError('Invalid SD structure list')
+    for (const c of body) {
+      const id = exactCampaignId(c.campaignId)
+      if (seen.has(id)) throw new SyncError('Repeated SD structure campaign')
+      seen.add(id); sd.push(c)
+    }
+    if (body.length < 100) break
+  }
+  return [
+    ...sb.map(c => normalizeOtherCampaign(c, 'sponsoredBrands', [...(formats.get(exactCampaignId(c.campaignId)) ?? [])])),
+    ...sd.map(c => normalizeOtherCampaign(c, 'sponsoredDisplay', [])),
+  ]
+}
+
+export function normalizeOtherCampaign(c: Record<string, unknown>, type: 'sponsoredBrands' | 'sponsoredDisplay', adFormats: string[]) {
+  const date = (v: unknown) => typeof v === 'string' && /^\d{8}$/.test(v)
+    ? `${v.slice(0,4)}-${v.slice(4,6)}-${v.slice(6,8)}` : v ?? null
+  if (typeof c.name !== 'string' || typeof c.state !== 'string') throw new SyncError('Invalid campaign identity')
+  const budget = typeof c.budget === 'object' && c.budget !== null ? (c.budget as Record<string, unknown>).budget : c.budget
+  if (budget != null && !Number.isFinite(Number(budget))) throw new SyncError('Invalid campaign budget')
+  return { campaignId: exactCampaignId(c.campaignId), name: c.name, state: c.state.toUpperCase(), type,
+    startDate: date(c.startDate), endDate: date(c.endDate), budget: budget ?? null,
+    budgetType: typeof c.budgetType === 'string' ? c.budgetType.toUpperCase() : null,
+    raw: { ...c, displayAdFormats: adFormats } }
+}
+
 async function syncStructure(client: PoolClient, profile: Profile, started: number): Promise<StepResult> {
   const deadline = started + CLEANUP_DEADLINE_MS
   const media = 'application/vnd.spCampaign.v3+json'
@@ -513,44 +573,38 @@ async function syncStructure(client: PoolClient, profile: Profile, started: numb
       })
       const campaigns = body.campaigns ?? []
       if (!Array.isArray(campaigns)) throw new SyncError('Invalid campaign list')
-      for (const c of campaigns) {
-        if (Date.now() - started >= WALL_CAP_MS) return partial()
-        await stepQuery(client, deadline,
-          `INSERT INTO amazon_campaigns
-             (campaign_id, profile_id, name, state, campaign_type,
-              targeting_type, start_date, end_date, budget_amount, budget_type,
-              raw, synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
-           ON CONFLICT (campaign_id, profile_id) DO UPDATE SET
-             name            = EXCLUDED.name,
-             state           = EXCLUDED.state,
-             campaign_type   = EXCLUDED.campaign_type,
-             targeting_type  = EXCLUDED.targeting_type,
-             start_date      = EXCLUDED.start_date,
-             end_date        = EXCLUDED.end_date,
-             budget_amount   = EXCLUDED.budget_amount,
-             budget_type     = EXCLUDED.budget_type,
-             raw             = EXCLUDED.raw,
-             synced_at       = EXCLUDED.synced_at`,
-          [
-            c.campaignId,
-            profile.profile_id,
-            c.name,
-            c.state,
-            c.campaignType ?? 'sponsoredProducts',
-            c.targetingType ?? null,
-            c.startDate ?? null,
-            c.endDate ?? null,
-            c.budget?.budget ?? null,
-            c.budget?.budgetType ?? null,
-            JSON.stringify(c),
-          ],
-        );
-        rows++
+      if (campaigns.length) {
+        const data = campaigns.map(c => [c.campaignId, profile.profile_id, c.name, c.state,
+          c.campaignType ?? 'sponsoredProducts', c.targetingType ?? null, c.startDate ?? null,
+          c.endDate ?? null, c.budget?.budget ?? null, c.budget?.budgetType ?? null, JSON.stringify(c)])
+        const placeholders = data.map((row, i) => `(${row.map((_, j) => `$${i * 11 + j + 1}`).join(',')},now())`).join(',')
+        await stepQuery(client, deadline, `INSERT INTO amazon_campaigns
+          (campaign_id,profile_id,name,state,campaign_type,targeting_type,start_date,end_date,budget_amount,budget_type,raw,synced_at)
+          VALUES ${placeholders}
+          ON CONFLICT (campaign_id,profile_id) DO UPDATE SET name=EXCLUDED.name,state=EXCLUDED.state,
+            campaign_type=EXCLUDED.campaign_type,targeting_type=EXCLUDED.targeting_type,
+            start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,budget_amount=EXCLUDED.budget_amount,
+            budget_type=EXCLUDED.budget_type,raw=EXCLUDED.raw,synced_at=EXCLUDED.synced_at`, data.flat())
+        rows += campaigns.length
       }
       pages++
       nextToken = body.nextToken ?? undefined
     } while (nextToken)
+    const other = await otherCampaignStructure(api)
+    for (let i = 0; i < other.length; i += 100) {
+      if (Date.now() - started >= WALL_CAP_MS) return partial()
+      const batch = other.slice(i, i + 100)
+      const data = batch.map(c => [c.campaignId,profile.profile_id,c.name,c.state,c.type,
+        c.startDate,c.endDate,c.budget,c.budgetType,JSON.stringify(c.raw)])
+      const placeholders = data.map((row, n) => `(${row.map((_, j) => `$${n * 10 + j + 1}`).join(',')},now())`).join(',')
+      await stepQuery(client, deadline, `INSERT INTO amazon_campaigns
+        (campaign_id,profile_id,name,state,campaign_type,start_date,end_date,budget_amount,budget_type,raw,synced_at)
+        VALUES ${placeholders}
+        ON CONFLICT (campaign_id,profile_id) DO UPDATE SET name=EXCLUDED.name,state=EXCLUDED.state,
+          campaign_type=EXCLUDED.campaign_type,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,
+          budget_amount=EXCLUDED.budget_amount,budget_type=EXCLUDED.budget_type,raw=EXCLUDED.raw,synced_at=now()`, data.flat())
+      rows += batch.length
+    }
     return { ok: true, rows, detail: null }
   } catch (err) {
     return { ok: false, rows, detail: err instanceof DeadlineError ? 'PARTIAL campaign list, continues next run' : errorDetail(err) }
@@ -593,7 +647,7 @@ const SWEEP_SQL = `
       END AS ad_group_state
     FROM destinations d
     LEFT JOIN amazon_campaigns c
-      ON c.profile_id = d.profile_id
+      ON c.campaign_type = 'sponsoredProducts' AND c.profile_id = d.profile_id
      AND c.campaign_id = d.destination_campaign_id
     LEFT JOIN amazon_ad_groups ag
       ON ag.profile_id = d.profile_id

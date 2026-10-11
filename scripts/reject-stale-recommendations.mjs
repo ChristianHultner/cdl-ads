@@ -45,7 +45,7 @@ const destinationCte = `
       END AS ad_group_state
     FROM destinations d
     LEFT JOIN amazon_campaigns c
-      ON c.profile_id = d.profile_id
+      ON c.campaign_type = 'sponsoredProducts' AND c.profile_id = d.profile_id
      AND c.campaign_id = d.destination_campaign_id
     LEFT JOIN amazon_ad_groups ag
       ON ag.profile_id = d.profile_id

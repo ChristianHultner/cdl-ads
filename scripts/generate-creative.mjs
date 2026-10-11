@@ -184,7 +184,7 @@ if (runMode === 'keywords') {
             ag.name::text     AS ad_group_name,
             ag.campaign_id::text
        FROM amazon_ad_groups  ag
-       JOIN amazon_campaigns   c  ON c.campaign_id = ag.campaign_id
+       JOIN amazon_campaigns   c  ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id = ag.campaign_id
                                   AND c.profile_id  = ag.profile_id
       WHERE ag.profile_id      = $1
         AND c.targeting_type   = 'MANUAL'
@@ -528,7 +528,7 @@ if (runMode === 'keywords') {
             ag.name::text     AS ad_group_name,
             ag.campaign_id::text
        FROM amazon_ad_groups  ag
-       JOIN amazon_campaigns   c  ON c.campaign_id = ag.campaign_id
+       JOIN amazon_campaigns   c  ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id = ag.campaign_id
                                   AND c.profile_id  = ag.profile_id
       WHERE ag.profile_id    = $1
         AND c.targeting_type = 'MANUAL'

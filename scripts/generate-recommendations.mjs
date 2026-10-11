@@ -171,7 +171,7 @@ for (const { structure_ref: ref } of liveExperiments) {
 }
 const { rows: experimentCampaigns } = await pool.query(
   `SELECT campaign_id::text AS campaign_id FROM amazon_campaigns
-    WHERE profile_id = $1 AND (campaign_id::text = ANY($2::text[]) OR name = ANY($3::text[]))`,
+    WHERE campaign_type = 'sponsoredProducts' AND profile_id = $1 AND (campaign_id::text = ANY($2::text[]) OR name = ANY($3::text[]))`,
   [profileId, [...experimentIds], [...experimentNames]],
 );
 const experimentCampaignSet = new Set(experimentCampaigns.map(r => r.campaign_id));
@@ -551,7 +551,7 @@ async function insertDestinationDraft(recType, campaignId, targetText, proposal,
       WHERE EXISTS (
               SELECT 1
                 FROM amazon_campaigns c
-               WHERE c.profile_id  = $2
+               WHERE c.campaign_type = 'sponsoredProducts' AND c.profile_id  = $2
                  AND c.campaign_id = $7
                  AND c.state       = 'ENABLED'
             )
@@ -636,7 +636,7 @@ if (candidates.length > 0) {
        UNION
        SELECT ag.ad_group_id::text
          FROM amazon_ad_groups ag
-         JOIN amazon_campaigns  c ON c.campaign_id = ag.campaign_id
+         JOIN amazon_campaigns  c ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id = ag.campaign_id
                                  AND c.profile_id  = ag.profile_id
         WHERE ag.profile_id  = $1
           AND ag.ad_group_id = ANY($2)
@@ -714,7 +714,7 @@ if (candidates.length > 0) {
     const { rows: ptAutoCampRows } = await pool.query(
       `SELECT ag.ad_group_id::text
          FROM amazon_ad_groups ag
-         JOIN amazon_campaigns  c ON c.campaign_id = ag.campaign_id
+         JOIN amazon_campaigns  c ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id = ag.campaign_id
                                   AND c.profile_id  = ag.profile_id
         WHERE ag.profile_id  = $1
           AND ag.ad_group_id = ANY($2)
@@ -1335,7 +1335,7 @@ if (uniquePromoteAgIds.length > 0) {
   const { rows: autoAgRows } = await pool.query(
     `SELECT ag.ad_group_id::text
        FROM amazon_ad_groups ag
-       JOIN amazon_campaigns c ON c.campaign_id  = ag.campaign_id
+       JOIN amazon_campaigns c ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id  = ag.campaign_id
                                AND c.profile_id  = ag.profile_id
       WHERE ag.profile_id  = $1
         AND ag.ad_group_id = ANY($2)
@@ -1535,7 +1535,7 @@ if (openCtRows.length > 0) {
     const { rows: ctPrRows } = await pool.query(
       `SELECT DISTINCT ag.ad_group_id::text
          FROM amazon_ad_groups ag
-         JOIN amazon_campaigns c ON c.campaign_id = ag.campaign_id
+         JOIN amazon_campaigns c ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id = ag.campaign_id
                                  AND c.profile_id  = ag.profile_id
         WHERE ag.profile_id  = $1
           AND ag.ad_group_id = ANY($2)
@@ -1661,7 +1661,7 @@ const { rows: budgetCampRows } = await pool.query(
      ON  d.campaign_id = c.campaign_id
      AND d.profile_id  = c.profile_id
      AND d.date >= CURRENT_DATE - INTERVAL '30 days'
-   WHERE c.profile_id    = $1
+   WHERE c.campaign_type = 'sponsoredProducts' AND c.profile_id    = $1
      AND c.state         = 'ENABLED'
      AND c.budget_amount IS NOT NULL
    GROUP BY c.campaign_id, c.name, c.budget_amount, c.budget_type`,
@@ -1767,7 +1767,7 @@ const { rows: pauseCandRows } = await pool.query(
      ON  d.campaign_id = c.campaign_id
      AND d.profile_id  = c.profile_id
      AND d.date >= CURRENT_DATE - INTERVAL '30 days'
-   WHERE c.profile_id = $1
+   WHERE c.campaign_type = 'sponsoredProducts' AND c.profile_id = $1
      AND c.state      = 'ENABLED'
    GROUP BY c.campaign_id, c.name, c.budget_amount
    HAVING coalesce(sum(d.cost), 0) >= 30`,
@@ -1937,7 +1937,7 @@ const { rows: reviveCandRows } = await pool.query(
      JOIN enabled_bids eb ON eb.campaign_id = c.campaign_id::text
 LEFT JOIN spend30 s       ON s.campaign_id  = c.campaign_id
 LEFT JOIN lifetime lt      ON lt.campaign_id = c.campaign_id
-    WHERE c.profile_id = $1
+    WHERE c.campaign_type = 'sponsoredProducts' AND c.profile_id = $1
       AND c.state      = 'ENABLED'
       AND COALESCE(s.spend_30d, 0) < 2
       AND (COALESCE(lt.lifetime_sales, 0) > 0 OR COALESCE(lt.lifetime_orders, 0) > 0)
@@ -2109,7 +2109,7 @@ const { rows: dormantCandRows } = await pool.query(
      FROM amazon_campaigns c
 LEFT JOIN spend30 s   ON s.campaign_id  = c.campaign_id
 LEFT JOIN lifetime lt  ON lt.campaign_id = c.campaign_id
-    WHERE c.profile_id = $1
+    WHERE c.campaign_type = 'sponsoredProducts' AND c.profile_id = $1
       AND c.state      = 'ENABLED'
       AND c.name NOT LIKE 'CDL | SP |%'
       AND COALESCE(s.spend_30d,            0) < 2
@@ -2179,7 +2179,7 @@ const { rows: dormant90Rows } = await pool.query(
      LEFT JOIN amazon_campaign_daily d
        ON d.profile_id = c.profile_id AND d.campaign_id = c.campaign_id
       AND d.date >= CURRENT_DATE - 90 AND d.date < CURRENT_DATE
-    WHERE c.profile_id = $1 AND c.state = 'ENABLED'
+    WHERE c.campaign_type = 'sponsoredProducts' AND c.profile_id = $1 AND c.state = 'ENABLED'
     GROUP BY c.campaign_id, c.name, c.start_date, c.budget_amount
    HAVING COALESCE(SUM(d.purchases_14d), 0) = 0`,
   [profileId],
@@ -2238,7 +2238,7 @@ const { rows: replaceAdRows } = await pool.query(
        ON hc.b0_asin  = pa.asin
       AND hc.status   = 'CONFIRMED'
      LEFT JOIN amazon_campaigns c
-       ON c.campaign_id = pa.campaign_id
+       ON c.campaign_type = 'sponsoredProducts' AND c.campaign_id = pa.campaign_id
       AND c.profile_id  = pa.profile_id
     WHERE pa.profile_id = $1
       AND pa.state      = 'ENABLED'`,
@@ -2385,7 +2385,7 @@ if (!values['cluster-rooms']) {
   const { rows: crEnabledCamps } = await pool.query(
     `SELECT name
        FROM amazon_campaigns
-      WHERE profile_id = $1
+      WHERE campaign_type = 'sponsoredProducts' AND profile_id = $1
         AND state      = 'ENABLED'
         AND name       ILIKE '%CDL | SP | CLUSTER |%| AUTO'`,
     [profileId],
@@ -2548,7 +2548,7 @@ if (!values['cluster-rooms']) {
                                  AND ag.profile_id  = c.profile_id
        JOIN amazon_product_ads pa ON pa.ad_group_id = ag.ad_group_id
                                  AND pa.profile_id  = ag.profile_id
-      WHERE c.profile_id = $1
+      WHERE c.campaign_type = 'sponsoredProducts' AND c.profile_id = $1
         AND c.state      = 'ENABLED'
         AND c.name       ILIKE 'CDL | SP | CLUSTER |%| AUTO'
       GROUP BY c.campaign_id, c.name`,
@@ -2563,7 +2563,7 @@ if (!values['cluster-rooms']) {
   // CK-2. Idempotency — ENABLED KW rooms + open CREATE_STRUCTURE recs
   const { rows: ckLiveKwRows } = await pool.query(
     `SELECT name FROM amazon_campaigns
-      WHERE profile_id = $1 AND state = 'ENABLED' AND name ILIKE 'CDL | SP | CLUSTER |%| KW'`,
+      WHERE campaign_type = 'sponsoredProducts' AND profile_id = $1 AND state = 'ENABLED' AND name ILIKE 'CDL | SP | CLUSTER |%| KW'`,
     [profileId],
   );
   const ckLiveKwNamesLower = new Set(ckLiveKwRows.map(r => r.name.toLowerCase()));
