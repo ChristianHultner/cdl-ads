@@ -30,6 +30,7 @@ export interface LongTermPoint {
 }
 
 export interface LongTermMarket {
+  hasApiMonths?: boolean
   country:    string
   currency:   string
   gpPerOrder: number | null
@@ -528,14 +529,14 @@ export default function LongTermSection({
         <h3 className={styles.panelTitle}>{COUNTRY_NAMES[currentCountry] ?? currentCountry}, rolling 12 months</h3>
         <div className={styles.panelCaption}>Each point is a full year ending that month — seasonality removed.</div>
         <RollingChart market={current} vendor={currentVendor} axisLabels={axisLabels} showValues={showValues} />
-        <div className={styles.panelSource}>sources: {current ? 'console exports (all ad types)' : ''}{current && currentVendor ? ' · ' : ''}{currentVendor ? 'vendor invoices (sell-in)' : ''}</div>
+        <div className={styles.panelSource}>sources: {current ? (current.hasApiMonths ? 'console exports + API (all ad types)' : 'console exports (all ad types)') : ''}{current && currentVendor ? ' · ' : ''}{currentVendor ? 'vendor invoices (sell-in)' : ''}</div>
       </div>
       {currentVendor && (
         <div className={styles.chartPanel}>
           <h3 className={styles.panelTitle}>What ads can&apos;t see · {COUNTRY_NAMES[currentCountry] ?? currentCountry}</h3>
           <div className={styles.panelCaption}>{unitsCaption}</div>
           <UnitsPanel market={current} vendor={currentVendor} axisLabels={axisLabels} showValues={showValues} />
-          <div className={styles.panelSource}>sources: vendor invoices (sell-in) · console exports (all ad types) · read quarterly</div>
+          <div className={styles.panelSource}>sources: vendor invoices (sell-in) · {current?.hasApiMonths ? 'console exports + API (all ad types)' : 'console exports (all ad types)'} · read quarterly</div>
         </div>
       )}
     </div>

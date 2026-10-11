@@ -30,7 +30,7 @@ const REGION_HOST: Record<string, string> = {
   EU: 'https://advertising-api-eu.amazon.com',
   FE: 'https://advertising-api-fe.amazon.com',
 }
-const REPORT_TYPES = ['spCampaigns', 'spSearchTerm', 'spAdvertisedProduct'] as const
+const REPORT_TYPES = ['spCampaigns', 'spSearchTerm', 'spAdvertisedProduct', 'sbCampaigns', 'sdCampaigns'] as const
 type ReportType = (typeof REPORT_TYPES)[number]
 type ReportRow = Record<string, unknown>
 interface Profile { profile_id: string; region: string; env_var_name: string }
@@ -94,7 +94,7 @@ async function fetchWithTimeout<T>(
   } finally { clearTimeout(timer) }
 }
 
-async function createApi(profile: Profile, deadline: number) {
+export async function createApi(profile: Profile, deadline: number) {
   const host = REGION_HOST[profile.region]
   const refreshToken = process.env[profile.env_var_name]
   const { LWA_CLIENT_ID, LWA_CLIENT_SECRET } = process.env
@@ -134,7 +134,7 @@ async function createApi(profile: Profile, deadline: number) {
       }, 'Amazon Ads request', deadline,
       async res => ({
         status: res.status,
-        body: res.ok || res.status === 425 ? await res.json() as Metadata : {},
+        body: res.ok || res.status === 425 || (res.status === 400 && path === '/reporting/reports') ? await res.json() as Metadata : {},
       }),
     )
     let result = await send()
@@ -150,6 +150,11 @@ async function createApi(profile: Profile, deadline: number) {
       if (duplicateId) return { status: 200, body: { reportId: duplicateId } }
     }
     if (result.status < 200 || result.status >= 300) {
+      if (result.status === 400 && path === '/reporting/reports') {
+        // Keep report-schema/date validation findings visible. Never adapt the
+        // requested columns or retry a different attribution basis automatically.
+        throw new SyncError(`Amazon report HTTP 400: ${String(result.body.detail ?? 'invalid report request').replace(/https?:\/\/\S+/g, '[URL]')}`)
+      }
       throw new SyncError(`Amazon Ads HTTP ${result.status}`)
     }
     return result
@@ -157,7 +162,7 @@ async function createApi(profile: Profile, deadline: number) {
 }
 type Api = Awaited<ReturnType<typeof createApi>>
 
-async function downloadReport(api: Api, reportId: string, deadline: number): Promise<ReportRow[]> {
+export async function downloadReport(api: Api, reportId: string, deadline: number): Promise<ReportRow[]> {
   // Fresh signed URL, never stored. No auth headers on the signed S3 download.
   const { body: meta } = await api(`/reporting/reports/${encodeURIComponent(reportId)}`)
   if (!meta.url || meta.status !== 'COMPLETED') throw new SyncError('Report not ready for download')
@@ -195,6 +200,7 @@ async function requestReports(client: PoolClient, started: number): Promise<Step
   const { startDate, endDate } = reportWindow()
   const total = profiles.length * REPORT_TYPES.length
   let done = 0, requested = 0, failures = 0
+  const findings: string[] = []
   const deadline = started + CLEANUP_DEADLINE_MS
   for (const profile of profiles) {
     let api: Api | undefined
@@ -229,11 +235,11 @@ async function requestReports(client: PoolClient, started: number): Promise<Step
           )
           requested++
         }
-      } catch { failures++ }
+      } catch (err) { failures++; findings.push(`${profile.profile_id}/${type}: ${errorDetail(err)}`) }
       done++
     }
   }
-  return { ok: failures === 0, rows: requested, detail: `REQUESTED ${requested}; checked ${done}/${total}; errors=${failures}` }
+  return { ok: failures === 0, rows: requested, detail: `REQUESTED ${requested}; checked ${done}/${total}; errors=${failures}${findings.length ? '; ' + findings.join('; ') : ''}` }
 }
 
 async function ingestReports(client: PoolClient, started: number): Promise<StepResult> {
@@ -299,7 +305,7 @@ async function ingestReports(client: PoolClient, started: number): Promise<StepR
   return { ok: failures === 0, rows: landed, detail: `INGESTED rows=${landed}; checked ${done}/${requests.length}; errors=${failures}` }
 }
 
-async function ingestTransaction(
+export async function ingestTransaction(
   client: PoolClient, request: ReportRequest, rows: ReportRow[], deadline: number,
 ): Promise<number> {
   remaining(deadline)
@@ -1000,9 +1006,35 @@ interface ReportSpec {
   values: (profileIdStr: string, row: ReportRow) => unknown[]
 }
 
+function otherCampaignReport(product: 'SB' | 'SD'): ReportSpec {
+  return {
+    configuration: {
+      adProduct: product === 'SB' ? 'SPONSORED_BRANDS' : 'SPONSORED_DISPLAY',
+      reportTypeId: product === 'SB' ? 'sbCampaigns' : 'sdCampaigns',
+      groupBy: ['campaign'],
+      columns: ['campaignId', 'campaignName', 'date', 'impressions', 'clicks', 'cost', 'purchases', 'sales'],
+      timeUnit: 'DAILY', format: 'GZIP_JSON',
+    },
+    insert: `INSERT INTO amazon_campaign_daily_other
+      (profile_id, ad_product, campaign_id, date, impressions, clicks, cost, purchases, sales, raw)`,
+    conflict: `ON CONFLICT (profile_id, ad_product, campaign_id, date) DO UPDATE SET
+      impressions=EXCLUDED.impressions, clicks=EXCLUDED.clicks, cost=EXCLUDED.cost,
+      purchases=EXCLUDED.purchases, sales=EXCLUDED.sales, raw=EXCLUDED.raw, landed_at=now()`,
+    values: (profileId, row) => {
+      if (row.campaignId == null || typeof row.date !== 'string' ||
+          ['impressions','clicks','cost','purchases','sales'].some(key => row[key] == null || !Number.isFinite(Number(row[key])))) {
+        throw new SyncError(`Invalid ${product} campaign row; required metrics missing`)
+      }
+      return [profileId, product, String(row.campaignId), row.date, row.impressions, row.clicks, row.cost, row.purchases, row.sales, row]
+    },
+  }
+}
+
 // Exact configuration bodies, column mapping and ON CONFLICT clauses from the
 // three nightly phases. Only campaign-daily's row-by-row INSERT becomes batches.
-const REPORTS: Record<ReportType, ReportSpec> = {
+export const REPORTS: Record<ReportType, ReportSpec> = {
+  sbCampaigns: otherCampaignReport('SB'),
+  sdCampaigns: otherCampaignReport('SD'),
   spCampaigns: {
     configuration: {
         adProduct:    'SPONSORED_PRODUCTS',

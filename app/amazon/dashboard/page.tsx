@@ -183,6 +183,7 @@ export default async function DashboardPage() {
         ch.market,
         ch.year,
         ch.month,
+        ch.source,
         ch.spend::float,
         ch.sales::float,
         ch.orders::float,
@@ -319,6 +320,7 @@ export default async function DashboardPage() {
   // console_history is never joined to daily_rollup; read standalone here.
   type LtRaw = {
     market: string; year: number; month: number;
+    source: string;
     spend: number; sales: number; orders: number;
     gp_per_order: number | null; currency_code: string
   }
@@ -360,7 +362,7 @@ export default async function DashboardPage() {
     }
 
     if (pts.length === 0) continue  // < 12 consecutive months (e.g. CA) — silently omit
-    ltMarkets.push({ country, currency, gpPerOrder, points: pts, axisLabels: [] })
+    ltMarkets.push({ country, currency, gpPerOrder, points: pts, axisLabels: [], hasApiMonths: rows.some(row => row.source === 'api') })
   }
 
   // vendor_history stays a separate display-only truth layer. Its rolling-12
