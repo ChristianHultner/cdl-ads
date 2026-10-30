@@ -124,7 +124,7 @@ console.log('');
 // ── 2b. Load PUSHED CREATE_STRUCTURE recs → orphan route map ─────────────────
 // Maps orphan PROMOTE_TERM rec ids to their built structure room.
 const { rows: structRows } = await pool.query(
-  `SELECT evidence
+  `SELECT target_text, evidence
      FROM recommendations
     WHERE profile_id = $1
       AND rec_type   = 'CREATE_STRUCTURE'
@@ -151,6 +151,61 @@ if (orphanRouteMap.size > 0) {
   console.log('');
 }
 
+// ── 2c. Keyword rooms by language (Christian, 30 Oct 2026) ───────────────────
+// A PROMOTE_TERM with no keyword-holding ad group among its placements, and not in
+// any room's orphan list, goes to the existing keyword room for its market and
+// language instead of being skipped on every run. Rooms stay as they are (paused
+// rooms remain paused). Language rule = generate-recommendations.mjs detectLang.
+const detectLang = (term) => {
+  const s = (' ' + term + ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return (
+    s.includes(' en ')    ||
+    s.includes(' para ')  ||
+    s.includes('espanol') ||
+    s.includes('libro')   ||
+    s.includes('cuento')  ||
+    s.includes('ninos')   ||
+    s.includes('bebes')   ||
+    s.includes('infantil')
+  ) ? 'ES' : 'EN';
+};
+const roomCandidates = []; // { lang|null, rank, ad_group_id, campaign_id, name }
+for (const row of structRows) {
+  const sev        = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : row.evidence;
+  const adGroupId  = sev?.created_ad_group_id  ?? null;
+  const campaignId = sev?.created_campaign_id  ?? null;
+  if (!adGroupId || !campaignId) continue;
+  const m = /^Keywords - Exacta [A-Z]{2} \((ES|EN)\)$/.exec(String(row.target_text ?? ''));
+  if (m) roomCandidates.push({ lang: m[1], rank: 0, ad_group_id: String(adGroupId), campaign_id: String(campaignId), name: row.target_text });
+  else if (/ORPHAN KWs \| EXACT$/.test(String(row.target_text ?? ''))) {
+    roomCandidates.push({ lang: null, rank: 1, ad_group_id: String(adGroupId), campaign_id: String(campaignId), name: row.target_text });
+  }
+}
+const roomByLang = new Map(); // 'ES' | 'EN' → { ad_group_id, campaign_id, name, campaignState }
+if (roomCandidates.length > 0) {
+  const { rows: roomState } = await pool.query(
+    `SELECT ag.ad_group_id::text, ag.state AS ag_state, c.state AS camp_state
+       FROM amazon_ad_groups ag
+       JOIN amazon_campaigns c ON c.profile_id = ag.profile_id AND c.campaign_id = ag.campaign_id
+      WHERE ag.profile_id = $1 AND ag.ad_group_id = ANY($2)`,
+    [profileId, roomCandidates.map(r => r.ad_group_id)],
+  );
+  const live = new Map(roomState
+    .filter(r => String(r.ag_state).toUpperCase() !== 'ARCHIVED' && String(r.camp_state).toUpperCase() !== 'ARCHIVED')
+    .map(r => [r.ad_group_id, String(r.camp_state).toUpperCase()]));
+  for (const lang of ['ES', 'EN']) {
+    const pick = roomCandidates
+      .filter(r => (r.lang === lang || r.lang === null) && live.has(r.ad_group_id))
+      .sort((a, b) => a.rank - b.rank)[0];
+    if (pick) roomByLang.set(lang, { ...pick, campaignState: live.get(pick.ad_group_id) });
+  }
+}
+if (roomByLang.size > 0) {
+  console.log('Keyword rooms: ' + [...roomByLang.entries()]
+    .map(([lang, r]) => `${lang} → '${r.name}' (${r.campaignState.toLowerCase()})`).join('; '));
+  console.log('');
+}
+
 // ── Pre-parse evidences ───────────────────────────────────────────────────────
 const parsedEvidence = recs.map(r =>
   typeof r.evidence === 'string' ? JSON.parse(r.evidence) : r.evidence,
@@ -166,6 +221,7 @@ const adGroupIds = [
         : [],
     ),
     ...[...orphanRouteMap.values()].map(r => r.ad_group_id),
+    ...[...roomByLang.values()].map(r => r.ad_group_id),
     // CREATIVE_KEYWORD explicit destinations
     ...parsedEvidence
       .map(ev => ev?.destination_ad_group_id)
@@ -328,6 +384,14 @@ for (let i = 0; i < recs.length; i++) {
     } else if (tierB.length > 0) {
       placement = tierB[0];
       destTier  = 'any-kw group';
+    } else if (rec.rec_type === 'PROMOTE_TERM') {
+      const room = roomByLang.get(detectLang(rec.target_text));
+      if (room) {
+        placement = { ad_group_id: room.ad_group_id, campaign_id: room.campaign_id };
+        destTier  = `keyword room '${room.name}'${room.campaignState === 'PAUSED' ? ' (campaign paused)' : ''}`;
+        console.log(`destination: ${destTier}`);
+        console.log('');
+      }
     }
   }
 
