@@ -4,11 +4,11 @@ import { usePathname } from 'next/navigation'
 import { dayLabel } from '@/lib/amazon/yardstick'
 import s from './ui.module.css'
 
-// Transitional routes: Decisions, Results and Health point at the current pages
-// until each new page replaces them (frames ADS-UI-2 … ADS-UI-6).
+// Transitional routes: Results and Health point at the current pages
+// until each new page replaces them (frames ADS-UI-3 … ADS-UI-6).
 const NAV: { href: string; label: string; badge?: boolean; match: string[] }[] = [
   { href: '/amazon', label: 'Overview', match: [] },
-  { href: '/amazon/recommendations', label: 'Decisions', badge: true, match: ['/amazon/recommendations', '/amazon/decisions'] },
+  { href: '/amazon/decisions', label: 'Decisions', badge: true, match: ['/amazon/decisions', '/amazon/recommendations'] },
   { href: '/amazon/campaigns', label: 'Campaigns', match: ['/amazon/campaigns'] },
   { href: '/amazon/scorecard', label: 'Results', match: ['/amazon/scorecard', '/amazon/results', '/amazon/engine'] },
   { href: '/amazon/spend', label: 'Health', match: ['/amazon/spend', '/amazon/health', '/amazon/accounts'] },
@@ -16,7 +16,7 @@ const NAV: { href: string; label: string; badge?: boolean; match: string[] }[] =
 
 // Pages already built on the new look render edge to edge; older pages keep
 // the padding they were designed with.
-const NEW_PAGES = new Set(['/amazon'])
+const NEW_PAGES = new Set(['/amazon', '/amazon/decisions'])
 
 export default function AmazonFrame({
   drafts, dataTo, failed, checked, children,

@@ -115,3 +115,30 @@
   .h1 { font-size: 36px; }
   .dataChip, .dataChipWarn { margin-left: 0; }
 }
+
+/* ── Decisions (ADS-UI-2) ── */
+.tabs { display: flex; flex-wrap: wrap; gap: 4px 24px; border-bottom: 1px solid #CFE8F5; }
+.shell .tab, .shell .tabOn { display: inline-flex; align-items: center; gap: 6px; padding: 12px 0 11px; min-height: 44px; box-sizing: border-box; border-bottom: 3px solid transparent; text-decoration: none; font-size: 15px; }
+.shell .tab { color: #4A5A64; font-weight: 600; }
+.shell .tabOn { color: #1E2A32; font-weight: 800; border-bottom-color: #0093D0; }
+.decision, .decisionApproved { background: #FFFFFF; border: 1px solid #CFE8F5; border-radius: 16px; padding: 20px; display: flex; flex-wrap: wrap; gap: 16px 20px; align-items: flex-start; }
+.decisionApproved { border-color: #9FD3B2; }
+.decisionBody { flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.decisionTitle { font-size: 18px; font-weight: 800; line-height: 1.35; }
+.stats4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; background: #F6FAFC; border-radius: 10px; padding: 10px 12px; }
+.statK { font-size: 12px; color: #4A5A64; font-weight: 700; }
+.statV { font-weight: 800; }
+.decisionActions { flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; align-items: stretch; min-width: 170px; }
+.decisionForm { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+.fieldLabel { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: #4A5A64; }
+.field { min-height: 40px; border: 1px solid #CFE8F5; border-radius: 10px; padding: 0 12px; font: 700 15px var(--ads-body), 'Nunito Sans', sans-serif; color: #1E2A32; }
+.btnPrimary, .btnGhost, .btnLink { min-height: 44px; border-radius: 999px; padding: 0 20px; font: 800 15px var(--ads-body), 'Nunito Sans', sans-serif; cursor: pointer; }
+.btnPrimary { background: #0093D0; color: #FFFFFF; border: 0; }
+.btnGhost { background: #FFFFFF; color: #1E2A32; border: 1px solid #CFE8F5; }
+.btnLink { background: transparent; color: #00729F; border: 0; font-weight: 700; font-size: 14px; }
+.sideDark { background: #1E2A32; color: #FFFFFF; border-radius: 16px; padding: 22px; display: flex; flex-direction: column; gap: 10px; }
+.pushBox { background: #FFFFFF; color: #1E2A32; border-radius: 12px; padding: 12px; }
+@media (max-width: 640px) {
+  .stats4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .decisionActions { min-width: 0; flex: 1 1 100%; }
+}

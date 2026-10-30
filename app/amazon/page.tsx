@@ -43,7 +43,7 @@ export default async function OverviewPage() {
       FROM amazon_profiles ap LEFT JOIN campaign_metrics m ON m.profile_id = ap.profile_id
       WHERE ap.is_active
       GROUP BY ap.country_code, ap.currency_code
-      ORDER BY coalesce(sum(m.spend),0) DESC, ap.country_code
+      ORDER BY coalesce(array_position(ARRAY['ES','US','MX','UK','CA'], ap.country_code), 99), ap.country_code
     `),
     sql`
       SELECT p.country_code, count(*)::int AS n, max(r.created_at)::text AS drafted_at
@@ -104,12 +104,12 @@ export default async function OverviewPage() {
       <section aria-label="Needs you" className={s.needs}>
         <div className={s.needsLabel}>Needs you</div>
         <div className={s.needsGrid}>
-          <Link href="/amazon/recommendations" className={drafts > 0 ? s.needsTileGold : s.needsTile}>
+          <Link href="/amazon/decisions" className={drafts > 0 ? s.needsTileGold : s.needsTile}>
             <span className={s.needsTitle}>{drafts > 0 ? `${count(drafts)} change${drafts === 1 ? '' : 's'} to approve` : 'Nothing to approve'}</span>
             <span className={s.needsSub}>{drafts > 0 ? `${draftSplit}${draftedAt ? ` · latest drafted ${dayLabel(draftedAt)}` : ''}` : 'The engine drafts new changes each morning'}</span>
           </Link>
           {status.approved > 0 ? (
-            <Link href="/amazon/recommendations" className={s.needsTile}>
+            <Link href="/amazon/decisions" className={s.needsTile}>
               <span className={s.needsTitle}>{count(status.approved)} approved, not yet sent</span>
               <span className={s.needsSub}>They go to Amazon with the next send</span>
             </Link>
@@ -121,9 +121,9 @@ export default async function OverviewPage() {
             </Link>
           ))}
           {status.seasonal > 0 ? (
-            <Link href="/amazon/recommendations" className={s.needsTile}>
+            <Link href="/amazon/decisions" className={s.needsTile}>
               <span className={s.needsTitle}>December budgets booked</span>
-              <span className={s.needsSub}>{count(status.seasonal)} budget rule{status.seasonal === 1 ? '' : 's'} on Amazon · they revert on their own</span>
+              <span className={s.needsSub}>{`${count(status.seasonal)} budget rule${status.seasonal === 1 ? '' : 's'} on Amazon · they revert on their own`}</span>
             </Link>
           ) : null}
         </div>
@@ -177,7 +177,7 @@ function MarketCard({ m }: { m: MarketRow }) {
 
   const foot = allPaused && m.spend <= 0
     ? `All ${count(m.live_total)} campaigns paused`
-    : `${money(m.spend, cur)} spend · ${count(m.orders)} orders`
+    : `${money(m.spend, cur)} spend · ${count(m.orders)} order${Math.round(m.orders) === 1 ? '' : 's'}`
 
   return (
     <Link href="/amazon/campaigns" className={s.marketCard}>
