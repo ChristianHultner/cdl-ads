@@ -1,64 +1,39 @@
-'use client'
+import { Fraunces, Nunito_Sans } from 'next/font/google'
+import { neon } from '@neondatabase/serverless'
+import AmazonFrame from './AmazonFrame'
+import s from './ui.module.css'
 
-import { usePathname } from 'next/navigation'
+export const dynamic = 'force-dynamic'
 
-const AMAZON_NAV = [
-  { href: '/amazon/dashboard',       label: 'Dashboard' },
-  { href: '/amazon/campaigns',       label: 'Campaigns' },
-  { href: '/amazon/recommendations', label: 'Recommendations' },
-  { href: '/amazon/scorecard',       label: 'Scorecard' },
-  { href: '/amazon/engine',          label: 'Engine' },
-  { href: '/amazon/spend',           label: 'Spend' },
-  { href: '/amazon/accounts',        label: 'Accounts' },
-]
+const display = Fraunces({ subsets: ['latin'], variable: '--ads-display', display: 'swap' })
+const body = Nunito_Sans({ subsets: ['latin'], variable: '--ads-body', display: 'swap' })
 
-export default function AmazonLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname()
+// Header facts for every Amazon page. A failed read never breaks a page:
+// the chip then says it could not check.
+async function headerFacts(): Promise<{ drafts: number; dataTo: string | null; failed: number; checked: boolean }> {
+  try {
+    const sql = neon(process.env.DATABASE_URL!)
+    const rows = (await sql`
+      SELECT
+        (SELECT count(*)::int FROM recommendations WHERE status = 'DRAFT') AS drafts,
+        (SELECT max(date)::text FROM amazon_campaign_daily) AS data_to,
+        (SELECT count(*)::int FROM amazon_sync_log
+          WHERE run_started_at >= now() - interval '24 hours' AND ok = false) AS failed
+    `) as { drafts: number; data_to: string | null; failed: number }[]
+    const r = rows[0]
+    return { drafts: r?.drafts ?? 0, dataTo: r?.data_to ?? null, failed: r?.failed ?? 0, checked: true }
+  } catch {
+    return { drafts: 0, dataTo: null, failed: 0, checked: false }
+  }
+}
 
+export default async function AmazonLayout({ children }: { children: React.ReactNode }) {
+  const facts = await headerFacts()
   return (
-    <>
-      {/* Channel sub-nav — negative margins break out of the root layout's padding wrapper */}
-      <nav
-        style={{
-          background: 'var(--cdl-sky)',
-          borderBottom: '1px solid #c8dfe9',
-          padding: '0 2.5rem',
-          display: 'flex',
-          alignItems: 'center',
-          height: '40px',
-          marginTop: '-2rem',
-          marginLeft: '-2.5rem',
-          marginRight: '-2.5rem',
-          marginBottom: '2rem',
-        }}
-      >
-        {AMAZON_NAV.map(({ href, label }) => {
-          const active = pathname === href || pathname.startsWith(href + '/')
-          return (
-            <a
-              key={href}
-              href={href}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                height: '100%',
-                padding: '0 0.85rem',
-                fontSize: '0.82rem',
-                fontWeight: active ? 700 : 400,
-                color: active ? 'var(--cdl-blue)' : 'var(--cdl-ink)',
-                borderBottom: active
-                  ? '2px solid var(--cdl-blue)'
-                  : '2px solid transparent',
-                whiteSpace: 'nowrap',
-                textDecoration: 'none',
-              }}
-            >
-              {label}
-            </a>
-          )
-        })}
-      </nav>
-      {children}
-    </>
+    <div className={`${display.variable} ${body.variable} ${s.shell}`}>
+      <AmazonFrame drafts={facts.drafts} dataTo={facts.dataTo} failed={facts.failed} checked={facts.checked}>
+        {children}
+      </AmazonFrame>
+    </div>
   )
 }

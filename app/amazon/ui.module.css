@@ -1,0 +1,117 @@
+/* CDL Ads · Amazon — shared look (redesign of 30 Oct 2026).
+   Tokens: luz #0093D0, sky #E9F5FB, sky-line #CFE8F5, ink #1E2A32, gold #F5B32B.
+   Display: Fraunces; body: Nunito Sans (loaded in app/amazon/layout.tsx). */
+
+.shell {
+  margin: -2rem -2.5rem;
+  min-height: 100vh;
+  background: #F6FAFC;
+  color: #1E2A32;
+  font-family: var(--ads-body), 'Nunito Sans', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+.shell a { color: #00729F; }
+.shell a:hover { color: #00587A; }
+.shell a:focus-visible, .shell button:focus-visible, .shell summary:focus-visible { outline: 2px solid #0093D0; outline-offset: 2px; }
+
+.legacy { padding: 2rem 2.5rem; }
+
+/* Section bar under the channel bar */
+.bar { background: #FFFFFF; border-bottom: 1px solid #CFE8F5; }
+.barInner { max-width: 1240px; margin: 0 auto; padding: 0 32px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; min-height: 60px; }
+.nav { display: flex; flex-wrap: wrap; gap: 0 22px; }
+.navLink, .navLinkActive { display: inline-flex; align-items: center; gap: 6px; padding: 18px 0 15px; border-bottom: 3px solid transparent; text-decoration: none; font-size: 15px; }
+.shell .navLink { color: #4A5A64; font-weight: 600; }
+.shell .navLinkActive { color: #1E2A32; font-weight: 800; border-bottom-color: #0093D0; }
+.badge { background: #F5B32B; color: #1E2A32; font-size: 12px; font-weight: 800; border-radius: 999px; padding: 1px 8px; }
+.dataChip, .dataChipWarn { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; padding: 7px 12px; border-radius: 999px; text-decoration: none; }
+.shell .dataChip { color: #1F6B3A; background: #E7F5EC; }
+.shell .dataChipWarn { color: #7A4F00; background: #FDF3DC; border: 1px solid #F5B32B; }
+
+/* Page */
+.main { max-width: 1240px; margin: 0 auto; padding: 36px 32px 72px; display: flex; flex-direction: column; gap: 24px; }
+.eyebrow { font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #4A5A64; }
+.h1 { font-family: var(--ads-display), Fraunces, Georgia, serif; font-weight: 600; font-size: 48px; line-height: 1.1; margin: 4px 0 0; letter-spacing: -0.02em; }
+.lede { color: #4A5A64; margin-top: 8px; font-size: 16px; }
+.h2 { font-family: var(--ads-display), Fraunces, Georgia, serif; font-weight: 600; font-size: 24px; margin: 0; }
+.note { font-size: 13px; color: #4A5A64; }
+.foot { font-size: 12px; color: #4A5A64; }
+.tn { font-variant-numeric: tabular-nums; }
+
+.card { background: #FFFFFF; border: 1px solid #CFE8F5; border-radius: 16px; padding: 24px; min-width: 0; }
+.cardHead { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; }
+.row { display: flex; flex-wrap: wrap; gap: 24px; }
+.grow { flex: 999 1 560px; min-width: 0; }
+.side { flex: 1 1 320px; min-width: 0; }
+
+/* Verdict chips */
+.chip { display: inline-flex; align-items: center; font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.pay { background: #E7F5EC; color: #1F6B3A; border: 1px solid #9FD3B2; }
+.even { background: #FDF3DC; color: #7A4F00; border: 1px solid #F5B32B; }
+.lose { background: #FDEBDD; color: #9A3412; border: 1px solid #F4B48A; }
+.off { background: #EEF3F6; color: #4A5A64; border: 1px solid #D5E0E7; }
+
+/* Needs you */
+.needs { background: #1E2A32; color: #FFFFFF; border-radius: 16px; padding: 22px 26px; display: flex; flex-direction: column; gap: 14px; }
+.needsLabel { font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #9FD6EE; }
+.needsGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.shell .needsTile, .shell .needsTileGold { border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; text-decoration: none; min-height: 44px; }
+.shell .needsTile { background: #2A3A45; color: #FFFFFF; border: 1px solid #3E5260; }
+.shell .needsTileGold { background: #F5B32B; color: #1E2A32; }
+.needsTitle { font-weight: 800; font-size: 17px; }
+.needsSub { font-size: 13px; opacity: 0.85; }
+
+/* Market cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+.shell .marketCard { background: #FFFFFF; border: 1px solid #CFE8F5; border-radius: 16px; padding: 20px 22px; display: flex; flex-direction: column; gap: 10px; text-decoration: none; color: #1E2A32; }
+.marketHead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.marketName { font-weight: 800; font-size: 17px; }
+.label { font-size: 13px; font-weight: 700; color: #4A5A64; }
+.big { font-size: 30px; font-weight: 800; letter-spacing: -0.01em; }
+.second { font-size: 24px; font-weight: 800; letter-spacing: -0.01em; }
+.neg { color: #9A3412; }
+.gauge { position: relative; height: 10px; background: #E9F5FB; border-radius: 999px; }
+.gaugeFill { position: absolute; left: 0; top: 0; height: 10px; border-radius: 999px; }
+.gaugeMark { position: absolute; left: 50%; top: -4px; width: 3px; height: 18px; background: #1E2A32; border-radius: 2px; }
+.cardFoot { font-size: 13px; color: #4A5A64; border-top: 1px solid #E3F1F8; padding-top: 10px; }
+
+/* Toggles */
+.toggle { display: flex; flex-wrap: wrap; background: #E9F5FB; border-radius: 999px; padding: 3px; }
+.toggleBtn, .toggleOn { border: 0; border-radius: 999px; padding: 0 16px; min-height: 40px; font: 800 14px var(--ads-body), 'Nunito Sans', sans-serif; cursor: pointer; }
+.toggleBtn { background: transparent; color: #4A5A64; }
+.toggleOn { background: #FFFFFF; color: #1E2A32; box-shadow: 0 1px 3px rgba(30, 42, 50, 0.18); }
+
+/* Charts */
+.legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; color: #4A5A64; margin-bottom: 14px; }
+.legendItem { display: inline-flex; align-items: center; gap: 6px; }
+.plot { position: relative; height: 260px; margin-left: 64px; }
+.gridLine { position: absolute; left: 0; right: 0; border-top: 1px solid #E3F1F8; }
+.gridZero { position: absolute; left: 0; right: 0; border-top: 1px solid #A3B5C0; }
+.gridLabel { position: absolute; left: -64px; width: 56px; text-align: right; font-size: 12px; color: #4A5A64; }
+.plotSvg { position: absolute; left: 0; top: 0; width: 100%; height: 260px; overflow: visible; }
+.xAxis { display: grid; gap: 8px; margin: 8px 0 0 64px; }
+.xLabel { text-align: center; font-size: 12px; font-weight: 700; color: #4A5A64; }
+.bars { display: grid; gap: 8px; }
+.barCol { display: flex; flex-direction: column; align-items: stretch; }
+.barUp { height: 120px; display: flex; flex-direction: column; justify-content: flex-end; border-bottom: 1px solid #A3B5C0; }
+.barDown { height: 120px; display: flex; flex-direction: column; justify-content: flex-start; }
+.barVal { text-align: center; font-size: 11px; font-weight: 700; }
+
+/* Tables */
+.tableBox { overflow-x: auto; }
+.thead, .trow { display: grid; gap: 12px; align-items: center; }
+.thead { color: #4A5A64; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; padding: 8px 0; }
+.trow { padding: 12px 0; border-top: 1px solid #E3F1F8; font-size: 14px; }
+.right { text-align: right; }
+.strong { font-weight: 800; }
+.ellipsis { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shell .nameLink { font-weight: 800; text-decoration: none; }
+
+@media (max-width: 640px) {
+  .shell { margin: -2rem -2.5rem; }
+  .barInner { padding: 0 16px; }
+  .main { padding: 24px 16px 56px; }
+  .h1 { font-size: 36px; }
+  .dataChip, .dataChipWarn { margin-left: 0; }
+}

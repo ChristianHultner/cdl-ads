@@ -3,7 +3,7 @@
 import { usePathname } from 'next/navigation'
 
 const CHANNELS = [
-  { href: '/amazon/campaigns', prefix: '/amazon', label: 'AMAZON' },
+  { href: '/amazon',           prefix: '/amazon', label: 'AMAZON' },
   { href: '/google',           prefix: '/google',  label: 'GOOGLE' },
 ]
 
