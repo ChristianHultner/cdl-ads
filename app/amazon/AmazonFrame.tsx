@@ -4,19 +4,18 @@ import { usePathname } from 'next/navigation'
 import { dayLabel } from '@/lib/amazon/yardstick'
 import s from './ui.module.css'
 
-// Transitional routes: Results and Health point at the current pages
-// until each new page replaces them (frames ADS-UI-3 … ADS-UI-6).
 const NAV: { href: string; label: string; badge?: boolean; match: string[] }[] = [
   { href: '/amazon', label: 'Overview', match: [] },
   { href: '/amazon/decisions', label: 'Decisions', badge: true, match: ['/amazon/decisions', '/amazon/recommendations'] },
   { href: '/amazon/campaigns', label: 'Campaigns', match: ['/amazon/campaigns'] },
-  { href: '/amazon/scorecard', label: 'Results', match: ['/amazon/scorecard', '/amazon/results', '/amazon/engine'] },
-  { href: '/amazon/spend', label: 'Health', match: ['/amazon/spend', '/amazon/health', '/amazon/accounts'] },
+  { href: '/amazon/books', label: 'Books', match: ['/amazon/books'] },
+  { href: '/amazon/results', label: 'Results', match: ['/amazon/results', '/amazon/scorecard', '/amazon/engine'] },
+  { href: '/amazon/health', label: 'Health', match: ['/amazon/health', '/amazon/spend', '/amazon/accounts'] },
 ]
 
 // Pages already built on the new look render edge to edge; older pages keep
 // the padding they were designed with.
-const NEW_PREFIXES = ['/amazon/decisions', '/amazon/campaigns']
+const NEW_PREFIXES = ['/amazon/decisions', '/amazon/campaigns', '/amazon/books', '/amazon/results', '/amazon/health']
 const isNewPage = (p: string) => p === '/amazon' || NEW_PREFIXES.some(x => p === x || p.startsWith(x + '/'))
 
 export default function AmazonFrame({
@@ -30,7 +29,7 @@ export default function AmazonFrame({
   const chip = !checked
     ? 'Could not check the data'
     : failed > 0
-      ? `${failed} sync step${failed === 1 ? '' : 's'} failed in the last 24 h`
+      ? `${failed} sync step${failed === 1 ? '' : 's'} had a problem · see Health`
       : dataTo
         ? `Data to ${dayLabel(dataTo)} · all steps ran`
         : 'No ad data yet'
@@ -51,7 +50,7 @@ export default function AmazonFrame({
               )
             })}
           </nav>
-          <a href="/amazon/spend" className={warn ? s.dataChipWarn : s.dataChip}>
+          <a href="/amazon/health" className={warn ? s.dataChipWarn : s.dataChip}>
             {!warn ? (
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
                    strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>

@@ -150,3 +150,13 @@
 .tabBtn, .tabBtnOn { background: transparent; border: 0; border-bottom: 3px solid transparent; padding: 12px 0 11px; min-height: 44px; font: 600 15px var(--ads-body), 'Nunito Sans', sans-serif; color: #4A5A64; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .tabBtnOn { border-bottom-color: #0093D0; font-weight: 800; color: #1E2A32; }
 .shell .btnGold { background: #F5B32B; color: #1E2A32; font-weight: 800; text-decoration: none; padding: 0 20px; border-radius: 999px; min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; }
+
+/* ── Books, Health (ADS-UI-4) ── */
+.bookGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; }
+.bookCard { background: #FFFFFF; border: 1px solid #CFE8F5; border-radius: 16px; padding: 18px; display: flex; gap: 16px; }
+.bookCover { width: 66px; height: 88px; flex: none; border-radius: 5px; object-fit: cover; background: #E9F5FB; color: #FFFFFF; font-family: var(--ads-display), Fraunces, Georgia, serif; font-size: 11px; font-weight: 600; line-height: 1.15; padding: 0; box-sizing: border-box; display: flex; align-items: flex-end; overflow: hidden; }
+.bookCover span { padding: 7px; }
+.healthOk, .healthWarn { border-radius: 16px; padding: 20px 24px; display: flex; flex-direction: column; gap: 6px; }
+.healthOk { background: #E7F5EC; border: 1px solid #9FD3B2; color: #1F6B3A; }
+.healthWarn { background: #FDF3DC; border: 1px solid #F5B32B; color: #7A4F00; }
+.healthTitle { font-family: var(--ads-display), Fraunces, Georgia, serif; font-size: 24px; font-weight: 600; }
