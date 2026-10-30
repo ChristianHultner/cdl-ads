@@ -1,964 +1,264 @@
 export const dynamic = 'force-dynamic'
 
-import { CAMPAIGN_METRICS_CTE, CAMPAIGN_LABEL_SQL } from '@/lib/amazon/campaign-display'
-import { neon } from '@neondatabase/serverless'
+import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { RecCard, type RecCardContext, type RecRow, type DestTargetRow } from '@/app/components/RecCard'
-import { BookCover } from '@/app/components/BookCover'
-import { evidenceAdGroupId, isCampaignLevel } from '@/app/lib/rec-scope'
+import { neon } from '@neondatabase/serverless'
+import { CAMPAIGN_METRICS_CTE, CAMPAIGN_LABEL_SQL } from '@/lib/amazon/campaign-display'
+import { judge, money, pct, count, marketName, adTypeName, dayLabel, type Tone } from '@/lib/amazon/yardstick'
+import { describe, type DecisionEvidence } from '@/lib/amazon/decisions'
+import CampaignDetail, { type DetailTab, type Week } from './CampaignDetail'
+import s from '../../../ui.module.css'
 
-// ── TLD by country code ──────────────────────────────────────────────────────
-const TLD: Record<string, string> = {
-  ES: 'es',
-  US: 'com',
-  MX: 'com.mx',
-  CA: 'ca',
-  UK: 'co.uk',
-  GB: 'co.uk',
-  DE: 'de',
-  IT: 'it',
-  FR: 'fr',
+type Head = {
+  name: string; state: string; campaign_type: string; type_label: string; budget_amount: number | null; budget_type: string | null
+  country_code: string; currency_code: string; gp_per_order: number | null; target_acos: number | null
+  spend: number; sales: number; orders: number; targeting: string | null
+}
+type WeekRow = { wk: string; spend: number; sales: number; orders: number }
+type KwRow = { id: string; text: string; match_type: string; state: string; bid: number | null; clicks: number; spend: number; orders: number; sales: number; has_perf: boolean }
+type TgRow = { id: string; expression_type: string | null; sub: string | null; val: string | null; resolved_asin: string | null; state: string; bid: number | null; clicks: number; spend: number; orders: number; sales: number; has_perf: boolean }
+type StRow = { search_term: string; clicks: number; spend: number; orders: number; sales: number; is_kw: boolean }
+type BookRow = { ad_id: string; asin: string | null; state: string; title: string | null; clicks: number; spend: number; orders: number; sales: number }
+type PushedRow = { id: number; rec_type: string; target_text: string; proposal: string; pushed_at: string; evidence: DecisionEvidence | null }
+
+const TARGET_NAME: Record<string, string> = {
+  QUERY_HIGH_REL_MATCHES: 'Close match', QUERY_BROAD_REL_MATCHES: 'Loose match',
+  ASIN_SUBSTITUTE_RELATED: 'Substitutes', ASIN_ACCESSORY_RELATED: 'Complements',
 }
 
-function asinUrl(asin: string, countryCode: string): string {
-  const tld = TLD[countryCode] ?? 'com'
-  return `https://www.amazon.${tld}/dp/${asin.toUpperCase()}`
-}
-
-function stateBadgeCls(state: string): string {
-  const s = state.toUpperCase()
-  if (s === 'ENABLED')  return 'badge badge-ok'
-  if (s === 'ARCHIVED') return 'badge badge-dim'
-  return 'badge badge-muted'
-}
-
-function fmt(v: string | number | null | undefined): string {
-  if (v == null) return '—'
-  const n = parseFloat(String(v))
-  if (isNaN(n)) return '—'
-  return n.toFixed(2)
-}
-
-function computeAcos(spend: string | number, sales: string | number): string | null {
-  const sa = parseFloat(String(sales))
-  if (!sa) return null
-  return ((parseFloat(String(spend)) / sa) * 100).toFixed(1)
-}
-
-// ── Expression-type → human label map (census: 2026-07-27) ─────────────────
-const EXPRESSION_LABELS: Record<string, string> = {
-  QUERY_HIGH_REL_MATCHES:  'Auto: close match',
-  QUERY_BROAD_REL_MATCHES: 'Auto: loose match',
-  ASIN_SUBSTITUTE_RELATED: 'Auto: substitutes',
-  ASIN_ACCESSORY_RELATED:  'Auto: complements',
-  KEYWORD_GROUP_SAME_AS:   'Keyword group',
-}
-
-// ── Interfaces ───────────────────────────────────────────────────────────────
-interface ProfileRow {
-  country_code: string
-  currency_code: string
-}
-
-interface CampaignRow {
-  campaign_name: string
-  state: string
-  budget_amount: string | null
-  budget_type: string | null
-}
-
-interface TotalsRow {
-  spend_30d: string
-  sales_30d: string
-  orders_30d: string
-}
-
-interface AcosParam {
-  scope: string
-  value: string
-}
-
-interface AdGroup {
-  ad_group_id: string
-  name: string
-  state: string
-  default_bid: string | null
-}
-
-interface ProductAd {
-  ad_id: string
-  ad_group_id: string
-  asin: string | null
-  state: string
-}
-
-interface AdPerfRow {
-  ad_id: string
-  spend: string
-  orders: string
-  sales: string
-}
-
-interface Target {
-  target_id: string
-  ad_group_id: string
-  state: string
-  expression_type: string | null
-  expression_subtype: string | null
-  expression_subvalue: string | null
-  resolved_asin: string | null
-  bid: string | null
-}
-
-interface StRow {
-  ad_group_id: string
-  search_term: string
-  spend: string
-  orders: string
-  sales: string
-}
-
-interface Keyword {
-  keyword_id: string
-  ad_group_id: string
-  keyword_text: string
-  match_type: string
-  state: string
-  bid: string | null
-}
-
-interface RecBidAdjStateRow {
-  target_id: string
-  state: string
-}
-
-// ── Stat label helper ────────────────────────────────────────────────────────
-function StatLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{
-      fontSize: '0.72rem',
-      fontWeight: 700,
-      textTransform: 'uppercase' as const,
-      letterSpacing: '0.05em',
-      color: 'var(--cdl-muted)',
-      marginBottom: '0.2rem',
-    }}>
-      {children}
-    </div>
-  )
-}
-
-// ── Page ─────────────────────────────────────────────────────────────────────
-export default async function CampaignDetailPage({
-  params,
-}: {
-  params: Promise<{ profileId: string; campaignId: string }>
-}) {
+export default async function CampaignPage({ params }: { params: Promise<{ profileId: string; campaignId: string }> }) {
   const { profileId, campaignId } = await params
+  if (!/^\d+$/.test(profileId)) notFound()
   const sql = neon(process.env.DATABASE_URL!)
 
-  // Non-SP pages stop here: header metrics only, with no recommendation/ad-group queries.
-  const [other] = await sql.query(CAMPAIGN_METRICS_CTE + `
-    SELECT c.name,c.state,c.campaign_type,${CAMPAIGN_LABEL_SQL} AS type_label,p.currency_code,
-      coalesce(m.spend,0)::text AS spend,coalesce(m.sales,0)::text AS sales,coalesce(m.orders,0)::text AS orders,
-      (m.spend/nullif(m.orders,0))::text AS cost_per_order
-    FROM amazon_campaigns c JOIN amazon_profiles p USING(profile_id)
-    LEFT JOIN campaign_metrics m ON m.profile_id=c.profile_id AND m.campaign_id=c.campaign_id AND m.campaign_type=c.campaign_type
-    WHERE c.profile_id=$1::bigint AND c.campaign_id=$2 AND c.campaign_type<>'sponsoredProducts'
-  `, [profileId,campaignId])
-  if (other) return (
-    <div>
-      <a href="/amazon/campaigns">← Campaigns</a>
-      <h1>{other.name}</h1>
-      <span className="badge badge-muted">{other.type_label}</span>{' '}
-      <span className={stateBadgeCls(other.state)}>{other.state}</span>
-      <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap', marginTop: '1.5rem' }}>
-        <div><StatLabel>Spend 30d</StatLabel>{fmt(other.spend)} {other.currency_code}</div>
-        <div><StatLabel>Sales 30d</StatLabel>{fmt(other.sales)} {other.currency_code}</div>
-        <div><StatLabel>Orders 30d</StatLabel>{other.orders}</div>
-        <div><StatLabel>Cost/order 30d</StatLabel>{fmt(other.cost_per_order)}{other.cost_per_order == null ? '' : ` ${other.currency_code}`}</div>
-      </div>
-    </div>
-  )
+  const [head] = (await sql.query(CAMPAIGN_METRICS_CTE + `
+    SELECT c.name, c.state, c.campaign_type, ${CAMPAIGN_LABEL_SQL} AS type_label,
+      c.budget_amount::float AS budget_amount, c.budget_type,
+      p.country_code, p.currency_code, p.gp_per_order::float AS gp_per_order, p.target_acos::float AS target_acos,
+      coalesce(m.spend,0)::float AS spend, coalesce(m.sales,0)::float AS sales, coalesce(m.orders,0)::float AS orders,
+      c.raw->>'targetingType' AS targeting
+    FROM amazon_campaigns c JOIN amazon_profiles p ON p.profile_id = c.profile_id
+    LEFT JOIN campaign_metrics m ON m.profile_id = c.profile_id AND m.campaign_id = c.campaign_id AND m.campaign_type = c.campaign_type
+    WHERE c.profile_id = $1::bigint AND c.campaign_id = $2
+    LIMIT 1
+  `, [profileId, campaignId])) as unknown as Head[]
+  if (!head) notFound()
 
-  const [
-    profileRows,
-    campaignRows,
-    totalsRows,
-    acosRows,
-    adGroups,
-    productAds,
-    targets,
-    stTerms,
-  ] = (await Promise.all([
-    // Profile identity
-    sql`
-      SELECT country_code, currency_code
-      FROM amazon_profiles
-      WHERE profile_id = ${profileId}::bigint
-      LIMIT 1
-    `,
-    // Campaign name + state
-    sql`
-      SELECT
-        coalesce(name, ${campaignId})    AS campaign_name,
-        coalesce(state, 'UNKNOWN')       AS state,
-        budget_amount::text,
-        budget_type
-      FROM amazon_campaigns
-      WHERE profile_id = ${profileId}::bigint
-        AND campaign_id = ${campaignId}
-      LIMIT 1
-    `,
-    // 30d totals
-    sql`
-      SELECT
-        coalesce(sum(cost), 0)::text          AS spend_30d,
-        coalesce(sum(sales_14d), 0)::text     AS sales_30d,
-        coalesce(sum(purchases_14d), 0)::text AS orders_30d
-      FROM amazon_campaign_daily
-      WHERE profile_id = ${profileId}::bigint
-        AND campaign_id = ${campaignId}
-        AND date >= CURRENT_DATE - INTERVAL '30 days'
-    `,
-    // target_acos params
-    sql`
-      SELECT scope, value::text
-      FROM engine_parameters
-      WHERE key = 'target_acos'
-    `,
-    // Ad groups sorted by name
-    sql`
-      SELECT
-        ad_group_id,
-        name,
-        state,
-        default_bid::text
-      FROM amazon_ad_groups
-      WHERE profile_id = ${profileId}::bigint
-        AND campaign_id = ${campaignId}
-      ORDER BY name
-    `,
-    // Product ads
-    sql`
-      SELECT
-        ad_id,
-        ad_group_id,
-        asin,
-        state
-      FROM amazon_product_ads
-      WHERE profile_id = ${profileId}::bigint
-        AND campaign_id = ${campaignId}
-      ORDER BY asin NULLS LAST
-    `,
-    // Targets
-    sql`
-      SELECT
-        target_id,
-        ad_group_id,
-        state,
-        expression_type,
-        expression->0->>'type' AS expression_subtype,
-        expression->0->>'value' AS expression_subvalue,
-        resolved_asin,
-        bid::text
-      FROM amazon_targets
-      WHERE profile_id = ${profileId}::bigint
-        AND campaign_id = ${campaignId}
-      ORDER BY ad_group_id, resolved_asin NULLS LAST
-    `,
-    // Search term daily — last 60d, all ad groups for this campaign
-    sql`
-      SELECT
-        ad_group_id,
-        search_term,
-        sum(cost)::text          AS spend,
-        sum(purchases_14d)::text AS orders,
-        sum(sales_14d)::text     AS sales
-      FROM amazon_search_term_daily
-      WHERE profile_id = ${profileId}::bigint
-        AND campaign_id = ${campaignId}
-        AND date >= CURRENT_DATE - INTERVAL '60 days'
-      GROUP BY ad_group_id, search_term
-      ORDER BY ad_group_id, sum(cost) DESC
-    `,
-  ])) as unknown as [
-    ProfileRow[],
-    CampaignRow[],
-    TotalsRow[],
-    AcosParam[],
-    AdGroup[],
-    ProductAd[],
-    Target[],
-    StRow[],
-  ]
+  const sp = head.campaign_type === 'sponsoredProducts'
+  const cur = head.currency_code
+  const gp = head.gp_per_order
+  const unit = gp != null && gp > 0
 
-  // Profile must exist
-  if (profileRows.length === 0) notFound()
-
-  const profile  = profileRows[0]
-  const campaign = campaignRows[0] ?? { campaign_name: campaignId, state: 'UNKNOWN' }
-  const totals   = totalsRows[0]  ?? { spend_30d: '0', sales_30d: '0', orders_30d: '0' }
-
-  // Resolve ACOS target
-  const acosMap      = new Map(acosRows.map(p => [p.scope, parseFloat(p.value)]))
-  const globalTarget = acosMap.get('GLOBAL') ?? 0.30
-  const targetPct    = (acosMap.get(profileId) ?? globalTarget) * 100
-
-  const acos30d    = computeAcos(totals.spend_30d, totals.sales_30d)
-  const acos30dNum = acos30d != null ? parseFloat(acos30d) : null
-  const acosBadge  = acos30dNum != null
-    ? (acos30dNum <= targetPct ? 'badge badge-ok' : 'badge badge-warn')
-    : ''
-
-  // Index product ads by ad_group_id
-  const padsByGroup = new Map<string, ProductAd[]>()
-  for (const pa of productAds) {
-    const list = padsByGroup.get(pa.ad_group_id) ?? []
-    list.push(pa)
-    padsByGroup.set(pa.ad_group_id, list)
-  }
-
-  // Index targets by ad_group_id
-  const targetsByGroup = new Map<string, Target[]>()
-  for (const t of targets) {
-    const list = targetsByGroup.get(t.ad_group_id) ?? []
-    list.push(t)
-    targetsByGroup.set(t.ad_group_id, list)
-  }
-
-  // Index search terms by ad_group_id (already sorted by spend desc)
-  const stByGroup = new Map<string, StRow[]>()
-  for (const st of stTerms) {
-    const list = stByGroup.get(st.ad_group_id) ?? []
-    list.push(st)
-    stByGroup.set(st.ad_group_id, list)
-  }
-
-  // Ad-level 60d performance from amazon_advertised_product_daily
-  const adPerfRows = await sql`
-    SELECT
-      ad_id,
-      sum(cost)::text          AS spend,
-      sum(purchases_14d)::text AS orders,
-      sum(sales_14d)::text     AS sales
-    FROM amazon_advertised_product_daily
-    WHERE profile_id = ${profileId}::text
-      AND campaign_id = ${campaignId}::text
-      AND date >= CURRENT_DATE - INTERVAL '60 days'
-    GROUP BY ad_id
-  ` as unknown as AdPerfRow[]
-
-  const adPerfMap = new Map<string, AdPerfRow>()
-  for (const ap of adPerfRows) adPerfMap.set(ap.ad_id, ap)
-
-  // Keywords for the campaign (all ad groups) — profile_id bigint per migration 007
-  const keywords = await sql`
-    SELECT
-      keyword_id,
-      ad_group_id,
-      keyword_text,
-      match_type,
-      state,
-      bid::text
-    FROM amazon_keywords
-    WHERE profile_id = ${profileId}::bigint
-      AND campaign_id = ${campaignId}::text
-    ORDER BY ad_group_id, keyword_text
-  ` as unknown as Keyword[]
-
-  const kwsByGroup = new Map<string, Keyword[]>()
-  for (const kw of keywords) {
-    const list = kwsByGroup.get(kw.ad_group_id) ?? []
-    list.push(kw)
-    kwsByGroup.set(kw.ad_group_id, list)
-  }
-
-  // ── DRAFT recommendations for this campaign (full scoping) ───────────────
-  // Priority: campaign_id col → evidence.campaign_id → resolved_destination.campaign_id
-  //           → destination_ad_group_id resolved through amazon_ad_groups
-  const detailRecRows = (await sql`
-    SELECT
-      r.id,
-      r.rec_type,
-      r.target_text,
-      r.proposal,
-      r.status,
-      r.created_at::text,
-      p.country_code,
-      p.profile_id::text,
-      p.currency_code,
-      r.evidence
+  const attributed = (status: string, extra: string) => sql.query(`
+    SELECT r.id, r.rec_type, r.target_text, r.proposal, r.pushed_at::text, r.evidence
     FROM recommendations r
-    JOIN amazon_profiles p USING (profile_id)
-    LEFT JOIN amazon_ad_groups ag_fb
-      ON  (r.evidence->>'destination_ad_group_id')::text = ag_fb.ad_group_id::text
-      AND ag_fb.profile_id = r.profile_id
-      AND r.campaign_id IS NULL
-      AND r.evidence->>'campaign_id' IS NULL
-      AND r.evidence->'resolved_destination'->>'campaign_id' IS NULL
-    WHERE r.status = 'DRAFT'
-      AND p.profile_id = ${profileId}::bigint
-      AND COALESCE(
-            r.campaign_id::text,
-            r.evidence->>'campaign_id',
-            r.evidence->'resolved_destination'->>'campaign_id',
-            ag_fb.campaign_id::text
-          ) = ${campaignId}::text
-    ORDER BY r.rec_type, r.id
-  `) as unknown as RecRow[]
+    LEFT JOIN amazon_ad_groups ag ON ag.ad_group_id::text = (r.evidence->>'destination_ad_group_id') AND ag.profile_id = r.profile_id
+    WHERE r.profile_id = $1::bigint AND r.status = $3 ${extra}
+      AND COALESCE(r.campaign_id::text, r.evidence->>'campaign_id', r.evidence->'resolved_destination'->>'campaign_id',
+                   ag.campaign_id::text, CASE WHEN r.rec_type IN ('PAUSE_CAMPAIGN','BUDGET_ADJUST') THEN r.target_text END) = $2
+    ORDER BY r.pushed_at DESC NULLS LAST, r.id DESC
+    LIMIT 40
+  `, [profileId, campaignId, status])
 
-  // ── Supplemental queries for RecCard context ────────────────────────────
-  const bidAdjTargetIdsForRecs = [
-    ...new Set(
-      detailRecRows
-        .filter(r => r.rec_type === 'BID_ADJUST')
-        .map(r => r.evidence.chosen_target?.target_id)
-        .filter((x): x is string => x != null),
-    ),
-  ]
-  const destAgIdsForRecs = [
-    ...new Set(
-      detailRecRows
-        .filter(r => r.rec_type === 'PROMOTE_ASIN')
-        .map(r => r.evidence.primary_placement?.ad_group_id)
-        .filter((x): x is string => x != null),
-    ),
-  ]
+  const [weekRows, pushedRows, draftRows, kwRows, tgRows, stRows, bookRows] = (await Promise.all([
+    sp
+      ? sql`
+          SELECT date_trunc('week', date)::date::text AS wk, sum(cost)::float AS spend, sum(sales_14d)::float AS sales, sum(purchases_14d)::float AS orders
+          FROM amazon_campaign_daily
+          WHERE profile_id = ${profileId}::bigint AND campaign_id = ${campaignId}
+            AND date >= date_trunc('week', CURRENT_DATE) - interval '11 weeks'
+          GROUP BY 1 ORDER BY 1`
+      : sql`
+          SELECT date_trunc('week', date)::date::text AS wk, sum(cost)::float AS spend, sum(sales)::float AS sales, sum(purchases)::float AS orders
+          FROM amazon_campaign_daily_other
+          WHERE profile_id = ${profileId}::bigint AND campaign_id = ${campaignId}
+            AND date >= date_trunc('week', CURRENT_DATE) - interval '11 weeks'
+          GROUP BY 1 ORDER BY 1`,
+    attributed('PUSHED', `AND r.pushed_at >= now() - interval '180 days'`),
+    attributed('DRAFT', ''),
+    sp ? sql`
+      SELECT k.keyword_id AS id, k.keyword_text AS text, k.match_type, k.state, k.bid::float AS bid,
+        coalesce(st.clicks,0)::float AS clicks, coalesce(st.spend,0)::float AS spend, coalesce(st.orders,0)::float AS orders,
+        coalesce(st.sales,0)::float AS sales, (st.keyword_id IS NOT NULL) AS has_perf
+      FROM amazon_keywords k
+      LEFT JOIN (
+        SELECT keyword_id, sum(clicks) AS clicks, sum(cost) AS spend, sum(purchases_14d) AS orders, sum(sales_14d) AS sales
+        FROM amazon_search_term_daily
+        WHERE profile_id = ${profileId}::bigint AND campaign_id = ${campaignId} AND date >= CURRENT_DATE - 30
+        GROUP BY keyword_id) st ON st.keyword_id = k.keyword_id
+      WHERE k.profile_id = ${profileId}::bigint AND k.campaign_id = ${campaignId} AND upper(k.state) <> 'ARCHIVED'
+      ORDER BY coalesce(st.spend,0) DESC, k.keyword_text
+      LIMIT 200` : Promise.resolve([]),
+    sp ? sql`
+      SELECT t.target_id AS id, t.expression_type, t.expression->0->>'type' AS sub, t.expression->0->>'value' AS val,
+        t.resolved_asin, t.state, t.bid::float AS bid,
+        coalesce(st.clicks,0)::float AS clicks, coalesce(st.spend,0)::float AS spend, coalesce(st.orders,0)::float AS orders,
+        coalesce(st.sales,0)::float AS sales, (st.keyword_id IS NOT NULL) AS has_perf
+      FROM amazon_targets t
+      LEFT JOIN (
+        SELECT keyword_id, sum(clicks) AS clicks, sum(cost) AS spend, sum(purchases_14d) AS orders, sum(sales_14d) AS sales
+        FROM amazon_search_term_daily
+        WHERE profile_id = ${profileId}::bigint AND campaign_id = ${campaignId} AND date >= CURRENT_DATE - 30
+        GROUP BY keyword_id) st ON st.keyword_id = t.target_id
+      WHERE t.profile_id = ${profileId}::bigint AND t.campaign_id = ${campaignId} AND upper(t.state) <> 'ARCHIVED'
+      ORDER BY coalesce(st.spend,0) DESC
+      LIMIT 200` : Promise.resolve([]),
+    sp ? sql`
+      SELECT st.search_term, sum(st.clicks)::float AS clicks, sum(st.cost)::float AS spend, sum(st.purchases_14d)::float AS orders,
+        sum(st.sales_14d)::float AS sales,
+        EXISTS (SELECT 1 FROM amazon_keywords k WHERE k.profile_id = ${profileId}::bigint AND k.campaign_id = ${campaignId}
+                 AND lower(k.keyword_text) = lower(st.search_term)) AS is_kw
+      FROM amazon_search_term_daily st
+      WHERE st.profile_id = ${profileId}::bigint AND st.campaign_id = ${campaignId} AND st.date >= CURRENT_DATE - 30
+      GROUP BY st.search_term
+      ORDER BY sum(st.cost) DESC
+      LIMIT 30` : Promise.resolve([]),
+    sp ? sql`
+      SELECT pa.ad_id, pa.asin, pa.state, tc.title,
+        coalesce(d.clicks,0)::float AS clicks, coalesce(d.spend,0)::float AS spend, coalesce(d.orders,0)::float AS orders,
+        coalesce(d.sales,0)::float AS sales
+      FROM amazon_product_ads pa
+      LEFT JOIN title_cache tc ON tc.asin = pa.asin
+      LEFT JOIN (
+        SELECT ad_id, sum(clicks) AS clicks, sum(cost) AS spend, sum(purchases_14d) AS orders, sum(sales_14d) AS sales
+        FROM amazon_advertised_product_daily
+        WHERE profile_id = ${profileId}::text AND campaign_id = ${campaignId}::text AND date >= CURRENT_DATE - 30
+        GROUP BY ad_id) d ON d.ad_id = pa.ad_id
+      WHERE pa.profile_id = ${profileId}::bigint AND pa.campaign_id = ${campaignId} AND upper(pa.state) <> 'ARCHIVED'
+      ORDER BY coalesce(d.spend,0) DESC
+      LIMIT 100` : Promise.resolve([]),
+  ])) as unknown as [WeekRow[], PushedRow[], PushedRow[], KwRow[], TgRow[], StRow[], BookRow[]]
 
-  const [recBidAdjStateRows, recDestTargetRows] = await Promise.all([
-    bidAdjTargetIdsForRecs.length > 0
-      ? (sql`
-          SELECT target_id, state
-          FROM amazon_targets
-          WHERE target_id = ANY(${bidAdjTargetIdsForRecs})
-            AND profile_id = ${profileId}::bigint
-        `) as unknown as Promise<RecBidAdjStateRow[]>
-      : Promise.resolve([] as RecBidAdjStateRow[]),
-    destAgIdsForRecs.length > 0
-      ? (sql`
-          SELECT
-            target_id,
-            ad_group_id,
-            profile_id::text AS profile_id,
-            state,
-            expression_type,
-            resolved_asin,
-            bid::text
-          FROM amazon_targets
-          WHERE profile_id = ${profileId}::bigint
-            AND ad_group_id = ANY(${destAgIdsForRecs})
-          ORDER BY ad_group_id, resolved_asin NULLS LAST
-        `) as unknown as Promise<DestTargetRow[]>
-      : Promise.resolve([] as DestTargetRow[]),
-  ])
-
-  // ── Build RecCard context ────────────────────────────────────────────────
-  // adGroupMap: all ad groups for this campaign (names only; evidence panels
-  // that reference other campaigns' groups fall back to showing the raw id)
-  const recAdGroupMap = new Map<string, string>()
-  for (const ag of adGroups) {
-    recAdGroupMap.set(`${profileId}:${ag.ad_group_id}`, ag.name)
+  const j = judge({ spend: head.spend, sales: head.sales, orders: head.orders, gpPerOrder: gp, targetAcos: head.target_acos })
+  const verdictOf = (spend: number, orders: number, sales = 0): { label: string; tone: Tone } => {
+    const x = judge({ spend, sales, orders, gpPerOrder: gp, targetAcos: head.target_acos })
+    return { label: x.label, tone: x.tone }
   }
+  const per = (spend: number, orders: number) => (orders > 0 ? money(spend / orders, cur, { decimals: 2 }) : '—')
+  const m2 = (v: number | null) => (v == null ? '—' : money(v, cur, { decimals: 2 }))
 
-  const recCampMap = new Map<string, { name: string; state: string }>()
-  recCampMap.set(`${profileId}:${campaignId}`, {
-    name:  campaign.campaign_name,
-    state: campaign.state,
+  // ── Header ──
+  const status = head.state === 'ENABLED' ? 'Active' : head.state === 'PAUSED' ? 'Paused' : head.state === 'ARCHIVED' ? 'Archived' : head.state
+  const budget = head.budget_amount == null ? null
+    : `${money(head.budget_amount, cur)}${(head.budget_type ?? '').toUpperCase() === 'LIFETIME' ? ' in total' : ' a day'}`
+  const kind = [marketName(head.country_code), adTypeName(head.type_label) === 'Products' ? 'Sponsored Products' : adTypeName(head.type_label),
+    head.targeting ? (head.targeting.toUpperCase() === 'AUTO' ? 'automatic targeting' : 'manual targeting') : null].filter(Boolean).join(' · ')
+
+  const kpis = [
+    { k: 'Spend · 30 days', v: money(head.spend, cur), note: '' },
+    { k: 'Orders', v: count(head.orders), note: '' },
+    unit
+      ? { k: 'Per order', v: per(head.spend, head.orders), note: j.costPerOrder != null ? `${money(Math.abs(j.costPerOrder - (gp as number)), cur, { decimals: 2 })} ${j.costPerOrder <= (gp as number) ? 'under' : 'over'} the margin` : `margin ${m2(gp)}` }
+      : { k: 'ACoS', v: j.acos != null ? pct(j.acos) : '—', note: head.target_acos != null ? `target ${pct(head.target_acos, 0)}` : 'no target set' },
+    unit
+      ? { k: 'Profit after ads', v: head.spend > 0 && j.profitAfterAds != null ? money(j.profitAfterAds, cur, { sign: true }) : '—', note: '' }
+      : { k: 'Per order', v: per(head.spend, head.orders), note: 'no margin set yet' },
+    { k: 'Ad sales', v: money(head.sales, cur), note: j.acos != null && unit ? `ACoS ${pct(j.acos)}` : '' },
+  ]
+
+  // ── Weekly chart ──
+  const pushWeeks = new Set(pushedRows.map(p => weekStart(p.pushed_at)))
+  const weeks: Week[] = weekRows.map(w => {
+    const value = unit ? (w.orders > 0 ? w.spend / w.orders : null) : (w.sales > 0 ? w.spend / w.sales : null)
+    const fmt = unit ? (value == null ? (w.spend > 0 ? 'no orders' : 'no spend') : money(value, cur, { decimals: 2 })) : (value == null ? 'no sales' : pct(value))
+    return { label: dayLabel(w.wk), value, spend: w.spend, change: pushWeeks.has(w.wk), tip: `Week of ${dayLabel(w.wk)}: ${fmt} · ${money(w.spend, cur)} spend · ${count(w.orders)} orders` }
   })
+  const line = unit ? (gp as number) : head.target_acos
+  const lineLabel = unit ? `Margin ${m2(gp)}` : head.target_acos != null ? `Target ${pct(head.target_acos, 0)}` : ''
 
-  const recBidAdjStateMap = new Map<string, string>()
-  for (const row of recBidAdjStateRows) {
-    recBidAdjStateMap.set(row.target_id, row.state)
+  // ── Tabs ──
+  const tabs: DetailTab[] = []
+  if (sp) {
+    const kw = kwRows.map(k => {
+      const v = k.has_perf ? verdictOf(k.spend, k.orders, k.sales) : { label: 'No data yet', tone: 'off' as Tone }
+      return { key: `k${k.id}`, a: k.text, b: `${titleCase(k.match_type)} · ${m2(k.bid)}${upper(k.state) === 'PAUSED' ? ' · paused' : ''}`,
+        clicks: k.has_perf ? count(k.clicks) : '—', spend: k.has_perf ? money(k.spend, cur, { decimals: 2 }) : '—', orders: k.has_perf ? count(k.orders) : '—',
+        cpo: k.has_perf ? per(k.spend, k.orders) : '—', note: v.label, tone: v.tone }
+    })
+    const tg = tgRows.map(t => {
+      const v = t.has_perf ? verdictOf(t.spend, t.orders, t.sales) : { label: 'No data yet', tone: 'off' as Tone }
+      const name = t.resolved_asin ? `Product ${t.resolved_asin}`
+        : t.sub && TARGET_NAME[t.sub] ? TARGET_NAME[t.sub]
+        : t.sub === 'ASIN_CATEGORY_SAME_AS' ? `Category ${t.val ?? ''}`.trim()
+        : t.sub === 'ASIN_SAME_AS' ? `Product ${t.val ?? ''}`.trim()
+        : titleCase(t.expression_type ?? 'Target')
+      return { key: `t${t.id}`, a: name, b: `Target · ${m2(t.bid)}${upper(t.state) === 'PAUSED' ? ' · paused' : ''}`,
+        clicks: t.has_perf ? count(t.clicks) : '—', spend: t.has_perf ? money(t.spend, cur, { decimals: 2 }) : '—', orders: t.has_perf ? count(t.orders) : '—',
+        cpo: t.has_perf ? per(t.spend, t.orders) : '—', note: v.label, tone: v.tone }
+    })
+    tabs.push({ key: 'kw', label: 'Keywords and targets', note: `What we bid on, with the last 30 days of each. Judged against ${unit ? `the ${m2(gp)} margin` : 'the ACoS target'}.`,
+      heads: ['Keyword or target', 'Match · bid', 'Judged'], rows: [...kw, ...tg] })
+    tabs.push({ key: 'st', label: 'Search terms', note: 'What shoppers actually typed before clicking, last 30 days. Winners become keywords; losers get stopped in Decisions.',
+      heads: ['Search term', '', 'Judged'], rows: stRows.map(t => {
+        const v = t.is_kw ? { label: 'Already a keyword', tone: 'off' as Tone } : verdictOf(t.spend, t.orders, t.sales)
+        return { key: `s${t.search_term}`, a: t.search_term, b: '', clicks: count(t.clicks), spend: money(t.spend, cur, { decimals: 2 }), orders: count(t.orders), cpo: per(t.spend, t.orders), note: v.label, tone: v.tone }
+      }) })
+    tabs.push({ key: 'bk', label: 'Books advertised', note: 'The editions this campaign shows, with what each sold through the ads in the last 30 days.',
+      heads: ['Edition', 'ASIN', 'Judged'], rows: bookRows.map(b => {
+        const v = verdictOf(b.spend, b.orders, b.sales)
+        return { key: `b${b.ad_id}`, a: b.title ?? b.asin ?? b.ad_id, b: `${b.asin ?? ''}${upper(b.state) === 'PAUSED' ? ' · paused' : ''}`,
+          clicks: count(b.clicks), spend: money(b.spend, cur, { decimals: 2 }), orders: count(b.orders), cpo: per(b.spend, b.orders), note: v.label, tone: v.tone }
+      }) })
   }
-
-  const recDestTargetsMap = new Map<string, DestTargetRow[]>()
-  for (const t of recDestTargetRows) {
-    const key = `${t.profile_id}:${t.ad_group_id}`
-    if (!recDestTargetsMap.has(key)) recDestTargetsMap.set(key, [])
-    recDestTargetsMap.get(key)!.push(t)
-  }
-
-  // ── isbn13 lookup for cover accents (recs + advertised products, one IN query) ──
-  interface TitleCacheIsbn13Row { asin: string; isbn13: string }
-  const coverAsinSet = new Set<string>()
-  for (const r of detailRecRows) {
-    if (r.rec_type === 'PROMOTE_ASIN' || r.rec_type === 'CREATIVE_TARGET') {
-      coverAsinSet.add(r.target_text.toUpperCase())
-    }
-  }
-  for (const pa of productAds) {
-    if (pa.asin) coverAsinSet.add(pa.asin.toUpperCase())
-  }
-  const coverAsinList = [...coverAsinSet]
-  let titleCacheIsbn13Rows: TitleCacheIsbn13Row[] = []
-  if (coverAsinList.length > 0) {
-    titleCacheIsbn13Rows = (await sql`
-      SELECT asin, isbn13
-      FROM title_cache
-      WHERE upper(asin) = ANY(${coverAsinList})
-        AND isbn13 IS NOT NULL
-        AND found = true
-    `) as unknown as TitleCacheIsbn13Row[]
-  }
-  const isbn13Map = new Map<string, string>()
-  for (const row of titleCacheIsbn13Rows) {
-    isbn13Map.set(row.asin.toUpperCase(), row.isbn13)
-  }
-
-  const recCtx: RecCardContext = {
-    adGroupMap:     recAdGroupMap,
-    campMap:        recCampMap,
-    bidAdjStateMap: recBidAdjStateMap,
-    destTargetsMap: recDestTargetsMap,
-    outcomesMap:    new Map(),
-    isbn13Map,
-  }
-
-  // ── Partition recs: campaign-level vs per-ad-group ───────────────────────
-  const campLevelRecs = detailRecRows.filter(r => isCampaignLevel(r.rec_type, r.evidence))
-
-  function stPerfFor(adGroupId: string, resolvedAsin: string): StRow | undefined {
-    return (stByGroup.get(adGroupId) ?? []).find(
-      r => r.search_term === resolvedAsin.toLowerCase()
-    )
-  }
-
-  function top8(adGroupId: string): StRow[] {
-    return (stByGroup.get(adGroupId) ?? []).slice(0, 8)
-  }
-
-  // Shared sub-label style
-  const subLabel: React.CSSProperties = {
-    fontSize: '0.72rem',
-    fontWeight: 700,
-    textTransform: 'uppercase',
-    letterSpacing: '0.05em',
-    color: 'var(--cdl-muted)',
-  }
+  tabs.push({ key: 'ch', label: 'Changes sent', note: 'Every change we sent to Amazon for this campaign in the last 180 days. Results per change follow on the Results page.',
+    heads: ['Change', 'Sent', ''], rows: pushedRows.map(p => {
+      const v = describe({ recType: p.rec_type, targetText: p.target_text ?? '', proposal: p.proposal ?? '', campaignName: null, evidence: p.evidence ?? {},
+        money: (x: number) => money(x, cur, { decimals: 2 }), count })
+      return { key: `p${p.id}`, a: v.title, b: p.pushed_at ? dayLabel(p.pushed_at) : '', clicks: '', spend: '', orders: '', cpo: '', note: v.kind, tone: 'off' as Tone }
+    }) })
 
   return (
-    <div>
-      {/* ── Back ── */}
-      <div style={{ marginBottom: '1rem' }}>
-        <a href="/amazon/campaigns" style={{ color: 'var(--cdl-blue)', fontSize: '0.85rem' }}>
-          ← Campaigns
-        </a>
-      </div>
+    <main className={s.main} style={{ paddingTop: 28, gap: 22 }}>
+      <Link href={`/amazon/campaigns?market=${head.country_code}`} style={{ fontWeight: 700, fontSize: 14, textDecoration: 'none' }}>← {marketName(head.country_code)} campaigns</Link>
 
-      {/* ── Header ── */}
-      <div style={{ marginBottom: '2rem' }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'baseline',
-          flexWrap: 'wrap',
-          gap: '0.75rem',
-          marginBottom: '0.5rem',
-        }}>
-          <h1 style={{ marginBottom: 0 }}>{campaign.campaign_name}</h1>
-          <span className={stateBadgeCls(campaign.state)}>{campaign.state}</span>
-          {campaign.budget_amount != null && (
-            <span style={{ fontSize: '0.85rem', color: 'var(--cdl-muted)' }}>
-              Budget: {parseFloat(campaign.budget_amount).toFixed(2)} {profile.currency_code}/day
-            </span>
-          )}
-          <span style={{ fontSize: '0.85rem', color: 'var(--cdl-muted)' }}>
-            {profile.country_code} · {profile.currency_code}
-          </span>
-        </div>
-
-        {/* 30d stats */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2rem', fontSize: '0.9rem', marginTop: '0.75rem' }}>
-          <div>
-            <StatLabel>Spend 30d</StatLabel>
-            <div style={{ fontVariantNumeric: 'tabular-nums' }}>
-              {fmt(totals.spend_30d)} {profile.currency_code}
-            </div>
-          </div>
-          <div>
-            <StatLabel>Sales 30d</StatLabel>
-            <div style={{ fontVariantNumeric: 'tabular-nums' }}>
-              {fmt(totals.sales_30d)} {profile.currency_code}
-            </div>
-          </div>
-          <div>
-            <StatLabel>ACOS 30d</StatLabel>
-            <div>
-              {acos30d != null ? (
-                <>
-                  <span className={acosBadge}>{acos30d}%</span>
-                  <span style={{ fontSize: '0.78em', color: 'var(--cdl-muted)', marginLeft: '0.5em' }}>
-                    tgt {targetPct.toFixed(0)}%
-                  </span>
-                </>
-              ) : '—'}
-            </div>
-          </div>
-          <div>
-            <StatLabel>Orders 30d</StatLabel>
-            <div>{totals.orders_30d}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+        <div style={{ minWidth: 0 }}>
+          <div className={s.eyebrow}>{kind}</div>
+          <h1 className={s.h1} style={{ fontSize: 40, overflowWrap: 'anywhere' }}>{head.name}</h1>
+          <div className={s.lede} style={{ fontSize: 15 }}>
+            {status}{budget ? ` · ${budget}` : ''} · <span className={`${s.chip} ${toneClass(head.state !== 'ENABLED' && head.spend <= 0 ? 'off' : j.tone)}`}>{head.state !== 'ENABLED' && head.spend <= 0 ? status : j.label}</span>
           </div>
         </div>
+        {draftRows.length > 0 ? (
+          <Link href={`/amazon/decisions?market=${head.country_code}`} className={s.btnGold}>{count(draftRows.length)} change{draftRows.length === 1 ? '' : 's'} to decide</Link>
+        ) : null}
       </div>
 
-      {/* ── Recommendations (campaign-level + anchor for badge links) ── */}
-      {detailRecRows.length > 0 && (
-        <section id="recs" style={{ marginBottom: '2.5rem' }}>
-          <h2>
-            Recommendations{' '}
-            <span style={{
-              color: 'var(--cdl-muted)', fontWeight: 400,
-              fontFamily: 'inherit', fontSize: '0.9rem',
-            }}>
-              — {detailRecRows.length} draft{detailRecRows.length !== 1 ? 's' : ''}
-            </span>
-          </h2>
-          {campLevelRecs.length > 0
-            ? campLevelRecs.map(r => <RecCard key={r.id} rec={r} ctx={recCtx} />)
-            : (
-              <p style={{ color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
-                All recommendations are attributed to individual ad groups — see below.
-              </p>
-            )
-          }
-        </section>
-      )}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 14 }}>
+        {kpis.map(k => (
+          <div key={k.k} className={s.card} style={{ padding: '16px 18px' }}>
+            <div className={s.label}>{k.k}</div>
+            <div className={s.tn} style={{ fontSize: 26, fontWeight: 800 }}>{k.v}</div>
+            {k.note ? <div className={s.note} style={{ fontSize: 12 }}>{k.note}</div> : null}
+          </div>
+        ))}
+      </div>
 
-      {/* ── Ad Groups ── */}
-      <h2>Ad Groups</h2>
+      <CampaignDetail weeks={weeks} line={line} lineLabel={lineLabel} unit={unit} tabs={tabs}
+                      chartTitle={unit ? 'Cost per order, week by week' : 'ACoS, week by week'} />
 
-      {adGroups.length === 0 && (
-        <p style={{ color: 'var(--cdl-muted)', fontSize: '0.85rem' }}>
-          No ad groups found for this campaign.
-        </p>
-      )}
-
-      {adGroups.map(ag => {
-        const pads     = padsByGroup.get(ag.ad_group_id)    ?? []
-        const tgts     = targetsByGroup.get(ag.ad_group_id) ?? []
-        const topTerms = top8(ag.ad_group_id)
-        const kws      = kwsByGroup.get(ag.ad_group_id)     ?? []
-        const hasStPerf = tgts.some(t => t.resolved_asin && stPerfFor(ag.ad_group_id, t.resolved_asin))
-        const hasKwPerf = kws.some(kw => !!stPerfFor(ag.ad_group_id, kw.keyword_text))
-
-        // Recs attributed to this specific ad group
-        const agRecs = detailRecRows.filter(r =>
-          !isCampaignLevel(r.rec_type, r.evidence) &&
-          evidenceAdGroupId(r.evidence) === ag.ad_group_id
-        )
-
-        return (
-          <section
-            key={ag.ad_group_id}
-            id={`ag-${ag.ad_group_id}`}
-            style={{
-              border: '1px solid #c8dfe9',
-              borderRadius: '8px',
-              marginBottom: '2rem',
-              overflow: 'hidden',
-              boxShadow: '0 1px 5px rgba(0,0,0,.08)',
-            }}
-          >
-            {/* Ad group title bar */}
-            <div style={{
-              background: 'var(--cdl-sky)',
-              padding: '0.75rem 1rem',
-              borderBottom: '1px solid #c8dfe9',
-              display: 'flex',
-              alignItems: 'baseline',
-              flexWrap: 'wrap',
-              gap: '0.6rem',
-            }}>
-              <h3 style={{ marginBottom: 0 }}>{ag.name}</h3>
-              <span className={stateBadgeCls(ag.state)}>{ag.state}</span>
-              {ag.default_bid != null && (
-                <span style={{ fontSize: '0.82rem', color: 'var(--cdl-muted)' }}>
-                  default bid: {fmt(ag.default_bid)} {profile.currency_code}
-                </span>
-              )}
-            </div>
-
-            <div style={{ padding: '1rem' }}>
-
-              {/* ── Recommendations for this ad group ── */}
-              {agRecs.length > 0 && (
-                <div style={{ marginBottom: '1.5rem' }}>
-                  <h4 style={{ marginBottom: '0.5rem' }}>
-                    Recommendations{' '}
-                    <span style={{
-                      color: 'var(--cdl-muted)', fontWeight: 400,
-                      fontFamily: 'inherit', fontSize: '0.9rem',
-                    }}>
-                      — {agRecs.length} draft{agRecs.length !== 1 ? 's' : ''}
-                    </span>
-                  </h4>
-                  {agRecs.map(r => <RecCard key={r.id} rec={r} ctx={recCtx} />)}
-                </div>
-              )}
-
-              {/* ── b. Advertised Products ── */}
-              <h4 style={{ marginBottom: '0.5rem' }}>Advertised Products</h4>
-              {pads.length === 0 ? (
-                <p style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem', marginBottom: '1.5rem' }}>
-                  No product ads in this ad group.
-                </p>
-              ) : (
-                <div className="table-card" style={{ marginBottom: '1.5rem' }}>
-                  <div className="table-scroll">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>ASIN</th>
-                          <th>State</th>
-                          <th className="num">Spend 60d</th>
-                          <th className="num">Orders 60d</th>
-                          <th className="num">Sales 60d</th>
-                          <th className="num">ACoS 60d</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pads.map((pa, i) => {
-                          const perf      = adPerfMap.get(pa.ad_id)
-                          const spend60d  = perf ? parseFloat(perf.spend).toFixed(2)  : null
-                          const orders60d = perf ? Number(perf.orders)                 : null
-                          const sales60d  = perf ? parseFloat(perf.sales).toFixed(2)  : null
-                          const acos60d   = perf && parseFloat(perf.sales) > 0
-                            ? (parseFloat(perf.spend) / parseFloat(perf.sales) * 100).toFixed(1)
-                            : null
-                          return (
-                          <tr key={i}>
-                            <td>
-                              {pa.asin ? (
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
-                                  {isbn13Map.get(pa.asin.toUpperCase()) && (
-                                    <BookCover
-                                      isbn13={isbn13Map.get(pa.asin.toUpperCase())!}
-                                      alt={pa.asin}
-                                      size="sm"
-                                    />
-                                  )}
-                                  <a
-                                    href={asinUrl(pa.asin, profile.country_code)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    style={{ color: 'var(--cdl-blue)', fontFamily: 'monospace', fontSize: '0.88em' }}
-                                  >
-                                    {pa.asin.toUpperCase()}
-                                  </a>
-                                </span>
-                              ) : (
-                                <span style={{ color: 'var(--cdl-muted)' }}>—</span>
-                              )}
-                            </td>
-                            <td>
-                              <span className={stateBadgeCls(pa.state)}>{pa.state}</span>
-                            </td>
-                            <td className="num">{spend60d  != null ? `${spend60d} ${profile.currency_code}`  : '—'}</td>
-                            <td className="num">{orders60d != null ? orders60d                                : '—'}</td>
-                            <td className="num">{sales60d  != null ? `${sales60d} ${profile.currency_code}`  : '—'}</td>
-                            <td className="num">{acos60d   != null ? `${acos60d}%`                           : '—'}</td>
-                          </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* ── c. Keywords ── */}
-              <h4 style={{ marginBottom: '0.5rem' }}>Keywords</h4>
-              {kws.length === 0 ? (
-                <p style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem', marginBottom: '1.5rem' }}>
-                  No keywords in this ad group.
-                </p>
-              ) : (
-                <div className="table-card" style={{ marginBottom: '1.5rem' }}>
-                  <div className="table-scroll">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Keyword</th>
-                          <th>Match</th>
-                          <th>State</th>
-                          <th className="num">Bid</th>
-                          <th className="num">Spend 60d</th>
-                          <th className="num">Orders 60d</th>
-                          <th className="num">ACOS 60d</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {kws.map(kw => {
-                          const perf   = stPerfFor(ag.ad_group_id, kw.keyword_text)
-                          const kwAcos = perf ? computeAcos(perf.spend, perf.sales) : null
-                          return (
-                            <tr key={kw.keyword_id}>
-                              <td>{kw.keyword_text}</td>
-                              <td><span className="badge badge-muted">{kw.match_type}</span></td>
-                              <td><span className={stateBadgeCls(kw.state)}>{kw.state}</span></td>
-                              <td className="num">{kw.bid != null ? fmt(kw.bid) : '—'}</td>
-                              <td className="num">{perf ? `${fmt(perf.spend)} ${profile.currency_code}` : '—'}</td>
-                              <td className="num">{perf ? perf.orders : '—'}</td>
-                              <td className="num">{kwAcos != null ? `${kwAcos}%` : '—'}</td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  {hasKwPerf && (
-                    <div style={{
-                      padding: '0.3rem 0.75rem',
-                      fontSize: '0.72rem',
-                      color: 'var(--cdl-muted)',
-                      borderTop: '1px solid #eef4f8',
-                      ...subLabel,
-                      textTransform: 'none',
-                      letterSpacing: 0,
-                    }}>
-                      Spend / Orders / ACOS: via search-term data (last 60d)
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ── d. Targets ── */}
-              <h4 style={{ marginBottom: '0.5rem' }}>Targets</h4>
-              {tgts.length === 0 ? (
-                <p style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem', marginBottom: '1.5rem' }}>
-                  No targets in this ad group.
-                </p>
-              ) : (
-                <div className="table-card" style={{ marginBottom: '1.5rem' }}>
-                  <div className="table-scroll">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Target</th>
-                          <th>State</th>
-                          <th className="num">Bid</th>
-                          <th className="num">Spend 60d</th>
-                          <th className="num">Orders 60d</th>
-                          <th className="num">ACOS 60d</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {tgts.map(t => {
-                          const perf  = t.resolved_asin ? stPerfFor(ag.ad_group_id, t.resolved_asin) : undefined
-                          const tAcos = perf ? computeAcos(perf.spend, perf.sales) : null
-                          return (
-                            <tr key={t.target_id}>
-                              <td>
-                                {t.resolved_asin ? (
-                                  <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: '0.4em' }}>
-                                    <a
-                                      href={asinUrl(t.resolved_asin, profile.country_code)}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      style={{ color: 'var(--cdl-blue)', fontFamily: 'monospace', fontSize: '0.88em' }}
-                                    >
-                                      {t.resolved_asin.toUpperCase()}
-                                    </a>
-                                    {t.expression_subtype === 'ASIN_EXPANDED_FROM' && (
-                                      <span className="badge badge-muted">Expanded</span>
-                                    )}
-                                  </span>
-                                ) : (
-                                  <span style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem' }}>
-                                    {t.expression_subtype === 'ASIN_CATEGORY_SAME_AS'
-                                      ? `Category: ${t.expression_subvalue ?? '—'}`
-                                      : t.expression_subtype
-                                        ? (EXPRESSION_LABELS[t.expression_subtype] ?? t.expression_subtype)
-                                        : (t.expression_type ?? '—')}
-                                  </span>
-                                )}
-                              </td>
-                              <td>
-                                <span className={stateBadgeCls(t.state)}>{t.state}</span>
-                              </td>
-                              <td className="num">{t.bid != null ? fmt(t.bid) : '—'}</td>
-                              {perf ? (
-                                <>
-                                  <td className="num">{fmt(perf.spend)}</td>
-                                  <td className="num">{perf.orders}</td>
-                                  <td className="num">{tAcos != null ? `${tAcos}%` : '—'}</td>
-                                </>
-                              ) : (
-                                <>
-                                  <td className="num">—</td>
-                                  <td className="num">—</td>
-                                  <td className="num">—</td>
-                                </>
-                              )}
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  {hasStPerf && (
-                    <div style={{
-                      padding: '0.3rem 0.75rem',
-                      fontSize: '0.72rem',
-                      color: 'var(--cdl-muted)',
-                      borderTop: '1px solid #eef4f8',
-                      ...subLabel,
-                      textTransform: 'none',
-                      letterSpacing: 0,
-                    }}>
-                      Spend / Orders / ACOS: via search-term data (last 60d)
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ── e. Top Search Terms ── */}
-              <h4 style={{ marginBottom: '0.5rem' }}>
-                Top Search Terms{' '}
-                <span style={{ fontSize: '0.8em', fontWeight: 400, color: 'var(--cdl-muted)' }}>
-                  (last 60d, top 8 by spend)
-                </span>
-              </h4>
-              {topTerms.length === 0 ? (
-                <p style={{ color: 'var(--cdl-muted)', fontSize: '0.83rem' }}>
-                  No search term data for this ad group.
-                </p>
-              ) : (
-                <div className="table-card">
-                  <div className="table-scroll">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Search Term</th>
-                          <th className="num">Spend</th>
-                          <th className="num">Orders</th>
-                          <th className="num">ACOS</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {topTerms.map((st, i) => {
-                          const stAcos = computeAcos(st.spend, st.sales)
-                          return (
-                            <tr key={i}>
-                              <td className="wrap">{st.search_term}</td>
-                              <td className="num">
-                                {fmt(st.spend)} {profile.currency_code}
-                              </td>
-                              <td className="num">{st.orders}</td>
-                              <td className="num">{stAcos != null ? `${stAcos}%` : '—'}</td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-            </div>
-          </section>
-        )
-      })}
-    </div>
+      {!sp ? <div className={s.foot}>Brands and Display campaigns are changed by hand in Amazon; the engine only proposes changes for Sponsored Products.</div> : null}
+    </main>
   )
+}
+
+function toneClass(t: Tone): string {
+  return t === 'pay' ? s.pay : t === 'even' ? s.even : t === 'lose' ? s.lose : s.off
+}
+
+function upper(v: string | null | undefined): string {
+  return (v ?? '').toUpperCase()
+}
+
+function titleCase(v: string): string {
+  const x = v.replace(/_/g, ' ').toLowerCase()
+  return x.charAt(0).toUpperCase() + x.slice(1)
+}
+
+// Monday of the week, as YYYY-MM-DD, matching Postgres date_trunc('week', …).
+function weekStart(ts: string): string {
+  const d = new Date(ts.slice(0, 10) + 'T00:00:00Z')
+  const dow = (d.getUTCDay() + 6) % 7
+  d.setUTCDate(d.getUTCDate() - dow)
+  return d.toISOString().slice(0, 10)
 }

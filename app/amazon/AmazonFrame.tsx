@@ -16,7 +16,8 @@ const NAV: { href: string; label: string; badge?: boolean; match: string[] }[] =
 
 // Pages already built on the new look render edge to edge; older pages keep
 // the padding they were designed with.
-const NEW_PAGES = new Set(['/amazon', '/amazon/decisions'])
+const NEW_PREFIXES = ['/amazon/decisions', '/amazon/campaigns']
+const isNewPage = (p: string) => p === '/amazon' || NEW_PREFIXES.some(x => p === x || p.startsWith(x + '/'))
 
 export default function AmazonFrame({
   drafts, dataTo, failed, checked, children,
@@ -59,7 +60,7 @@ export default function AmazonFrame({
           </a>
         </div>
       </div>
-      <div className={NEW_PAGES.has(path) ? undefined : s.legacy}>{children}</div>
+      <div className={isNewPage(path) ? undefined : s.legacy}>{children}</div>
     </>
   )
 }
