@@ -1,7 +1,7 @@
 'use server'
 
 // Approve / reject / undo for the Decisions page. The SQL for approve and reject is
-// the same as app/amazon/recommendations/actions.ts (status only moves out of DRAFT);
+// the same as the old recommendations actions (status only moves out of DRAFT);
 // undo moves an APPROVED row that has not been sent back to DRAFT.
 
 import { neon } from '@neondatabase/serverless'

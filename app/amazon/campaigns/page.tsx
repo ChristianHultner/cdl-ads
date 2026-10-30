@@ -80,6 +80,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams: Pr
           spendNum: c.spend,
           orders: count(c.orders),
           cpo: cj.costPerOrder != null ? money(cj.costPerOrder, cur, { decimals: 2 }) : '—',
+          acos: cj.acos != null ? pct(cj.acos) : '—',
           verdict: c.state !== 'ENABLED' && c.spend <= 0 ? status : cj.label,
           tone: c.state !== 'ENABLED' && c.spend <= 0 ? 'off' : cj.tone,
           todo: recMap.get(`${c.profile_id}:${c.campaign_id}`) ?? 0,
@@ -91,6 +92,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams: Pr
             { k: 'Orders', v: count(m.orders) },
             { k: 'Per order', v: j.costPerOrder != null ? money(j.costPerOrder, cur, { decimals: 2 }) : '—' },
             { k: 'Profit after ads', v: m.spend > 0 && j.profitAfterAds != null ? money(j.profitAfterAds, cur, { sign: true }) : '—' },
+            { k: 'ACoS', v: j.acos != null ? pct(j.acos) : '—' },
           ]
         : [
             { k: 'Spend', v: money(m.spend, cur) },

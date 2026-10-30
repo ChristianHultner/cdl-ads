@@ -177,7 +177,7 @@ function MarketCard({ m }: { m: MarketRow }) {
 
   const foot = allPaused && m.spend <= 0
     ? `All ${count(m.live_total)} campaigns paused`
-    : `${money(m.spend, cur)} spend · ${count(m.orders)} order${Math.round(m.orders) === 1 ? '' : 's'}`
+    : `${money(m.spend, cur)} spend · ${count(m.orders)} order${Math.round(m.orders) === 1 ? '' : 's'}${unit && j.acos != null ? ` · ACoS ${pct(j.acos)}` : ''}`
 
   return (
     <Link href="/amazon/campaigns" className={s.marketCard}>
@@ -270,6 +270,7 @@ function buildDetail(m: MarketRow, consoleRows: ConsoleRow[], vendorRows: Vendor
       spend: money(r.spend, cur),
       orders: count(r.orders),
       cpo: j.costPerOrder != null ? money(j.costPerOrder, cur, { decimals: 2 }) : '—',
+      acos: j.acos != null ? pct(j.acos) : '—',
       verdict: j.label,
       tone: j.tone,
     }

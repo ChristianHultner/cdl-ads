@@ -135,6 +135,7 @@ export default async function CampaignPage({ params }: { params: Promise<{ profi
     return { label: x.label, tone: x.tone }
   }
   const per = (spend: number, orders: number) => (orders > 0 ? money(spend / orders, cur, { decimals: 2 }) : '—')
+  const acosOf = (spend: number, sales: number) => (sales > 0 ? pct(spend / sales) : '—')
   const m2 = (v: number | null) => (v == null ? '—' : money(v, cur, { decimals: 2 }))
 
   // ── Header ──
@@ -173,7 +174,7 @@ export default async function CampaignPage({ params }: { params: Promise<{ profi
       const v = k.has_perf ? verdictOf(k.spend, k.orders, k.sales) : { label: 'No data yet', tone: 'off' as Tone }
       return { key: `k${k.id}`, a: k.text, b: `${titleCase(k.match_type)} · ${m2(k.bid)}${upper(k.state) === 'PAUSED' ? ' · paused' : ''}`,
         clicks: k.has_perf ? count(k.clicks) : '—', spend: k.has_perf ? money(k.spend, cur, { decimals: 2 }) : '—', orders: k.has_perf ? count(k.orders) : '—',
-        cpo: k.has_perf ? per(k.spend, k.orders) : '—', note: v.label, tone: v.tone }
+        cpo: k.has_perf ? per(k.spend, k.orders) : '—', acos: k.has_perf ? acosOf(k.spend, k.sales) : '—', note: v.label, tone: v.tone }
     })
     const tg = tgRows.map(t => {
       const v = t.has_perf ? verdictOf(t.spend, t.orders, t.sales) : { label: 'No data yet', tone: 'off' as Tone }
@@ -184,27 +185,27 @@ export default async function CampaignPage({ params }: { params: Promise<{ profi
         : titleCase(t.expression_type ?? 'Target')
       return { key: `t${t.id}`, a: name, b: `Target · ${m2(t.bid)}${upper(t.state) === 'PAUSED' ? ' · paused' : ''}`,
         clicks: t.has_perf ? count(t.clicks) : '—', spend: t.has_perf ? money(t.spend, cur, { decimals: 2 }) : '—', orders: t.has_perf ? count(t.orders) : '—',
-        cpo: t.has_perf ? per(t.spend, t.orders) : '—', note: v.label, tone: v.tone }
+        cpo: t.has_perf ? per(t.spend, t.orders) : '—', acos: t.has_perf ? acosOf(t.spend, t.sales) : '—', note: v.label, tone: v.tone }
     })
     tabs.push({ key: 'kw', label: 'Keywords and targets', note: `What we bid on, with the last 30 days of each. Judged against ${unit ? `the ${m2(gp)} margin` : 'the ACoS target'}.`,
       heads: ['Keyword or target', 'Match · bid', 'Judged'], rows: [...kw, ...tg] })
     tabs.push({ key: 'st', label: 'Search terms', note: 'What shoppers actually typed before clicking, last 30 days. Winners become keywords; losers get stopped in Decisions.',
       heads: ['Search term', '', 'Judged'], rows: stRows.map(t => {
         const v = t.is_kw ? { label: 'Already a keyword', tone: 'off' as Tone } : verdictOf(t.spend, t.orders, t.sales)
-        return { key: `s${t.search_term}`, a: t.search_term, b: '', clicks: count(t.clicks), spend: money(t.spend, cur, { decimals: 2 }), orders: count(t.orders), cpo: per(t.spend, t.orders), note: v.label, tone: v.tone }
+        return { key: `s${t.search_term}`, a: t.search_term, b: '', clicks: count(t.clicks), spend: money(t.spend, cur, { decimals: 2 }), orders: count(t.orders), cpo: per(t.spend, t.orders), acos: acosOf(t.spend, t.sales), note: v.label, tone: v.tone }
       }) })
     tabs.push({ key: 'bk', label: 'Books advertised', note: 'The editions this campaign shows, with what each sold through the ads in the last 30 days.',
       heads: ['Edition', 'ASIN', 'Judged'], rows: bookRows.map(b => {
         const v = verdictOf(b.spend, b.orders, b.sales)
         return { key: `b${b.ad_id}`, a: b.title ?? b.asin ?? b.ad_id, b: `${b.asin ?? ''}${upper(b.state) === 'PAUSED' ? ' · paused' : ''}`,
-          clicks: count(b.clicks), spend: money(b.spend, cur, { decimals: 2 }), orders: count(b.orders), cpo: per(b.spend, b.orders), note: v.label, tone: v.tone }
+          clicks: count(b.clicks), spend: money(b.spend, cur, { decimals: 2 }), orders: count(b.orders), cpo: per(b.spend, b.orders), acos: acosOf(b.spend, b.sales), note: v.label, tone: v.tone }
       }) })
   }
   tabs.push({ key: 'ch', label: 'Changes sent', note: 'Every change we sent to Amazon for this campaign in the last 180 days. Results per change follow on the Results page.',
     heads: ['Change', 'Sent', ''], rows: pushedRows.map(p => {
       const v = describe({ recType: p.rec_type, targetText: p.target_text ?? '', proposal: p.proposal ?? '', campaignName: null, evidence: p.evidence ?? {},
         money: (x: number) => money(x, cur, { decimals: 2 }), count })
-      return { key: `p${p.id}`, a: v.title, b: p.pushed_at ? dayLabel(p.pushed_at) : '', clicks: '', spend: '', orders: '', cpo: '', note: v.kind, tone: 'off' as Tone }
+      return { key: `p${p.id}`, a: v.title, b: p.pushed_at ? dayLabel(p.pushed_at) : '', clicks: '', spend: '', orders: '', cpo: '', acos: '', note: v.kind, tone: 'off' as Tone }
     }) })
 
   return (

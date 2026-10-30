@@ -20,7 +20,7 @@ export type MarketDetail = {
     profit: (number | null)[]
   }
   gap: { label: string; units: number; orders: number } | null
-  top: { href: string; name: string; type: string; spend: string; orders: string; cpo: string; verdict: string; tone: Tone }[]
+  top: { href: string; name: string; type: string; spend: string; orders: string; cpo: string; acos: string; verdict: string; tone: Tone }[]
 }
 
 const TONE: Record<Tone, string> = { pay: s.pay, even: s.even, lose: s.lose, off: s.off }
@@ -184,17 +184,18 @@ export default function OverviewDetail({ markets }: { markets: MarketDetail[] })
             <Link href="/amazon/campaigns" style={{ fontWeight: 700, fontSize: 14 }}>All campaigns →</Link>
           </div>
           <div className={s.tableBox}>
-            <div style={{ minWidth: 760 }}>
-              <div className={s.thead} style={{ gridTemplateColumns: 'minmax(0,1fr) 140px 100px 80px 110px 140px' }}>
-                <span>Campaign</span><span>Type</span><span className={s.right}>Spend</span><span className={s.right}>Orders</span><span className={s.right}>Per order</span><span className={s.right}>{m.judgeHead}</span>
+            <div style={{ minWidth: 820 }}>
+              <div className={s.thead} style={{ gridTemplateColumns: 'minmax(0,1fr) 130px 96px 72px 104px 76px 140px' }}>
+                <span>Campaign</span><span>Type</span><span className={s.right}>Spend</span><span className={s.right}>Orders</span><span className={s.right}>Per order</span><span className={s.right}>ACoS</span><span className={s.right}>{m.judgeHead}</span>
               </div>
               {m.top.map(c => (
-                <div key={c.href} className={s.trow} style={{ gridTemplateColumns: 'minmax(0,1fr) 140px 100px 80px 110px 140px' }}>
+                <div key={c.href} className={s.trow} style={{ gridTemplateColumns: 'minmax(0,1fr) 130px 96px 72px 104px 76px 140px' }}>
                   <Link href={c.href} className={`${s.nameLink} ${s.ellipsis}`} title={c.name}>{c.name}</Link>
                   <span className={s.note} style={{ fontSize: 14 }}>{c.type}</span>
                   <span className={`${s.right} ${s.tn}`}>{c.spend}</span>
                   <span className={`${s.right} ${s.tn}`}>{c.orders}</span>
                   <span className={`${s.right} ${s.tn} ${s.strong}`}>{c.cpo}</span>
+                  <span className={`${s.right} ${s.tn}`}>{c.acos}</span>
                   <span className={s.right}><span className={`${s.chip} ${TONE[c.tone]}`}>{c.verdict}</span></span>
                 </div>
               ))}

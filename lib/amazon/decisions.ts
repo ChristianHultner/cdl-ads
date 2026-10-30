@@ -144,12 +144,14 @@ export function describe(d: DecisionInput): DecisionView {
   const spend = n(ev.spend)
   const clicks = n(ev.clicks)
   const orders = n(ev.orders)
+  const sales = n(ev.sales)
   const span = days(ev)
   const stats = [
     { k: span ? `Spend · ${span} days` : 'Spend', v: m(spend) },
     { k: 'Clicks', v: clicks == null ? '—' : count(clicks) },
     { k: 'Orders', v: orders == null ? '—' : count(orders) },
     { k: 'Per order', v: spend != null && orders != null && orders > 0 ? m(spend / orders) : '—' },
+    { k: 'ACoS', v: spend != null && sales != null && sales > 0 ? `${((spend / sales) * 100).toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` : '—' },
   ]
 
   const tr = ev.rule_track_record

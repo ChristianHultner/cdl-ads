@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { neon } from '@neondatabase/serverless'
-import { judge, money, count, marketName } from '@/lib/amazon/yardstick'
+import { judge, money, count, pct, marketName } from '@/lib/amazon/yardstick'
 import BooksGrid, { type BookCard, type BooksMarket } from './BooksGrid'
 import s from '../ui.module.css'
 
@@ -62,9 +62,10 @@ export default async function BooksPage({ searchParams }: { searchParams: Promis
         cpo: j.costPerOrder != null ? money(j.costPerOrder, cur, { decimals: 2 }) : '—',
         verdict: j.label,
         tone: j.tone,
-        foot: j.basis === 'unit'
-          ? (j.profitAfterAds != null ? `Profit after ads ${money(j.profitAfterAds, cur, { sign: true, decimals: Math.abs(j.profitAfterAds) >= 100 ? 0 : 2 })}` : '')
-          : (j.acos != null ? `ACoS ${(j.acos * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 })}%` : ''),
+        foot: [
+          j.basis === 'unit' && j.profitAfterAds != null ? `Profit after ads ${money(j.profitAfterAds, cur, { sign: true, decimals: Math.abs(j.profitAfterAds) >= 100 ? 0 : 2 })}` : '',
+          j.acos != null ? `ACoS ${pct(j.acos)}` : '',
+        ].filter(Boolean).join(' · '),
       }
     }).sort((a, b) => b.spendNum - a.spendNum)
     return { country, name: marketName(country), cards }

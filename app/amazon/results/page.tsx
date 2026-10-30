@@ -23,6 +23,18 @@ const WHAT: Record<string, string> = {
   'Swap an edition': 'A better-selling edition in the same ad', 'New campaign': 'New structures for proven terms', 'Targeting idea': 'Hand-picked new targets',
 }
 
+function median(xs: number[]): number | null {
+  if (xs.length === 0) return null
+  const v = [...xs].sort((a, b) => a - b)
+  const mid = Math.floor(v.length / 2)
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2
+}
+
+const gpOf = (r: JudgedRow): number | null => {
+  const g = r.judgment.gp_delta
+  return g != null && Number.isFinite(Number(g)) ? Number(g) : null
+}
+
 function kindOf(r: JudgedRow): string {
   if (r.rec_type === 'BID_ADJUST') return r.judgment.direction === 'RAISE' ? 'Raise a bid' : 'Lower a bid'
   return KIND[r.rec_type] ?? 'Other'
@@ -85,7 +97,8 @@ export default async function ResultsPage({ searchParams }: { searchParams: Prom
   const inPeriod = (ts: string | null | undefined) => !!ts && (period === 'all' || Date.parse(ts) >= since)
 
   const order = ['ES', 'US', 'MX', 'UK', 'CA']
-  const markets = [...new Set([...best.values()].map(r => r.country_code))]
+  const activeCountries = new Set(profileRows.map(p => p.country_code))
+  const markets = [...new Set([...best.values()].map(r => r.country_code))].filter(c => activeCountries.has(c))
     .sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99))
   const market = typeof sp.market === 'string' && markets.includes(sp.market) ? sp.market : markets[0] ?? 'ES'
   const prof = profileRows.find(p => p.country_code === market)
@@ -96,16 +109,17 @@ export default async function ResultsPage({ searchParams }: { searchParams: Prom
   const sent = pushedRows.filter(r => r.country_code === market && inPeriod(r.pushed_at)).length
   const worked = judgedRows.filter(r => r.judgment.verdict === 'WIN').length
   const stopped = judgedRows.reduce((t, r) => t + (Number(r.judgment.euros_stopped) || 0), 0)
-  const gpRows = judgedRows.filter(r => r.judgment.gp_delta != null && Number.isFinite(Number(r.judgment.gp_delta)))
-  const effect = gpRows.reduce((t, r) => t + Number(r.judgment.gp_delta), 0)
+  // Typical (median) profit change per graded change. Changes in the same campaign share
+  // that campaign's window, so their deltas are not added together.
+  const gps = judgedRows.map(gpOf).filter((g): g is number => g != null)
+  const effect = median(gps)
 
   const kinds = [...new Set(rows.map(kindOf))].map(kind => {
     const k = rows.filter(r => kindOf(r) === kind)
     const j = k.filter(r => r.judgment.verdict !== 'NO-DATA')
     const c = (v: string) => j.filter(r => r.judgment.verdict === v).length
-    const gp = j.filter(r => r.judgment.gp_delta != null).reduce((t, r) => t + Number(r.judgment.gp_delta), 0)
-    const anyGp = j.some(r => r.judgment.gp_delta != null)
-    return { kind, n: k.length, judged: j.length, win: c('WIN'), partial: c('PARTIAL') + c('REVIEW'), leak: c('LEAK'), gp: anyGp ? gp : null }
+    const gp = median(j.map(gpOf).filter((g): g is number => g != null))
+    return { kind, n: k.length, judged: j.length, win: c('WIN'), partial: c('PARTIAL') + c('REVIEW'), leak: c('LEAK'), gp }
   }).sort((a, b) => b.judged - a.judged)
 
   const href = (p: string, m: string) => `/amazon/results?period=${p}&market=${m}`
@@ -135,7 +149,7 @@ export default async function ResultsPage({ searchParams }: { searchParams: Prom
         <div className={s.card}><div className={s.label}>Changes sent</div><div className={`${s.big} ${s.tn}`}>{count(sent)}</div><div className={s.note}>graded so far: {count(judgedRows.length)}</div></div>
         <div className={s.card}><div className={s.label}>Worked</div><div className={`${s.big} ${s.tn}`}>{pctOf(worked, judgedRows.length)}</div><div className={s.note}>{count(worked)} of {count(judgedRows.length)} graded</div></div>
         <div className={s.card}><div className={s.label}>Spend stopped</div><div className={`${s.big} ${s.tn}`}>{money(stopped, cur)}</div><div className={s.note}>on searches and targets with no orders</div></div>
-        <div className={s.card}><div className={s.label}>Profit effect</div><div className={`${s.big} ${s.tn} ${effect < 0 ? s.neg : ''}`}>{gpRows.length ? money(effect, cur, { sign: true }) : '—'}</div><div className={s.note}>{gpRows.length ? `summed over ${count(gpRows.length)} graded changes, against the window before` : 'no profit grades yet'}</div></div>
+        <div className={s.card}><div className={s.label}>Typical profit change</div><div className={`${s.big} ${s.tn} ${effect != null && effect < 0 ? s.neg : ''}`}>{effect != null ? money(effect, cur, { sign: true, decimals: 2 }) : '—'}</div><div className={s.note}>{effect != null ? `median per change, ${count(gps.length)} graded, against the window before` : 'no profit grades yet'}</div></div>
       </div>
 
       <section className={s.card}>
@@ -166,7 +180,7 @@ export default async function ResultsPage({ searchParams }: { searchParams: Prom
               <div className={s.tn} style={{ flex: '0 0 170px', textAlign: 'right' }}>
                 <div style={{ fontWeight: 800, fontSize: 18 }}>{k.judged >= 10 ? pctOf(k.win, k.judged) : 'Too few'}</div>
                 <div className={s.note} style={{ fontSize: 12 }}>
-                  {count(k.judged)} graded{k.n > k.judged ? ` · ${count(k.n - k.judged)} waiting` : ''}{k.gp != null ? ` · ${money(k.gp, cur, { sign: true })}` : ''}
+                  {count(k.judged)} graded{k.n > k.judged ? ` · ${count(k.n - k.judged)} waiting` : ''}{k.gp != null ? ` · typical ${money(k.gp, cur, { sign: true, decimals: 2 })}` : ''}
                 </div>
               </div>
             </div>

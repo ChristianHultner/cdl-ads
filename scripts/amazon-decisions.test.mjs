@@ -10,12 +10,12 @@ const base = { money: eur, count, campaignName: 'ES · Mamá · Broad' };
 test('bid cut reads as a sentence with both bids', () => {
   const v = describe({ ...base, recType: 'BID_ADJUST', targetText: 'cuentos para dormir niños',
     proposal: "Lower bid on keyword from €0.62 to €0.48: 9 orders at €8.10 in 30d.",
-    evidence: { current_bid: 0.62, proposed_bid: 0.48, spend: 72.9, clicks: 118, orders: 9, window_start: '2026-09-30', window_end: '2026-10-29',
+    evidence: { current_bid: 0.62, proposed_bid: 0.48, spend: 72.9, sales: 145.8, clicks: 118, orders: 9, window_start: '2026-09-30', window_end: '2026-10-29',
       rule_track_record: { win_rate: 0.64, n: 53 } } });
   assert.equal(v.kind, 'Change a bid');
   assert.equal(v.title, 'Lower the bid on “cuentos para dormir niños” from 0,62 € to 0,48 €');
   assert.equal(v.why, '9 orders at €8.10 in 30d.');
-  assert.deepEqual(v.stats.map(s => s.v), ['72,90 €', '118', '9', '8,10 €']);
+  assert.deepEqual(v.stats.map(s => s.v), ['72,90 €', '118', '9', '8,10 €', '50,0%']);
   assert.equal(v.stats[0].k, 'Spend · 30 days');
   assert.equal(v.track, 'Changes like this worked 64% of the time (53 judged)');
   assert.equal(v.takesBid, true);
@@ -29,6 +29,7 @@ test('negation, pause and budget titles', () => {
     'Raise the daily budget in ES · Mamá · Broad from 15,00 € to 20,00 €');
   const neg = describe({ ...base, recType: 'NEGATE_TERM', targetText: 'x', proposal: 'p', evidence: { spend: 5, orders: 0 } });
   assert.equal(neg.stats[3].v, '—');
+  assert.equal(neg.stats[4].v, '—');
 });
 
 test('track record needs ten judged; unknown types fall back to the proposal', () => {

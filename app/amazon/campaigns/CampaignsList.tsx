@@ -7,7 +7,7 @@ import s from '../ui.module.css'
 
 export type ListRow = {
   key: string; href: string; name: string; type: string; status: string; budget: string
-  spend: string; spendNum: number; orders: string; cpo: string; verdict: string; tone: Tone; todo: number
+  spend: string; spendNum: number; orders: string; cpo: string; acos: string; verdict: string; tone: Tone; todo: number
 }
 export type ListMarket = {
   country: string; name: string; active: number
@@ -18,7 +18,7 @@ export type ListMarket = {
 const TONE: Record<Tone, string> = { pay: s.pay, even: s.even, lose: s.lose, off: s.off }
 const STATUSES = ['Active', 'Paused', 'Archived', 'All'] as const
 const TYPES = ['All', 'Products', 'Brands', 'Brand video', 'Display'] as const
-const COLS = 'minmax(0,1fr) 120px 84px 110px 100px 70px 100px 140px 76px'
+const COLS = 'minmax(0,1fr) 112px 76px 104px 96px 64px 96px 72px 136px 70px'
 
 export default function CampaignsList({ markets, initial }: { markets: ListMarket[]; initial: string }) {
   const [country, setCountry] = useState(initial)
@@ -66,10 +66,10 @@ export default function CampaignsList({ markets, initial }: { markets: ListMarke
 
       <section className={s.card} style={{ padding: '8px 24px 16px' }}>
         <div className={s.tableBox}>
-          <div style={{ minWidth: 1000 }}>
+          <div style={{ minWidth: 1080 }}>
             <div className={s.thead} style={{ gridTemplateColumns: COLS, padding: '12px 0' }}>
               <span>Campaign</span><span>Type</span><span>Status</span><span className={s.right}>Budget</span>
-              <span className={s.right}>Spend</span><span className={s.right}>Orders</span><span className={s.right}>Per order</span>
+              <span className={s.right}>Spend</span><span className={s.right}>Orders</span><span className={s.right}>Per order</span><span className={s.right}>ACoS</span>
               <span className={s.right}>{m.judgeHead}</span><span className={s.right}>To decide</span>
             </div>
             {rows.map(r => (
@@ -81,6 +81,7 @@ export default function CampaignsList({ markets, initial }: { markets: ListMarke
                 <span className={`${s.right} ${s.tn}`}>{r.spend}</span>
                 <span className={`${s.right} ${s.tn}`}>{r.orders}</span>
                 <span className={`${s.right} ${s.tn} ${s.strong}`}>{r.cpo}</span>
+                <span className={`${s.right} ${s.tn}`}>{r.acos}</span>
                 <span className={s.right}><span className={`${s.chip} ${TONE[r.tone]}`}>{r.verdict}</span></span>
                 <span className={`${s.right} ${s.tn} ${s.strong}`} style={{ color: '#7A4F00' }}>
                   {r.todo > 0 ? <Link href={`/amazon/decisions?market=${m.country}`} style={{ color: '#7A4F00' }}>{count(r.todo)}</Link> : ''}

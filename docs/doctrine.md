@@ -165,6 +165,17 @@ The 2026-10-11 backfill encountered Amazon HTTP 400 retention limits: SB cannot 
 
 The long-term chart reads source provenance separately from its metrics: when its market has `source='api'` months, the footer says `console exports + API (all ad types)`; otherwise it continues to say `console exports (all ad types)`. The source label must not imply that blocked September data has been published.
 
+## Amazon UI (rebuilt 2026-10-30)
+
+Christian approved a full rebuild of the Amazon pages (30 Oct 2026); design canvas "CDL Ads — Amazon redesign".
+
+- **Pages:** `/amazon` Overview · `/amazon/decisions` · `/amazon/campaigns` (+ campaign detail) · `/amazon/books` · `/amazon/results` · `/amazon/health`. `/amazon/engine` still renders this doctrine and is linked from Results. Old routes redirect: dashboard → `/amazon`, recommendations → decisions, scorecard → results, spend and accounts → health.
+- **One yardstick, display only** (`lib/amazon/yardstick.ts`): markets with `gp_per_order` are judged on cost per order against it, and profit after ads = orders × gp_per_order − spend; markets without it are judged on ACoS against `target_acos`. Break-even = within ±5%; under 10 of spend = too little data. ACoS is shown next to cost per order wherever spend and sales appear (Christian, 30 Oct). Currencies are never added together. Nothing here feeds the engine.
+- **Sources:** 30-day campaign figures on every page come from `CAMPAIGN_METRICS_CTE` (SP + SB + SB_LEGACY + SD). Monthly charts read `console_history` and `vendor_history` standalone, never joined.
+- **Decisions:** approve and reject use the same SQL as before (status leaves DRAFT only). Undo returns an APPROVED change that has not been sent back to DRAFT. Bulk approve skips CREATIVE_TARGET (needs a checked ASIN). Send uses the existing `/api/amazon/push-approved` route through `PushAllButton`.
+- **Results:** grades come from `app/lib/scorecard.ts`, unchanged; each change is graded once (t14, else t30, else t7). Profit change is shown as the median per graded change, never summed, because changes in one campaign share that campaign's window.
+- **Look:** `app/amazon/ui.module.css`; Fraunces and Nunito Sans are loaded in `app/amazon/layout.tsx`; CDL tokens (luz #0093D0, sky #E9F5FB, ink #1E2A32, gold #F5B32B).
+
 ## GP Basis
 
 **Ruling (migration 028, 2026-08-27):** Engine GP is computed as `purchases_14d × gp_per_order − spend`, per profile, in native currency. No FX conversion is ever applied.

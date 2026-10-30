@@ -5,11 +5,11 @@ import type { Tone } from '@/lib/amazon/yardstick'
 import s from '../../../ui.module.css'
 
 export type Week = { label: string; value: number | null; spend: number; change: boolean; tip: string }
-export type DetailRow = { key: string; a: string; b: string; clicks: string; spend: string; orders: string; cpo: string; note: string; tone: Tone }
+export type DetailRow = { key: string; a: string; b: string; clicks: string; spend: string; orders: string; cpo: string; acos: string; note: string; tone: Tone }
 export type DetailTab = { key: string; label: string; note: string; heads: [string, string, string]; rows: DetailRow[] }
 
 const TONE: Record<Tone, string> = { pay: s.pay, even: s.even, lose: s.lose, off: s.off }
-const COLS = 'minmax(0,1fr) 170px 80px 100px 70px 100px 150px'
+const COLS = 'minmax(0,1fr) 160px 72px 96px 64px 96px 72px 150px'
 const H = 180
 
 export default function CampaignDetail({ weeks, line, lineLabel, unit, tabs, chartTitle }: {
@@ -70,11 +70,12 @@ export default function CampaignDetail({ weeks, line, lineLabel, unit, tabs, cha
           <section className={s.card} style={{ padding: '8px 24px 16px' }}>
             <div className={s.note} style={{ padding: '14px 0 4px' }}>{tab.note}</div>
             <div className={s.tableBox}>
-              <div style={{ minWidth: 880 }}>
+              <div style={{ minWidth: 940 }}>
                 <div className={s.thead} style={{ gridTemplateColumns: COLS, padding: '12px 0' }}>
                   <span>{tab.heads[0]}</span><span>{tab.heads[1]}</span>
                   <span className={s.right}>{showCpo ? 'Clicks' : ''}</span><span className={s.right}>{showCpo ? 'Spend' : ''}</span>
                   <span className={s.right}>{showCpo ? 'Orders' : ''}</span><span className={s.right}>{showCpo ? 'Per order' : ''}</span>
+                  <span className={s.right}>{showCpo ? 'ACoS' : ''}</span>
                   <span className={s.right}>{tab.heads[2]}</span>
                 </div>
                 {tab.rows.map(r => (
@@ -85,6 +86,7 @@ export default function CampaignDetail({ weeks, line, lineLabel, unit, tabs, cha
                     <span className={`${s.right} ${s.tn}`}>{r.spend}</span>
                     <span className={`${s.right} ${s.tn}`}>{r.orders}</span>
                     <span className={`${s.right} ${s.tn} ${s.strong}`}>{r.cpo}</span>
+                    <span className={`${s.right} ${s.tn}`}>{r.acos}</span>
                     <span className={s.right}><span className={`${s.chip} ${TONE[r.tone]}`}>{r.note}</span></span>
                   </div>
                 ))}
