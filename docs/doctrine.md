@@ -169,6 +169,16 @@ The long-term chart reads source provenance separately from its metrics: when it
 
 Christian approved (15 Nov 2026) publishing each complete month automatically, because nothing had written October into `console_history` and the monthly charts stopped at September. The Vercel step `publish-month` runs at 08:20 UTC on the 15th and publishes the previous calendar month for ES, US and MX with `source='api'`: SP + SB + SB_LEGACY + SD spend, sales and orders, `units` NULL. It publishes a market only when every day of the month has an INGESTED receipt for all four report types, and only once the month is at least 8 days old (the nightly request re-pulls the last seven complete days). A `console_export` row is never overwritten; an `api` row is refreshed. A market that fails the coverage check makes the step fail, which surfaces on Health. `scripts/publish-api-month.mjs --month YYYY-MM [--dry-run]` runs the same function by hand (October 2026 was published that way). UK and CA are not qualified and are not published.
 
+## Launcher summary (2026-11-15)
+
+`GET /api/summary` feeds the Ads card on the staff launcher (dashboard.cuentodeluz.com); contract in the CDL Dashboard project doc `claude/launcher-summary-contract-2026-11-15.md`. Christian approved the cards on 15 Nov 2026.
+
+- **Read-only, behind the normal Cloudflare Access gate.** The launcher calls it from the viewer's browser with the viewer's own Access session, so the response allows only the origin `https://dashboard.cuentodeluz.com` with credentials, and is never cached.
+- **Every figure is one this app already shows.** Nightly steps not run or with a problem use the Data health rule (latest run per step in the last 30 hours, the six nightly steps). "Changes to approve" is the Overview's DRAFT count. Spend and ACoS are the 30-day `CAMPAIGN_METRICS_CTE` totals for one market in its own currency: the US if it has spend, else the next market that does. Currencies are never added together.
+- **Never a zero for something unknown.** If any query fails the route answers 503 and the launcher shows "No status".
+
+---
+
 ## Amazon UI (rebuilt 2026-10-30)
 
 Christian approved a full rebuild of the Amazon pages (30 Oct 2026); design canvas "CDL Ads — Amazon redesign".
