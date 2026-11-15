@@ -165,6 +165,10 @@ The 2026-10-11 backfill encountered Amazon HTTP 400 retention limits: SB cannot 
 
 The long-term chart reads source provenance separately from its metrics: when its market has `source='api'` months, the footer says `console exports + API (all ad types)`; otherwise it continues to say `console exports (all ad types)`. The source label must not imply that blocked September data has been published.
 
+### Automatic monthly publication (2026-11-15)
+
+Christian approved (15 Nov 2026) publishing each complete month automatically, because nothing had written October into `console_history` and the monthly charts stopped at September. The Vercel step `publish-month` runs at 08:20 UTC on the 15th and publishes the previous calendar month for ES, US and MX with `source='api'`: SP + SB + SB_LEGACY + SD spend, sales and orders, `units` NULL. It publishes a market only when every day of the month has an INGESTED receipt for all four report types, and only once the month is at least 8 days old (the nightly request re-pulls the last seven complete days). A `console_export` row is never overwritten; an `api` row is refreshed. A market that fails the coverage check makes the step fail, which surfaces on Health. `scripts/publish-api-month.mjs --month YYYY-MM [--dry-run]` runs the same function by hand (October 2026 was published that way). UK and CA are not qualified and are not published.
+
 ## Amazon UI (rebuilt 2026-10-30)
 
 Christian approved a full rebuild of the Amazon pages (30 Oct 2026); design canvas "CDL Ads — Amazon redesign".

@@ -11,7 +11,7 @@ import { Pool, neonConfig, type PoolClient } from '@neondatabase/serverless'
 import { gunzipSync } from 'node:zlib'
 
 export const KNOWN_STEPS = [
-  'request-reports', 'ingest-reports', 'structure', 'rollup', 'sweep', 'stamp',
+  'request-reports', 'ingest-reports', 'structure', 'rollup', 'sweep', 'stamp', 'publish-month',
 ] as const
 export type KnownStep = (typeof KNOWN_STEPS)[number]
 export const ACTIVE_PROFILE_IDS = [
@@ -463,7 +463,7 @@ async function stepQuery(client: PoolClient, deadline: number, sql: string, valu
   return client.query(sql, values)
 }
 
-type MaintenanceStep = Exclude<KnownStep, 'request-reports' | 'ingest-reports'>
+type MaintenanceStep = Exclude<KnownStep, 'request-reports' | 'ingest-reports' | 'publish-month'>
 async function maintenanceStep(client: PoolClient, step: MaintenanceStep, started: number): Promise<StepResult> {
   const deadline = started + CLEANUP_DEADLINE_MS
   const profiles = await activeProfiles(client)
@@ -1141,6 +1141,7 @@ export async function runStep(step: KnownStep): Promise<StepResult> {
     result = !locked ? { ok: true, rows: 0, detail: 'Already running' }
       : step === 'request-reports' ? await requestReports(client, started)
       : step === 'ingest-reports' ? await ingestReports(client, started)
+      : step === 'publish-month' ? await publishMonth(client, previousMonth(new Date()))
       : await maintenanceStep(client, step, started)
   } catch (err) {
     result = { ...result, ok: false, detail: errorDetail(err) }
@@ -1327,4 +1328,97 @@ export const REPORTS: Record<Exclude<ReportType, 'sbLegacyCampaigns'>, ReportSpe
             row,
     ],
   },
+}
+
+// ── Monthly publication: console_history rows with source='api' ───────────────
+// Doctrine (2026-10-11 ruling; automated 2026-11-15, Christian): API SP+SB+SB_LEGACY+SD
+// is the monthly all-ad-types source from 2026-10 for the qualified markets. One complete
+// calendar month at a time, only with an INGESTED receipt for every day and report type,
+// never overwriting a console_export row. Units stay NULL (not collected).
+export const PUBLISH_MARKETS = ['ES', 'US', 'MX'] as const
+export const PUBLISH_REPORT_TYPES = ['spCampaigns', 'sbCampaigns', 'sdCampaigns', 'sbLegacyCampaigns'] as const
+export const PUBLISH_SETTLE_DAYS = 8 // request-reports re-pulls the last seven complete days
+const DAY_MS = 86_400_000
+
+export function previousMonth(today: Date): { year: number; month: number } {
+  const y = today.getUTCFullYear(), m = today.getUTCMonth() + 1
+  return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 }
+}
+export function monthBounds(year: number, month: number): { start: string; end: string; days: number } {
+  const days = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  const mm = String(month).padStart(2, '0')
+  return { start: `${year}-${mm}-01`, end: `${year}-${mm}-${String(days).padStart(2, '0')}`, days }
+}
+export function monthSettled(year: number, month: number, today: Date): boolean {
+  return today.getTime() >= Date.UTC(year, month, 0) + PUBLISH_SETTLE_DAYS * DAY_MS
+}
+
+type Queryable = Pick<PoolClient, 'query'>
+export async function publishMonth(
+  client: Queryable, target: { year: number; month: number },
+  opts: { dryRun?: boolean; today?: Date } = {},
+): Promise<StepResult> {
+  const { year, month } = target
+  const label = `${year}-${String(month).padStart(2, '0')}`
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) throw new SyncError('Bad month')
+  if (!monthSettled(year, month, opts.today ?? new Date())) {
+    return { ok: false, rows: 0, detail: `PUBLISH ${label}: not settled yet (needs ${PUBLISH_SETTLE_DAYS} days after month end)` }
+  }
+  const { start, end, days } = monthBounds(year, month)
+  const notes: string[] = []
+  let rows = 0, failures = 0
+  for (const market of PUBLISH_MARKETS) {
+    const { rows: profiles } = await client.query<{ profile_id: string; currency: string }>(
+      `SELECT profile_id::text, currency_code AS currency FROM amazon_profiles
+       WHERE country_code = $1 AND is_active AND profile_id = ANY($2::bigint[])`,
+      [market, ACTIVE_PROFILE_IDS],
+    )
+    if (profiles.length !== 1) { failures++; notes.push(`${market} profiles=${profiles.length}`); continue }
+    const { profile_id: profile, currency } = profiles[0]
+    const { rows: cover } = await client.query<{ report_type: string; covered: number }>(
+      `SELECT t.report_type, count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM amazon_report_requests q
+         WHERE q.profile_id = $1 AND q.report_type = t.report_type AND q.status = 'INGESTED'
+           AND g.d BETWEEN q.start_date AND q.end_date))::int AS covered
+       FROM unnest($4::text[]) AS t(report_type)
+       CROSS JOIN generate_series($2::date, $3::date, interval '1 day') AS g(d)
+       GROUP BY t.report_type`,
+      [profile, start, end, PUBLISH_REPORT_TYPES],
+    )
+    const short = cover.filter(c => c.covered !== days)
+    if (cover.length !== PUBLISH_REPORT_TYPES.length || short.length) {
+      failures++
+      notes.push(`${market} incomplete ${short.map(c => `${c.report_type} ${c.covered}/${days}`).join(' ') || 'receipts'}`)
+      continue
+    }
+    const { rows: existing } = await client.query<{ source: string }>(
+      'SELECT source FROM console_history WHERE market = $1 AND year = $2 AND month = $3', [market, year, month],
+    )
+    if (existing.length && existing[0].source !== 'api') { notes.push(`${market} kept ${existing[0].source}`); continue }
+    const { rows: [m] } = await client.query<{ spend: string; sales: string; orders: string }>(
+      `WITH x AS (
+         SELECT cost, sales_14d AS sales, purchases_14d AS orders FROM amazon_campaign_daily
+         WHERE profile_id = $1 AND date BETWEEN $2::date AND $3::date
+         UNION ALL
+         SELECT cost, sales, purchases FROM amazon_campaign_daily_other
+         WHERE profile_id = $1 AND date BETWEEN $2::date AND $3::date AND ad_product IN ('SB','SB_LEGACY','SD'))
+       SELECT round(coalesce(sum(cost), 0)::numeric, 2)::text AS spend,
+              round(coalesce(sum(sales), 0)::numeric, 2)::text AS sales,
+              round(coalesce(sum(orders), 0))::bigint::text AS orders
+       FROM x`,
+      [profile, start, end],
+    )
+    notes.push(`${market} ${currency} spend=${m.spend} sales=${m.sales} orders=${m.orders}${opts.dryRun ? ' (dry run)' : ''}`)
+    if (opts.dryRun) continue
+    const res = await client.query(
+      `INSERT INTO console_history (market, currency, year, month, spend, sales, orders, units, source, imported_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, 'api', now())
+       ON CONFLICT (market, year, month) DO UPDATE SET currency = EXCLUDED.currency, spend = EXCLUDED.spend,
+         sales = EXCLUDED.sales, orders = EXCLUDED.orders, units = NULL, imported_at = now()
+       WHERE console_history.source = 'api'`,
+      [market, currency, year, month, m.spend, m.sales, m.orders],
+    )
+    rows += res.rowCount ?? 0
+  }
+  return { ok: failures === 0, rows, detail: `PUBLISH ${label}: ${notes.join('; ')}`.slice(0, 500) }
 }

@@ -47,6 +47,10 @@
     {
       "path": "/api/amazon/sync/stamp",
       "schedule": "50 7 * * *"
+    },
+    {
+      "path": "/api/amazon/sync/publish-month",
+      "schedule": "20 8 15 * *"
     }
   ],
   "functions": {
